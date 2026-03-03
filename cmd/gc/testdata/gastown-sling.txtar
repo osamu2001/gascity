@@ -21,7 +21,7 @@ stderr 'requires 1 or 2 arguments'
 
 exec bd create 'Test work'
 ! exec gc sling nonexistent gc-1
-stderr 'not found in config'
+stderr 'not found in city.toml'
 
 # --- 3. Sling to suspended agent warns ---
 

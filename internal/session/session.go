@@ -5,14 +5,19 @@
 // [Fake] provides a test double with spy capabilities.
 package session
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Provider manages agent sessions. Implementations handle the details
 // of creating, destroying, and connecting to running agent processes.
 type Provider interface {
 	// Start creates a new session with the given name and configuration.
+	// The context controls the overall startup deadline — providers should
+	// check ctx.Err() between steps and abort early on cancellation.
 	// Returns an error if a session with that name already exists.
-	Start(name string, cfg Config) error
+	Start(ctx context.Context, name string, cfg Config) error
 
 	// Stop destroys the named session and cleans up its resources.
 	// Returns nil if the session does not exist (idempotent).

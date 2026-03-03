@@ -47,7 +47,7 @@ func NewProviderWithConfig(cfg Config) *Provider {
 // detection, command launch verification, permission warning dismissal,
 // and runtime readiness polling. Steps are conditional on Config fields
 // being set; an agent with no startup hints gets fire-and-forget.
-func (p *Provider) Start(name string, cfg session.Config) error {
+func (p *Provider) Start(_ context.Context, name string, cfg session.Config) error {
 	// Store workDir for CopyTo.
 	if cfg.WorkDir != "" {
 		p.mu.Lock()

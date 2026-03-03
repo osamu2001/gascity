@@ -157,7 +157,7 @@ func cmdAgentDrain(args []string, stdout, stderr io.Writer) int {
 	}
 	found, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintf(stderr, "gc agent drain: agent %q not found in city.toml\n", agentName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent drain", agentName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	agentName = found.QualifiedName()
@@ -235,7 +235,7 @@ func cmdAgentUndrain(args []string, stdout, stderr io.Writer) int {
 	}
 	found, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintf(stderr, "gc agent undrain: agent %q not found in city.toml\n", agentName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent undrain", agentName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	agentName = found.QualifiedName()
@@ -313,7 +313,7 @@ func cmdAgentDrainCheck(args []string, stderr io.Writer) int {
 		}
 		found, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 		if !ok {
-			fmt.Fprintf(stderr, "gc agent drain-check: agent %q not found in city.toml\n", agentName) //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, agentNotFoundMsg("gc agent drain-check", agentName, cfg)) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		agentName = found.QualifiedName()
@@ -400,7 +400,7 @@ func cmdAgentDrainAck(args []string, stdout, stderr io.Writer) int {
 		}
 		found, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 		if !ok {
-			fmt.Fprintf(stderr, "gc agent drain-ack: agent %q not found in city.toml\n", agentName) //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, agentNotFoundMsg("gc agent drain-ack", agentName, cfg)) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		agentName = found.QualifiedName()

@@ -956,6 +956,24 @@ func ValidateAgents(agents []Agent) error {
 		}
 		seen[key] = true
 		sourceOf[key] = a.SourceDir
+		// Scope enum.
+		switch a.Scope {
+		case "", "city", "rig":
+			// valid
+		default:
+			return fmt.Errorf("agent %q: scope must be \"city\", \"rig\", or empty, got %q", a.QualifiedName(), a.Scope)
+		}
+		// PromptMode enum.
+		switch a.PromptMode {
+		case "", "arg", "flag", "none":
+			// valid
+		default:
+			return fmt.Errorf("agent %q: prompt_mode must be \"arg\", \"flag\", \"none\", or empty, got %q", a.QualifiedName(), a.PromptMode)
+		}
+		// PromptFlag required when prompt_mode = "flag".
+		if a.PromptMode == "flag" && a.PromptFlag == "" {
+			return fmt.Errorf("agent %q: prompt_flag is required when prompt_mode = \"flag\"", a.QualifiedName())
+		}
 		if a.Pool != nil {
 			if a.Pool.Min < 0 {
 				return fmt.Errorf("agent %q: pool min must be >= 0", a.Name)

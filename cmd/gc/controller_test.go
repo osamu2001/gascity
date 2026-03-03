@@ -103,7 +103,7 @@ func TestControllerLockExclusion(t *testing.T) {
 func TestControllerShutdown(t *testing.T) {
 	sp := session.NewFake()
 	// Pre-start an agent to verify shutdown stops it.
-	_ = sp.Start("gc-test-mayor", session.Config{Command: "echo hello"})
+	_ = sp.Start(context.Background(), "gc-test-mayor", session.Config{Command: "echo hello"})
 	a := agent.New("mayor", "test", "echo hello", "", nil, agent.StartupHints{}, "", "", nil, sp)
 
 	buildFn := func(_ *config.City, _ session.Provider) []agent.Agent {

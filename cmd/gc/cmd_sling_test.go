@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -343,7 +344,7 @@ func TestDoSlingFormulaInstantiationError(t *testing.T) {
 func TestDoSlingNudgeFixedAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := session.NewFake()
-	_ = sp.Start("gc-test-city-mayor", session.Config{})
+	_ = sp.Start(context.Background(), "gc-test-city-mayor", session.Config{})
 	sp.Calls = nil // clear start call
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor"}
@@ -415,7 +416,7 @@ func TestDoSlingNudgePoolMember(t *testing.T) {
 	runner := newFakeRunner()
 	sp := session.NewFake()
 	// Start pool instance 2 (instance 1 not running).
-	_ = sp.Start("gc-test-city-hw--polecat-2", session.Config{})
+	_ = sp.Start(context.Background(), "gc-test-city-hw--polecat-2", session.Config{})
 	sp.Calls = nil
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{
@@ -1041,7 +1042,7 @@ func TestDoSlingBatchAllChildrenFail(t *testing.T) {
 func TestDoSlingBatchNudgeOnceAfterAll(t *testing.T) {
 	runner := newFakeRunner()
 	sp := session.NewFake()
-	_ = sp.Start("gc-test-city-mayor", session.Config{})
+	_ = sp.Start(context.Background(), "gc-test-city-mayor", session.Config{})
 	sp.Calls = nil
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor"}
@@ -1475,7 +1476,7 @@ func TestBatchOnNudgeOnce(t *testing.T) {
 	runner := newFakeRunner()
 	runner.on("bd mol cook", "WP-1\n", nil)
 	sp := session.NewFake()
-	_ = sp.Start("gc-test-city-mayor", session.Config{})
+	_ = sp.Start(context.Background(), "gc-test-city-mayor", session.Config{})
 	sp.Calls = nil
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor"}
@@ -1802,7 +1803,7 @@ func TestDryRunBatchOnFormula(t *testing.T) {
 func TestDryRunNudgeRunning(t *testing.T) {
 	runner := newFakeRunner()
 	sp := session.NewFake()
-	_ = sp.Start("gc-test-city-mayor", session.Config{})
+	_ = sp.Start(context.Background(), "gc-test-city-mayor", session.Config{})
 	sp.Calls = nil
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor"}
@@ -2634,7 +2635,7 @@ func TestDoSlingOnFormulaCrossRigForceOverrides(t *testing.T) {
 func TestDoSlingBatchAllIdempotentNoNudge(t *testing.T) {
 	runner := newFakeRunner()
 	sp := session.NewFake()
-	_ = sp.Start("gc-test-city-mayor", session.Config{})
+	_ = sp.Start(context.Background(), "gc-test-city-mayor", session.Config{})
 	sp.Calls = nil
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor"}

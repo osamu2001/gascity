@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 
 func TestDoAgentStatus(t *testing.T) {
 	sp := session.NewFake()
-	if err := sp.Start("gc-city-worker", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-worker", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 	dops := newFakeDrainOps()
@@ -59,7 +60,7 @@ func TestDoAgentStatusStopped(t *testing.T) {
 
 func TestDoAgentStatusDraining(t *testing.T) {
 	sp := session.NewFake()
-	if err := sp.Start("gc-city-worker", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-worker", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 	dops := newFakeDrainOps()
@@ -102,7 +103,7 @@ func TestDoAgentStatusSuspended(t *testing.T) {
 
 func TestDoRigStatus(t *testing.T) {
 	sp := session.NewFake()
-	if err := sp.Start("gc-city-frontend--polecat", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-frontend--polecat", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 	// worker is NOT running.
@@ -162,7 +163,7 @@ func TestDoRigStatusSuspendedRig(t *testing.T) {
 
 func TestDoRigStatusWithDraining(t *testing.T) {
 	sp := session.NewFake()
-	if err := sp.Start("gc-city-frontend--worker-1", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-frontend--worker-1", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 	dops := newFakeDrainOps()

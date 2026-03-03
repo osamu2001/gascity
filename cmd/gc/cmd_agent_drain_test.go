@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -141,7 +142,7 @@ func (f *fakeDrainOps) clearDriftRestart(sessionName string) error {
 func TestDoAgentDrain(t *testing.T) {
 	dops := newFakeDrainOps()
 	sp := session.NewFake()
-	if err := sp.Start("gc-city-worker", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-worker", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -183,7 +184,7 @@ func TestDoAgentDrainSetError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	sp := session.NewFake()
-	if err := sp.Start("gc-city-worker", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-worker", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -205,7 +206,7 @@ func TestDoAgentUndrain(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.draining["gc-city-worker"] = true
 	sp := session.NewFake()
-	if err := sp.Start("gc-city-worker", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-worker", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -324,7 +325,7 @@ func TestNewDrainOpsAlwaysReturnsNonNil(t *testing.T) {
 func TestProviderDrainOpsRoundTrip(t *testing.T) {
 	// Verify drain ops work through Provider meta interface.
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-worker", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker", session.Config{})
 	dops := newDrainOps(sp)
 
 	// Not draining initially.
@@ -411,7 +412,7 @@ func TestRequestRestartAcceptsNoArgs(t *testing.T) {
 
 func TestProviderDrainOpsRestartRequestedRoundTrip(t *testing.T) {
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-worker", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker", session.Config{})
 	dops := newDrainOps(sp)
 
 	// Not requested initially.
@@ -441,7 +442,7 @@ func TestProviderDrainOpsRestartRequestedRoundTrip(t *testing.T) {
 
 func TestProviderDrainOpsDriftRestartRoundTrip(t *testing.T) {
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-worker", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker", session.Config{})
 	dops := newDrainOps(sp)
 
 	// Not drift-restart initially.

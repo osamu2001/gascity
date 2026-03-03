@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -73,14 +74,18 @@ func (f *Fake) IsRunning() bool {
 	return f.Running
 }
 
-// Start records the call. Sleeps for StartDelay if set.
-// Returns StartErr if set; otherwise sets Running=true.
-func (f *Fake) Start() error {
+// Start records the call. Sleeps for StartDelay if set, respecting
+// context cancellation. Returns StartErr if set; otherwise sets Running=true.
+func (f *Fake) Start(ctx context.Context) error {
 	f.mu.Lock()
 	delay := f.StartDelay
 	f.mu.Unlock()
 	if delay > 0 {
-		time.Sleep(delay)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()

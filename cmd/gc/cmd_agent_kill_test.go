@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 
 func TestDoAgentKill(t *testing.T) {
 	sp := session.NewFake()
-	if err := sp.Start("gc-city-worker", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-worker", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -60,7 +61,7 @@ func TestDoAgentKillStopError(t *testing.T) {
 	// FailFake returns false for IsRunning, so we need a custom approach.
 	// Use a regular fake and inject a stop error via a wrapper.
 	sp2 := session.NewFake()
-	if err := sp2.Start("gc-city-worker", session.Config{Command: "echo"}); err != nil {
+	if err := sp2.Start(context.Background(), "gc-city-worker", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 	_ = sp // unused

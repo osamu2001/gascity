@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1353,7 +1354,7 @@ func TestInitFromSkip(t *testing.T) {
 
 func TestDoStopOneAgentRunning(t *testing.T) {
 	sp := session.NewFake()
-	_ = sp.Start("gc-bright-lights-mayor", session.Config{})
+	_ = sp.Start(context.Background(), "gc-bright-lights-mayor", session.Config{})
 	f := agent.NewFake("mayor", "gc-bright-lights-mayor")
 	f.Running = true
 
@@ -1413,8 +1414,8 @@ func TestDoStopAgentNotRunning(t *testing.T) {
 
 func TestDoStopMultipleAgents(t *testing.T) {
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-mayor", session.Config{})
-	_ = sp.Start("gc-city-worker", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-mayor", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker", session.Config{})
 	mayor := agent.NewFake("mayor", "gc-city-mayor")
 	mayor.Running = true
 	worker := agent.NewFake("worker", "gc-city-worker")

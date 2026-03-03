@@ -1,6 +1,9 @@
 package session
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // Compile-time check: Fake implements Provider.
 var _ Provider = (*Fake)(nil)
@@ -8,7 +11,7 @@ var _ Provider = (*Fake)(nil)
 func TestFake_StartStop(t *testing.T) {
 	f := NewFake()
 
-	if err := f.Start("mayor", Config{WorkDir: "/tmp"}); err != nil {
+	if err := f.Start(context.Background(), "mayor", Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if !f.IsRunning("mayor") {
@@ -16,7 +19,7 @@ func TestFake_StartStop(t *testing.T) {
 	}
 
 	// Duplicate start should fail.
-	if err := f.Start("mayor", Config{}); err == nil {
+	if err := f.Start(context.Background(), "mayor", Config{}); err == nil {
 		t.Fatal("expected error on duplicate Start")
 	}
 
@@ -41,7 +44,7 @@ func TestFake_Attach(t *testing.T) {
 		t.Fatal("expected error attaching to nonexistent session")
 	}
 
-	_ = f.Start("mayor", Config{})
+	_ = f.Start(context.Background(), "mayor", Config{})
 	if err := f.Attach("mayor"); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -50,7 +53,7 @@ func TestFake_Attach(t *testing.T) {
 func TestFailFake_AllOpsFail(t *testing.T) {
 	f := NewFailFake()
 
-	if err := f.Start("mayor", Config{WorkDir: "/tmp"}); err == nil {
+	if err := f.Start(context.Background(), "mayor", Config{WorkDir: "/tmp"}); err == nil {
 		t.Fatal("expected Start to fail on broken fake")
 	}
 	if f.IsRunning("mayor") {
@@ -67,7 +70,7 @@ func TestFailFake_AllOpsFail(t *testing.T) {
 func TestFailFake_RecordsCalls(t *testing.T) {
 	f := NewFailFake()
 
-	_ = f.Start("a", Config{})
+	_ = f.Start(context.Background(), "a", Config{})
 	f.IsRunning("a")
 	_ = f.Attach("a")
 	_ = f.Stop("a")
@@ -86,7 +89,7 @@ func TestFailFake_RecordsCalls(t *testing.T) {
 func TestFake_SpyRecordsCalls(t *testing.T) {
 	f := NewFake()
 
-	_ = f.Start("a", Config{WorkDir: "/w"})
+	_ = f.Start(context.Background(), "a", Config{WorkDir: "/w"})
 	f.IsRunning("a")
 	_ = f.Attach("a")
 	_ = f.Stop("a")
@@ -122,7 +125,7 @@ func TestFake_CapturesAllConfigFields(t *testing.T) {
 		ProcessNames:           []string{"claude", "node"},
 		EmitsPermissionWarning: true,
 	}
-	if err := f.Start("mayor", cfg); err != nil {
+	if err := f.Start(context.Background(), "mayor", cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -155,7 +158,7 @@ func TestFake_CapturesAllConfigFields(t *testing.T) {
 
 func TestFakeProcessAliveDefault(t *testing.T) {
 	f := NewFake()
-	_ = f.Start("mayor", Config{})
+	_ = f.Start(context.Background(), "mayor", Config{})
 
 	if !f.ProcessAlive("mayor", []string{"claude"}) {
 		t.Error("ProcessAlive = false for healthy session, want true")
@@ -164,7 +167,7 @@ func TestFakeProcessAliveDefault(t *testing.T) {
 
 func TestFakeProcessAliveZombie(t *testing.T) {
 	f := NewFake()
-	_ = f.Start("mayor", Config{})
+	_ = f.Start(context.Background(), "mayor", Config{})
 	f.Zombies["mayor"] = true
 
 	if f.ProcessAlive("mayor", []string{"claude"}) {
@@ -174,7 +177,7 @@ func TestFakeProcessAliveZombie(t *testing.T) {
 
 func TestFakeProcessAliveEmptyNames(t *testing.T) {
 	f := NewFake()
-	_ = f.Start("mayor", Config{})
+	_ = f.Start(context.Background(), "mayor", Config{})
 	f.Zombies["mayor"] = true // zombie, but no names to check
 
 	if !f.ProcessAlive("mayor", nil) {
@@ -192,7 +195,7 @@ func TestFakeProcessAliveBroken(t *testing.T) {
 
 func TestFakeNudge(t *testing.T) {
 	f := NewFake()
-	_ = f.Start("mayor", Config{})
+	_ = f.Start(context.Background(), "mayor", Config{})
 
 	if err := f.Nudge("mayor", "wake up"); err != nil {
 		t.Fatalf("Nudge: %v", err)
@@ -238,7 +241,7 @@ func TestFakeNudgeBroken(t *testing.T) {
 
 func TestFakeSetGetMeta(t *testing.T) {
 	f := NewFake()
-	_ = f.Start("mayor", Config{})
+	_ = f.Start(context.Background(), "mayor", Config{})
 
 	if err := f.SetMeta("mayor", "GC_DRAIN", "123"); err != nil {
 		t.Fatalf("SetMeta: %v", err)
@@ -277,9 +280,9 @@ func TestFakeRemoveMeta(t *testing.T) {
 
 func TestFakeListRunning(t *testing.T) {
 	f := NewFake()
-	_ = f.Start("gc-city-mayor", Config{})
-	_ = f.Start("gc-city-worker", Config{})
-	_ = f.Start("gc-other-agent", Config{})
+	_ = f.Start(context.Background(), "gc-city-mayor", Config{})
+	_ = f.Start(context.Background(), "gc-city-worker", Config{})
+	_ = f.Start(context.Background(), "gc-other-agent", Config{})
 
 	names, err := f.ListRunning("gc-city-")
 	if err != nil {
@@ -292,7 +295,7 @@ func TestFakeListRunning(t *testing.T) {
 
 func TestFakePeek(t *testing.T) {
 	f := NewFake()
-	_ = f.Start("mayor", Config{})
+	_ = f.Start(context.Background(), "mayor", Config{})
 	f.SetPeekOutput("mayor", "line1\nline2\n")
 
 	output, err := f.Peek("mayor", 50)

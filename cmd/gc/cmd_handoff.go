@@ -104,7 +104,7 @@ func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) in
 	// Resolve target agent.
 	found, ok := resolveAgentIdentity(cfg, target, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintf(stderr, "gc handoff: agent %q not found in city.toml\n", target) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg("gc handoff", target, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	targetName := found.QualifiedName()

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"reflect"
@@ -470,9 +471,9 @@ func TestPoolAgentsOverlayDirCopied(t *testing.T) {
 func TestCountRunningPoolInstancesUsesListRunning(t *testing.T) {
 	sp := session.NewFake()
 	// Start 3 out of 5 pool instances.
-	_ = sp.Start("gc-city-worker-1", session.Config{})
-	_ = sp.Start("gc-city-worker-3", session.Config{})
-	_ = sp.Start("gc-city-worker-5", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker-1", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker-3", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker-5", session.Config{})
 
 	count := countRunningPoolInstances("worker", "", 5, "city", "", sp)
 	if count != 3 {
@@ -483,8 +484,8 @@ func TestCountRunningPoolInstancesUsesListRunning(t *testing.T) {
 func TestCountRunningPoolInstancesWithDir(t *testing.T) {
 	sp := session.NewFake()
 	// Rig-scoped pool: dir/name pattern.
-	_ = sp.Start("gc-city-myrig--worker-1", session.Config{})
-	_ = sp.Start("gc-city-myrig--worker-2", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-myrig--worker-1", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-myrig--worker-2", session.Config{})
 
 	count := countRunningPoolInstances("worker", "myrig", 3, "city", "", sp)
 	if count != 2 {

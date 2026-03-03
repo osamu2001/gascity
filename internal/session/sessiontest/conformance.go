@@ -12,6 +12,7 @@
 package sessiontest
 
 import (
+	"context"
 	"testing"
 
 	"github.com/steveyegge/gascity/internal/session"
@@ -31,7 +32,7 @@ func RunProviderTests(t *testing.T, newSession Factory) {
 
 	t.Run("SharedSession", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
-		if err := sp.Start(name, cfg); err != nil {
+		if err := sp.Start(context.Background(), name, cfg); err != nil {
 			t.Fatalf("Start shared session: %v", err)
 		}
 		t.Cleanup(func() { _ = sp.Stop(name) })
@@ -49,7 +50,7 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 
 	t.Run("Start_CreatesRunningSession", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
-		if err := sp.Start(name, cfg); err != nil {
+		if err := sp.Start(context.Background(), name, cfg); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
 		t.Cleanup(func() { _ = sp.Stop(name) })
@@ -61,12 +62,12 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 
 	t.Run("Start_DuplicateReturnsError", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
-		if err := sp.Start(name, cfg); err != nil {
+		if err := sp.Start(context.Background(), name, cfg); err != nil {
 			t.Fatalf("first Start: %v", err)
 		}
 		t.Cleanup(func() { _ = sp.Stop(name) })
 
-		err := sp.Start(name, cfg)
+		err := sp.Start(context.Background(), name, cfg)
 		if err == nil {
 			t.Error("second Start should return error for duplicate name")
 		}
@@ -74,7 +75,7 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 
 	t.Run("Stop_MakesSessionNotRunning", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
-		if err := sp.Start(name, cfg); err != nil {
+		if err := sp.Start(context.Background(), name, cfg); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
 		if err := sp.Stop(name); err != nil {
@@ -95,7 +96,7 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 
 	t.Run("Stop_Idempotent_AlreadyStopped", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
-		if err := sp.Start(name, cfg); err != nil {
+		if err := sp.Start(context.Background(), name, cfg); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
 		if err := sp.Stop(name); err != nil {
@@ -117,13 +118,13 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 
 	t.Run("ListRunning_FindsSessions", func(t *testing.T) {
 		sp, cfg1, name1 := newSession(t)
-		if err := sp.Start(name1, cfg1); err != nil {
+		if err := sp.Start(context.Background(), name1, cfg1); err != nil {
 			t.Fatalf("Start %s: %v", name1, err)
 		}
 		t.Cleanup(func() { _ = sp.Stop(name1) })
 
 		_, cfg2, name2 := newSession(t)
-		if err := sp.Start(name2, cfg2); err != nil {
+		if err := sp.Start(context.Background(), name2, cfg2); err != nil {
 			t.Fatalf("Start %s: %v", name2, err)
 		}
 		t.Cleanup(func() { _ = sp.Stop(name2) })
@@ -142,13 +143,13 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 
 	t.Run("ListRunning_PrefixFiltering", func(t *testing.T) {
 		sp, cfg1, name1 := newSession(t)
-		if err := sp.Start(name1, cfg1); err != nil {
+		if err := sp.Start(context.Background(), name1, cfg1); err != nil {
 			t.Fatalf("Start %s: %v", name1, err)
 		}
 		t.Cleanup(func() { _ = sp.Stop(name1) })
 
 		_, cfg2, name2 := newSession(t)
-		if err := sp.Start(name2, cfg2); err != nil {
+		if err := sp.Start(context.Background(), name2, cfg2); err != nil {
 			t.Fatalf("Start %s: %v", name2, err)
 		}
 		t.Cleanup(func() { _ = sp.Stop(name2) })
@@ -168,7 +169,7 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 
 	t.Run("ListRunning_ExcludesStopped", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
-		if err := sp.Start(name, cfg); err != nil {
+		if err := sp.Start(context.Background(), name, cfg); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
 		if err := sp.Stop(name); err != nil {
@@ -186,7 +187,7 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 
 	t.Run("ListRunning_EmptyPrefix", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
-		if err := sp.Start(name, cfg); err != nil {
+		if err := sp.Start(context.Background(), name, cfg); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
 		t.Cleanup(func() { _ = sp.Stop(name) })
@@ -204,7 +205,7 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 
 	t.Run("ProcessAlive_EmptyNamesReturnsTrue", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
-		if err := sp.Start(name, cfg); err != nil {
+		if err := sp.Start(context.Background(), name, cfg); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
 		t.Cleanup(func() { _ = sp.Stop(name) })
@@ -216,7 +217,7 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 
 	t.Run("ProcessAlive_FalseAfterStop", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
-		if err := sp.Start(name, cfg); err != nil {
+		if err := sp.Start(context.Background(), name, cfg); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
 		if err := sp.Stop(name); err != nil {

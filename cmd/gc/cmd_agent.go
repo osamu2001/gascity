@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -233,7 +234,7 @@ func cmdAgentAttach(args []string, stdout, stderr io.Writer) int {
 		if len(cfg.Agents) == 0 {
 			fmt.Fprintln(stderr, "gc agent attach: no agents configured; run 'gc init' to set up your city") //nolint:errcheck // best-effort stderr
 		} else {
-			fmt.Fprintf(stderr, "gc agent attach: agent %q not found in city.toml\n", agentName) //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, agentNotFoundMsg("gc agent attach", agentName, cfg)) //nolint:errcheck // best-effort stderr
 		}
 		return 1
 	}
@@ -266,7 +267,7 @@ func cmdAgentAttach(args []string, stdout, stderr io.Writer) int {
 // It is idempotent: starts the session if not already running, then attaches.
 func doAgentAttach(a agent.Agent, stdout, stderr io.Writer) int {
 	if !a.IsRunning() {
-		if err := a.Start(); err != nil {
+		if err := a.Start(context.Background()); err != nil {
 			fmt.Fprintf(stderr, "gc agent attach: starting session: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -387,7 +388,7 @@ func doAgentSuspend(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 	// Resolve the input to find the target agent (supports bare names and qualified names).
 	resolved, ok := resolveAgentIdentity(cfg, name, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintf(stderr, "gc agent suspend: agent %q not found in city.toml\n", name) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent suspend", name, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	found := false
@@ -399,7 +400,7 @@ func doAgentSuspend(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 		}
 	}
 	if !found {
-		fmt.Fprintf(stderr, "gc agent suspend: agent %q not found in city.toml\n", name) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent suspend", name, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -462,7 +463,7 @@ func doAgentResume(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) 
 	// Resolve the input to find the target agent (supports bare names and qualified names).
 	resolved, ok := resolveAgentIdentity(cfg, name, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintf(stderr, "gc agent resume: agent %q not found in city.toml\n", name) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent resume", name, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	found := false
@@ -474,7 +475,7 @@ func doAgentResume(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) 
 		}
 	}
 	if !found {
-		fmt.Fprintf(stderr, "gc agent resume: agent %q not found in city.toml\n", name) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent resume", name, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -536,7 +537,7 @@ func cmdAgentNudge(args []string, stdout, stderr io.Writer) int {
 	// Validate agent exists in config.
 	found, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintf(stderr, "gc agent nudge: agent %q not found in city.toml\n", agentName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent nudge", agentName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -607,7 +608,7 @@ func cmdAgentPeek(args []string, lines int, stdout, stderr io.Writer) int {
 	// Validate agent exists in config.
 	found, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintf(stderr, "gc agent peek: agent %q not found in city.toml\n", agentName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent peek", agentName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -686,7 +687,7 @@ func cmdAgentKill(args []string, stdout, stderr io.Writer) int {
 	}
 	found, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintf(stderr, "gc agent kill: agent %q not found in city.toml\n", agentName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent kill", agentName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	agentName = found.QualifiedName()

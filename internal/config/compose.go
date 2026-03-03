@@ -161,6 +161,9 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// Validate all duration strings in the fully-merged config.
 	prov.Warnings = append(prov.Warnings, ValidateDurations(root, path)...)
 
+	// Validate cross-entity semantic constraints.
+	prov.Warnings = append(prov.Warnings, ValidateSemantics(root, path)...)
+
 	return root, prov, nil
 }
 

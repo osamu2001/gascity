@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -15,10 +16,10 @@ func TestDoRigRestart(t *testing.T) {
 	sp := session.NewFake()
 	// Start 2 sessions for agents in the rig.
 	// SessionNameFor replaces "/" with "--".
-	if err := sp.Start("gc-city-frontend--polecat", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-frontend--polecat", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := sp.Start("gc-city-frontend--worker", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-frontend--worker", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -82,10 +83,10 @@ func TestDoRigRestartWithPool(t *testing.T) {
 	sp := session.NewFake()
 	// Pool agent with Max=3, only 2 running.
 	// SessionNameFor replaces "/" with "--".
-	if err := sp.Start("gc-city-frontend--worker-1", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-frontend--worker-1", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := sp.Start("gc-city-frontend--worker-2", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-frontend--worker-2", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 	// worker-3 is NOT running.
@@ -123,7 +124,7 @@ func TestDoRigRestartWithPool(t *testing.T) {
 func TestDoRigRestartStopError(t *testing.T) {
 	// When Stop fails, the agent is skipped but the command still succeeds.
 	sp := session.NewFake()
-	if err := sp.Start("gc-city-frontend--polecat", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-frontend--polecat", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 	wrapper := &stopErrorProvider{Fake: sp, stopErr: fmt.Errorf("tmux borked")}

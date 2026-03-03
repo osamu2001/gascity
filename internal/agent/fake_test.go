@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -11,7 +12,7 @@ var _ Agent = (*Fake)(nil)
 
 func TestFakeStart(t *testing.T) {
 	f := NewFake("mayor", "gc-city-mayor")
-	if err := f.Start(); err != nil {
+	if err := f.Start(context.Background()); err != nil {
 		t.Fatalf("Start() = %v, want nil", err)
 	}
 	if !f.Running {
@@ -32,7 +33,7 @@ func TestFakeStartError(t *testing.T) {
 	f := NewFake("mayor", "gc-city-mayor")
 	f.StartErr = fmt.Errorf("boom")
 
-	err := f.Start()
+	err := f.Start(context.Background())
 	if err == nil {
 		t.Fatal("Start() = nil, want error")
 	}

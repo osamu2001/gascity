@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -58,7 +59,7 @@ func NewFailFake() *Fake {
 
 // Start creates a fake session. Returns an error if the name is taken.
 // When broken, always returns an error.
-func (f *Fake) Start(name string, cfg Config) error {
+func (f *Fake) Start(_ context.Context, name string, cfg Config) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "Start", Name: name, Config: cfg})

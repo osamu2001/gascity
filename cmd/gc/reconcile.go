@@ -183,7 +183,7 @@ func doReconcileAgents(agents []agent.Agent,
 					fmt.Fprintf(stderr, "gc start: stopping %s for restart: %v\n", a.Name(), err) //nolint:errcheck // best-effort stderr
 					continue
 				}
-				if err := a.Start(); err != nil {
+				if err := a.Start(context.Background()); err != nil {
 					fmt.Fprintf(stderr, "gc start: restarting %s: %v\n", a.Name(), err) //nolint:errcheck // best-effort stderr
 					continue
 				}
@@ -218,7 +218,7 @@ func doReconcileAgents(agents []agent.Agent,
 				fmt.Fprintf(stderr, "gc start: stopping idle %s: %v\n", a.Name(), err) //nolint:errcheck // best-effort stderr
 				continue
 			}
-			if err := a.Start(); err != nil {
+			if err := a.Start(context.Background()); err != nil {
 				fmt.Fprintf(stderr, "gc start: restarting idle %s: %v\n", a.Name(), err) //nolint:errcheck // best-effort stderr
 				continue
 			}
@@ -258,7 +258,7 @@ func doReconcileAgents(agents []agent.Agent,
 						fmt.Fprintf(stderr, "gc start: stopping %s for drift restart: %v\n", a.Name(), err) //nolint:errcheck // best-effort stderr
 						continue
 					}
-					if err := a.Start(); err != nil {
+					if err := a.Start(context.Background()); err != nil {
 						fmt.Fprintf(stderr, "gc start: restarting %s after drift drain: %v\n", a.Name(), err) //nolint:errcheck // best-effort stderr
 						continue
 					}
@@ -315,7 +315,7 @@ func doReconcileAgents(agents []agent.Agent,
 				fmt.Fprintf(stderr, "gc start: stopping %s for restart: %v\n", a.Name(), err) //nolint:errcheck // best-effort stderr
 				continue
 			}
-			if err := a.Start(); err != nil {
+			if err := a.Start(context.Background()); err != nil {
 				fmt.Fprintf(stderr, "gc start: restarting %s: %v\n", a.Name(), err) //nolint:errcheck // best-effort stderr
 				continue
 			}
@@ -333,6 +333,8 @@ func doReconcileAgents(agents []agent.Agent,
 
 	// Phase 1b (parallel): Start all pending agents concurrently.
 	// Each goroutine writes to its own slot — no shared writes.
+	// Context carries the startup timeout so cancellation propagates
+	// cleanly to the session provider (no goroutine leak).
 	type startResult struct {
 		agent   agent.Agent
 		reason  string
@@ -346,22 +348,14 @@ func doReconcileAgents(agents []agent.Agent,
 		go func(idx int, a agent.Agent, reason string) {
 			defer wg.Done()
 			t0 := time.Now()
-			if startupTimeout <= 0 {
-				err := a.Start()
-				results[idx] = startResult{agent: a, reason: reason, err: err, elapsed: time.Since(t0)}
-				return
+			ctx := context.Background()
+			if startupTimeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, startupTimeout)
+				defer cancel()
 			}
-			done := make(chan error, 1)
-			go func() { done <- a.Start() }()
-			select {
-			case err := <-done:
-				results[idx] = startResult{agent: a, reason: reason, err: err, elapsed: time.Since(t0)}
-			case <-time.After(startupTimeout):
-				results[idx] = startResult{
-					agent: a, reason: reason,
-					err: fmt.Errorf("startup timed out after %s", startupTimeout), elapsed: time.Since(t0),
-				}
-			}
+			err := a.Start(ctx)
+			results[idx] = startResult{agent: a, reason: reason, err: err, elapsed: time.Since(t0)}
 		}(i, c.agent, c.reason)
 	}
 	wg.Wait()

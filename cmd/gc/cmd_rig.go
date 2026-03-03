@@ -378,7 +378,7 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		}
 	}
 	if !found {
-		fmt.Fprintf(stderr, "gc rig suspend: rig %q not found in city.toml\n", rigName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig suspend", rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -446,7 +446,7 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		}
 	}
 	if !found {
-		fmt.Fprintf(stderr, "gc rig resume: rig %q not found in city.toml\n", rigName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig resume", rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

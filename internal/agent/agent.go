@@ -8,6 +8,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -27,8 +28,9 @@ type Agent interface {
 	// IsRunning reports whether the agent's session is active.
 	IsRunning() bool
 
-	// Start creates the agent's session.
-	Start() error
+	// Start creates the agent's session. The context controls the startup
+	// deadline — the call returns early with ctx.Err() on cancellation.
+	Start(ctx context.Context) error
 
 	// Stop destroys the agent's session.
 	Stop() error
@@ -213,8 +215,8 @@ func (a *managed) SessionConfig() session.Config {
 	}
 }
 
-func (a *managed) Start() error {
-	return a.sp.Start(a.sessionName, a.SessionConfig())
+func (a *managed) Start(ctx context.Context) error {
+	return a.sp.Start(ctx, a.sessionName, a.SessionConfig())
 }
 
 // shellQuote wraps s in single quotes, escaping any embedded single quotes

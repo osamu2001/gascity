@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -120,7 +121,7 @@ func TestReconcileStopsOrphans(t *testing.T) {
 	rops := newFakeReconcileOps()
 	rops.running["gc-city-oldagent"] = true
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-oldagent", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-oldagent", session.Config{})
 	sp.Calls = nil // reset spy
 
 	var stdout, stderr bytes.Buffer
@@ -530,8 +531,8 @@ func TestDoStopOrphans(t *testing.T) {
 	rops.running["gc-city-orphan"] = true
 	rops.running["gc-city-mayor"] = true
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-orphan", session.Config{})
-	_ = sp.Start("gc-city-mayor", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-orphan", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-mayor", session.Config{})
 	sp.Calls = nil
 
 	desired := map[string]bool{"gc-city-mayor": true}
@@ -692,7 +693,7 @@ func TestReconcileMixedStates(t *testing.T) {
 	rops.running["gc-city-oldagent"] = true
 
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-oldagent", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-oldagent", session.Config{})
 	sp.Calls = nil
 
 	agents := []agent.Agent{newAgent, healthy, drifted}
@@ -839,7 +840,7 @@ func TestReconcileZombieCaptureEmitsEvent(t *testing.T) {
 	f.Running = false // agent process dead
 
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-worker", session.Config{}) // tmux session alive
+	_ = sp.Start(context.Background(), "gc-city-worker", session.Config{}) // tmux session alive
 	sp.SetPeekOutput("gc-city-worker", "panic: runtime error: index out of range\ngoroutine 1 [running]:")
 	sp.Calls = nil // reset spy
 
@@ -907,7 +908,7 @@ func TestReconcileZombieEmptyPeekIgnored(t *testing.T) {
 	f.Running = false
 
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-worker", session.Config{}) // zombie session
+	_ = sp.Start(context.Background(), "gc-city-worker", session.Config{}) // zombie session
 	// No SetPeekOutput — defaults to empty string.
 	sp.Calls = nil
 
@@ -950,9 +951,9 @@ func TestNewReconcileOpsAlwaysReturnsNonNil(t *testing.T) {
 func TestProviderReconcileOpsRoundTrip(t *testing.T) {
 	// Verify reconcile ops work through Provider meta/list interface.
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-mayor", session.Config{})
-	_ = sp.Start("gc-city-worker", session.Config{})
-	_ = sp.Start("gc-other-agent", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-mayor", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker", session.Config{})
+	_ = sp.Start(context.Background(), "gc-other-agent", session.Config{})
 	rops := newReconcileOps(sp)
 
 	// listRunning with prefix filter.
@@ -1010,7 +1011,7 @@ func TestReconcileDrainsExcessPool(t *testing.T) {
 		"gc-city-worker-3": 5 * time.Minute,
 	}
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-worker-3", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker-3", session.Config{})
 	sp.Calls = nil
 
 	agents := []agent.Agent{w1, w2}
@@ -1048,7 +1049,7 @@ func TestReconcileKillsTrueOrphan(t *testing.T) {
 		"gc-city-worker-2": 5 * time.Minute,
 	}
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-unknown", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-unknown", session.Config{})
 	sp.Calls = nil
 
 	var stdout, stderr bytes.Buffer
@@ -1108,7 +1109,7 @@ func TestReconcileDrainAckReap(t *testing.T) {
 		"gc-city-worker-3": 5 * time.Minute,
 	}
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-worker-3", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker-3", session.Config{})
 	sp.Calls = nil
 
 	var stdout, stderr bytes.Buffer
@@ -1163,7 +1164,7 @@ func TestReconcileNilDrainOpsFallback(t *testing.T) {
 		"gc-city-worker-3": 5 * time.Minute,
 	}
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-worker-3", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker-3", session.Config{})
 	sp.Calls = nil
 
 	var stdout, stderr bytes.Buffer
@@ -1184,7 +1185,7 @@ func TestReconcilePoolSessionsNil(t *testing.T) {
 	rops.running["gc-city-worker-3"] = true
 	dops := newFakeDrainOps()
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-worker-3", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker-3", session.Config{})
 	sp.Calls = nil
 
 	var stdout, stderr bytes.Buffer
@@ -1212,7 +1213,7 @@ func TestReconcileDrainTimeout(t *testing.T) {
 		"gc-city-worker-3": 5 * time.Minute,
 	}
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-worker-3", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker-3", session.Config{})
 	sp.Calls = nil
 
 	var stdout, stderr bytes.Buffer
@@ -1241,7 +1242,7 @@ func TestReconcileDrainNotTimedOut(t *testing.T) {
 		"gc-city-worker-3": 5 * time.Minute,
 	}
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-worker-3", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker-3", session.Config{})
 	sp.Calls = nil
 
 	var stdout, stderr bytes.Buffer
@@ -1270,7 +1271,7 @@ func TestReconcileDrainTimeoutZero(t *testing.T) {
 		"gc-city-worker-3": 0, // no timeout
 	}
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-worker-3", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker-3", session.Config{})
 	sp.Calls = nil
 
 	var stdout, stderr bytes.Buffer
@@ -1414,7 +1415,7 @@ func TestReconcileSuspendedAgentMessaging(t *testing.T) {
 	rops := newFakeReconcileOps()
 	rops.running["gc-city-builder"] = true
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-builder", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-builder", session.Config{})
 	sp.Calls = nil
 	rec := events.NewFake()
 
@@ -1446,7 +1447,7 @@ func TestReconcileOrphanNotSuspended(t *testing.T) {
 	rops := newFakeReconcileOps()
 	rops.running["gc-city-oldagent"] = true
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-oldagent", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-oldagent", session.Config{})
 	sp.Calls = nil
 
 	// Empty suspended set — everything is an orphan.
@@ -1705,8 +1706,8 @@ func TestReconcileIdleKillCountsAsRestart(t *testing.T) {
 func TestGracefulStopAllZeroTimeout(t *testing.T) {
 	// Zero timeout → immediate kill, no Interrupt calls.
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-mayor", session.Config{})
-	_ = sp.Start("gc-city-worker", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-mayor", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-worker", session.Config{})
 	sp.Calls = nil
 	rec := events.NewFake()
 
@@ -1741,7 +1742,7 @@ func TestGracefulStopAllZeroTimeout(t *testing.T) {
 func TestGracefulStopAllWithTimeout(t *testing.T) {
 	// Non-zero timeout → Interrupt called for all, then Stop survivors.
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-mayor", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-mayor", session.Config{})
 	sp.Calls = nil
 	rec := events.NewFake()
 
@@ -1786,7 +1787,7 @@ func TestGracefulStopAllEmpty(t *testing.T) {
 func TestGracefulStopAllAgentExitsGracefully(t *testing.T) {
 	// Agent is already gone by the time pass 2 checks → "exited gracefully".
 	sp := session.NewFake()
-	_ = sp.Start("gc-city-mayor", session.Config{})
+	_ = sp.Start(context.Background(), "gc-city-mayor", session.Config{})
 	sp.Calls = nil
 	rec := events.NewFake()
 
@@ -2046,9 +2047,9 @@ func TestReconcileStartupTimeout(t *testing.T) {
 		t.Fatalf("code = %d, want 0", code)
 	}
 
-	// Should report timeout error.
-	if !strings.Contains(stderr.String(), "startup timed out") {
-		t.Errorf("stderr = %q, want startup timeout message", stderr.String())
+	// Should report timeout error (context deadline exceeded).
+	if !strings.Contains(stderr.String(), "context deadline exceeded") {
+		t.Errorf("stderr = %q, want context deadline exceeded message", stderr.String())
 	}
 	// Should NOT report a successful start.
 	if strings.Contains(stdout.String(), "Started agent") {

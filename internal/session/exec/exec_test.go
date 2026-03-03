@@ -1,6 +1,7 @@
 package exec //nolint:revive // internal package, always imported with alias
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,7 +55,7 @@ func TestStart(t *testing.T) {
 	script := writeScript(t, dir, allOpsScript())
 	p := NewProvider(script)
 
-	err := p.Start("test-sess", session.Config{
+	err := p.Start(context.Background(), "test-sess", session.Config{
 		WorkDir: "/tmp",
 		Command: "echo hello",
 		Env:     map[string]string{"FOO": "bar"},
@@ -78,7 +79,7 @@ esac
 `)
 	p := NewProvider(script)
 
-	err := p.Start("test-sess", session.Config{
+	err := p.Start(context.Background(), "test-sess", session.Config{
 		WorkDir: "/tmp/work",
 		Command: "claude",
 		Env:     map[string]string{"KEY": "val"},
@@ -466,7 +467,7 @@ esac
 	// But startTimeout is long enough.
 	p.startTimeout = 5 * time.Second
 
-	err := p.Start("test-sess", session.Config{Command: "echo hi"})
+	err := p.Start(context.Background(), "test-sess", session.Config{Command: "echo hi"})
 	if err != nil {
 		t.Fatalf("Start should succeed with startTimeout, got: %v", err)
 	}

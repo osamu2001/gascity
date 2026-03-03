@@ -1,6 +1,7 @@
 package subprocess
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,7 +19,7 @@ func newTestProvider(t *testing.T) *Provider {
 
 func TestStartCreatesProcess(t *testing.T) {
 	p := newTestProvider(t)
-	err := p.Start("test", session.Config{Command: "sleep 3600"})
+	err := p.Start(context.Background(), "test", session.Config{Command: "sleep 3600"})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -31,12 +32,12 @@ func TestStartCreatesProcess(t *testing.T) {
 
 func TestStartDuplicateNameFails(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start("dup", session.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "dup", session.Config{Command: "sleep 3600"}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	defer p.Stop("dup") //nolint:errcheck
 
-	err := p.Start("dup", session.Config{Command: "sleep 3600"})
+	err := p.Start(context.Background(), "dup", session.Config{Command: "sleep 3600"})
 	if err == nil {
 		t.Fatal("expected error for duplicate name")
 	}
@@ -44,7 +45,7 @@ func TestStartDuplicateNameFails(t *testing.T) {
 
 func TestStartReusesDeadName(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start("reuse", session.Config{Command: "true"}); err != nil {
+	if err := p.Start(context.Background(), "reuse", session.Config{Command: "true"}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	time.Sleep(200 * time.Millisecond)
@@ -52,7 +53,7 @@ func TestStartReusesDeadName(t *testing.T) {
 		t.Fatal("expected process to have exited")
 	}
 
-	if err := p.Start("reuse", session.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "reuse", session.Config{Command: "sleep 3600"}); err != nil {
 		t.Fatalf("second Start: %v", err)
 	}
 	defer p.Stop("reuse") //nolint:errcheck
@@ -64,7 +65,7 @@ func TestStartReusesDeadName(t *testing.T) {
 
 func TestStopKillsProcess(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start("kill", session.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "kill", session.Config{Command: "sleep 3600"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := p.Stop("kill"); err != nil {
@@ -84,7 +85,7 @@ func TestStopIdempotent(t *testing.T) {
 
 func TestStopDeadProcess(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start("dead", session.Config{Command: "true"}); err != nil {
+	if err := p.Start(context.Background(), "dead", session.Config{Command: "true"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	time.Sleep(200 * time.Millisecond)
@@ -96,7 +97,7 @@ func TestStopDeadProcess(t *testing.T) {
 
 func TestIsRunningFalseAfterExit(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start("short", session.Config{Command: "true"}); err != nil {
+	if err := p.Start(context.Background(), "short", session.Config{Command: "true"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	time.Sleep(200 * time.Millisecond)
@@ -125,7 +126,7 @@ func TestEnvPassedToProcess(t *testing.T) {
 	marker := filepath.Join(dir, "env.txt")
 
 	p := newTestProvider(t)
-	err := p.Start("env-test", session.Config{
+	err := p.Start(context.Background(), "env-test", session.Config{
 		Command: "echo $GC_TEST_VAR > " + marker,
 		Env:     map[string]string{"GC_TEST_VAR": "hello-from-subprocess"},
 	})
@@ -154,7 +155,7 @@ func TestWorkDirSet(t *testing.T) {
 	marker := filepath.Join(dir, "pwd.txt")
 
 	p := newTestProvider(t)
-	err := p.Start("workdir-test", session.Config{
+	err := p.Start(context.Background(), "workdir-test", session.Config{
 		Command: "pwd > " + marker,
 		WorkDir: dir,
 	})
@@ -181,7 +182,7 @@ func TestWorkDirSet(t *testing.T) {
 
 func TestPIDFileWritten(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start("pid-check", session.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "pid-check", session.Config{Command: "sleep 3600"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer p.Stop("pid-check") //nolint:errcheck
@@ -198,7 +199,7 @@ func TestPIDFileWritten(t *testing.T) {
 
 func TestPIDFileRemovedAfterStop(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Start("cleanup", session.Config{Command: "sleep 3600"}); err != nil {
+	if err := p.Start(context.Background(), "cleanup", session.Config{Command: "sleep 3600"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := p.Stop("cleanup"); err != nil {
@@ -216,7 +217,7 @@ func TestCrossProcessStopByPID(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "pids")
 
 	p1 := NewProviderWithDir(dir)
-	if err := p1.Start("cross", session.Config{Command: "sleep 3600"}); err != nil {
+	if err := p1.Start(context.Background(), "cross", session.Config{Command: "sleep 3600"}); err != nil {
 		t.Fatalf("p1.Start: %v", err)
 	}
 

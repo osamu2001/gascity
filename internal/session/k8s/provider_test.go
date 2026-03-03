@@ -337,7 +337,7 @@ func TestStartRequiresImage(t *testing.T) {
 	p := newProviderWithOps(fake)
 	p.image = "" // no image
 
-	err := p.Start("test", session.Config{})
+	err := p.Start(context.Background(), "test", session.Config{})
 	if err == nil {
 		t.Fatal("Start should fail without image")
 	}
@@ -362,7 +362,7 @@ func TestStartCreatesPodsAndWaits(t *testing.T) {
 			"GC_CITY":  "/workspace",
 		},
 	}
-	err := p.Start("gc-test-agent", cfg)
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestStartDetectsStalePod(t *testing.T) {
 			"GC_CITY":  "/workspace",
 		},
 	}
-	err := p.Start("gc-test-agent", cfg)
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err != nil {
 		t.Fatalf("Start with stale pod: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestStartRejectsExistingLiveSession(t *testing.T) {
 		Command: "claude",
 		Env:     map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
 	}
-	err := p.Start("gc-test-agent", cfg)
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err == nil {
 		t.Fatal("Start should fail for existing live session")
 	}
@@ -783,7 +783,7 @@ func TestStartSkipsStagingWhenPrebaked(t *testing.T) {
 		},
 		OverlayDir: "/some/overlay",
 	}
-	err := p.Start("gc-test-agent", cfg)
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err != nil {
 		t.Fatalf("Start prebaked: %v", err)
 	}

@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -49,7 +50,7 @@ func TestProvider_StartStopIsRunning(t *testing.T) {
 		t.Fatal("session should not exist before Start")
 	}
 
-	if err := p.Start(name, session.Config{Command: "sleep 300"}); err != nil {
+	if err := p.Start(context.Background(), name, session.Config{Command: "sleep 300"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer func() { _ = p.Stop(name) }()
@@ -59,7 +60,7 @@ func TestProvider_StartStopIsRunning(t *testing.T) {
 	}
 
 	// Duplicate start returns an error.
-	if err := p.Start(name, session.Config{}); err == nil {
+	if err := p.Start(context.Background(), name, session.Config{}); err == nil {
 		t.Fatal("duplicate Start should return error")
 	}
 
@@ -86,7 +87,7 @@ func TestProvider_StartWithEnv(t *testing.T) {
 	name := "gc-test-adapter-env"
 	_ = p.Stop(name)
 
-	err := p.Start(name, session.Config{
+	err := p.Start(context.Background(), name, session.Config{
 		Command: "sleep 300",
 		Env:     map[string]string{"GC_TEST": "hello"},
 	})

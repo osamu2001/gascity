@@ -3,6 +3,7 @@
 package hybrid
 
 import (
+	"context"
 	"time"
 
 	"github.com/steveyegge/gascity/internal/session"
@@ -32,8 +33,8 @@ func (p *Provider) route(name string) session.Provider {
 }
 
 // Start delegates to the routed backend.
-func (p *Provider) Start(name string, cfg session.Config) error {
-	return p.route(name).Start(name, cfg)
+func (p *Provider) Start(ctx context.Context, name string, cfg session.Config) error {
+	return p.route(name).Start(ctx, name, cfg)
 }
 
 // Stop delegates to the routed backend.

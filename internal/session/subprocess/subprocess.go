@@ -15,6 +15,7 @@
 package subprocess
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -67,7 +68,7 @@ func NewProviderWithDir(dir string) *Provider {
 // Returns an error if a session with that name is already running.
 // Startup hints (ReadyPromptPrefix, ProcessNames, etc.) are ignored —
 // all sessions are fire-and-forget.
-func (p *Provider) Start(name string, cfg session.Config) error {
+func (p *Provider) Start(_ context.Context, name string, cfg session.Config) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 

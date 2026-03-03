@@ -175,7 +175,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 
 	a, ok := resolveAgentIdentity(cfg, target, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintf(stderr, "gc sling: target %q not found in config\n", target) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg("gc sling", target, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

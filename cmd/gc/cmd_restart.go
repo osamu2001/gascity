@@ -87,7 +87,7 @@ func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if !found {
-		fmt.Fprintf(stderr, "gc rig restart: rig %q not found in city.toml\n", rigName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig restart", rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

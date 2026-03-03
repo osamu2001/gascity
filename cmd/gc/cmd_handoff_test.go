@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -144,7 +145,7 @@ func TestHandoffRemoteRunning(t *testing.T) {
 	rec := events.NewFake()
 	sp := session.NewFake()
 	// Start the target session.
-	if err := sp.Start("gc-city-deacon", session.Config{Command: "echo"}); err != nil {
+	if err := sp.Start(context.Background(), "gc-city-deacon", session.Config{Command: "echo"}); err != nil {
 		t.Fatal(err)
 	}
 

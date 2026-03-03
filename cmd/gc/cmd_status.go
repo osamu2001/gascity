@@ -49,7 +49,7 @@ func cmdAgentStatus(args []string, stdout, stderr io.Writer) int {
 	}
 	found, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 	if !ok {
-		fmt.Fprintf(stderr, "gc agent status: agent %q not found in city.toml\n", agentName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, agentNotFoundMsg("gc agent status", agentName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	agentName = found.QualifiedName()
@@ -146,7 +146,7 @@ func cmdRigStatus(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if !found {
-		fmt.Fprintf(stderr, "gc rig status: rig %q not found in city.toml\n", rigName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, rigNotFoundMsg("gc rig status", rigName, cfg)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

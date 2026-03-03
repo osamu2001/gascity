@@ -65,6 +65,8 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	if cfgErr == nil {
 		d.Register(doctor.NewConfigValidCheck(cfg))
 		d.Register(doctor.NewConfigRefsCheck(cfg, cityPath))
+		d.Register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
+		d.Register(doctor.NewDurationRangeCheck(cfg))
 	}
 
 	// System formulas check.
@@ -137,6 +139,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	skipDolt := beadsProv != "bd" || doltSkip
 	d.Register(doctor.NewDoltServerCheck(cityPath, skipDolt))
 	d.Register(&doctor.EventsLogCheck{})
+	d.Register(doctor.NewEventLogSizeCheck())
 
 	// Per-rig checks.
 	if cfgErr == nil {

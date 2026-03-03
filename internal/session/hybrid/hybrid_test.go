@@ -1,6 +1,7 @@
 package hybrid
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ func TestStart_RoutesToLocal(t *testing.T) {
 	local, remote := session.NewFake(), session.NewFake()
 	h := New(local, remote, isRemote)
 
-	if err := h.Start("refinery", session.Config{}); err != nil {
+	if err := h.Start(context.Background(), "refinery", session.Config{}); err != nil {
 		t.Fatal(err)
 	}
 	if !local.IsRunning("refinery") {
@@ -28,7 +29,7 @@ func TestStart_RoutesToRemote(t *testing.T) {
 	local, remote := session.NewFake(), session.NewFake()
 	h := New(local, remote, isRemote)
 
-	if err := h.Start("polecat-1", session.Config{}); err != nil {
+	if err := h.Start(context.Background(), "polecat-1", session.Config{}); err != nil {
 		t.Fatal(err)
 	}
 	if local.IsRunning("polecat-1") {
@@ -43,9 +44,9 @@ func TestListRunning_MergesBothBackends(t *testing.T) {
 	local, remote := session.NewFake(), session.NewFake()
 	h := New(local, remote, isRemote)
 
-	_ = h.Start("gc-demo--refinery", session.Config{})
-	_ = h.Start("gc-demo--polecat-1", session.Config{})
-	_ = h.Start("gc-demo--polecat-2", session.Config{})
+	_ = h.Start(context.Background(), "gc-demo--refinery", session.Config{})
+	_ = h.Start(context.Background(), "gc-demo--polecat-1", session.Config{})
+	_ = h.Start(context.Background(), "gc-demo--polecat-2", session.Config{})
 
 	names, err := h.ListRunning("gc-demo-")
 	if err != nil {
@@ -61,7 +62,7 @@ func TestListRunning_PartialFailure(t *testing.T) {
 	remote := session.NewFailFake()
 	h := New(local, remote, isRemote)
 
-	_ = local.Start("gc-demo--refinery", session.Config{})
+	_ = local.Start(context.Background(), "gc-demo--refinery", session.Config{})
 
 	names, err := h.ListRunning("gc-demo-")
 	if err != nil {
@@ -87,8 +88,8 @@ func TestAttach_RoutesCorrectly(t *testing.T) {
 	local, remote := session.NewFake(), session.NewFake()
 	h := New(local, remote, isRemote)
 
-	_ = h.Start("refinery", session.Config{})
-	_ = h.Start("polecat-1", session.Config{})
+	_ = h.Start(context.Background(), "refinery", session.Config{})
+	_ = h.Start(context.Background(), "polecat-1", session.Config{})
 
 	if err := h.Attach("refinery"); err != nil {
 		t.Errorf("attach local: %v", err)
@@ -121,8 +122,8 @@ func TestStop_RoutesCorrectly(t *testing.T) {
 	local, remote := session.NewFake(), session.NewFake()
 	h := New(local, remote, isRemote)
 
-	_ = h.Start("refinery", session.Config{})
-	_ = h.Start("polecat-1", session.Config{})
+	_ = h.Start(context.Background(), "refinery", session.Config{})
+	_ = h.Start(context.Background(), "polecat-1", session.Config{})
 
 	if err := h.Stop("refinery"); err != nil {
 		t.Fatal(err)

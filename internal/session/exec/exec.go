@@ -101,7 +101,7 @@ func (p *Provider) runWithTTY(args ...string) error {
 // After the script returns, Start handles startup dialogs (workspace
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [session.AcceptStartupDialogs].
-func (p *Provider) Start(name string, cfg session.Config) error {
+func (p *Provider) Start(_ context.Context, name string, cfg session.Config) error {
 	data, err := marshalStartConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("exec provider: marshaling start config: %w", err)
