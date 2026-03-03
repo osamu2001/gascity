@@ -629,3 +629,96 @@ func TestQuarantineCorruptDB(t *testing.T) {
 		t.Errorf("plain dir was incorrectly removed: %v", err)
 	}
 }
+
+// ── City wrapper tests ───────────────────────────────────────────────
+
+func TestRigDatabaseDirCity(t *testing.T) {
+	cityPath := "/home/user/my-city"
+	got := RigDatabaseDirCity(cityPath, "frontend")
+	want := filepath.Join(cityPath, ".gc", "dolt-data", "frontend")
+	if got != want {
+		t.Errorf("RigDatabaseDirCity() = %q, want %q", got, want)
+	}
+}
+
+func TestFindRigBeadsDirCity_HQ(t *testing.T) {
+	cityPath := t.TempDir()
+
+	// Create HQ .beads with metadata pointing to "hq" database.
+	writeMetadataDB(t, filepath.Join(cityPath, ".beads"), "hq")
+
+	got := FindRigBeadsDirCity(cityPath, "hq")
+	want := filepath.Join(cityPath, ".beads")
+	if got != want {
+		t.Errorf("FindRigBeadsDirCity(hq) = %q, want %q", got, want)
+	}
+}
+
+func TestFindRigBeadsDirCity_Rig(t *testing.T) {
+	cityPath := t.TempDir()
+
+	// Create a rig dir with .beads metadata.
+	writeMetadataDB(t, filepath.Join(cityPath, "frontend", ".beads"), "fe")
+
+	got := FindRigBeadsDirCity(cityPath, "fe")
+	want := filepath.Join(cityPath, "frontend", ".beads")
+	if got != want {
+		t.Errorf("FindRigBeadsDirCity(fe) = %q, want %q", got, want)
+	}
+}
+
+func TestFindRigBeadsDirCity_Route(t *testing.T) {
+	cityPath := t.TempDir()
+
+	// Create a rig referenced via routes.jsonl.
+	writeMetadataDB(t, filepath.Join(cityPath, ".beads"), "hq")
+	writeMetadataDB(t, filepath.Join(cityPath, "api-service", ".beads"), "api")
+
+	// Write route pointing to the rig.
+	routesDir := filepath.Join(cityPath, ".beads")
+	routeLine := `{"path":"api-service"}` + "\n"
+	if err := os.WriteFile(filepath.Join(routesDir, "routes.jsonl"), []byte(routeLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := FindRigBeadsDirCity(cityPath, "api")
+	want := filepath.Join(cityPath, "api-service", ".beads")
+	if got != want {
+		t.Errorf("FindRigBeadsDirCity(api) = %q, want %q", got, want)
+	}
+}
+
+func TestFindRigBeadsDirCity_Fallback(t *testing.T) {
+	cityPath := t.TempDir()
+
+	// No matching database — should fall back to city-root .beads.
+	got := FindRigBeadsDirCity(cityPath, "nonexistent")
+	want := filepath.Join(cityPath, ".beads")
+	if got != want {
+		t.Errorf("FindRigBeadsDirCity(nonexistent) = %q, want %q", got, want)
+	}
+}
+
+func TestCheckReadOnlyCity_NoDatabases(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_DOLT", "skip")
+
+	// No databases → should return (false, nil), not probe.
+	readOnly, err := CheckReadOnlyCity(cityPath)
+	if err != nil {
+		t.Fatalf("CheckReadOnlyCity() error = %v", err)
+	}
+	if readOnly {
+		t.Error("CheckReadOnlyCity() = true with no databases, want false")
+	}
+}
+
+func TestSyncDatabasesCity_NoDatabases(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_DOLT", "skip")
+
+	results := SyncDatabasesCity(cityPath, SyncOptions{})
+	if len(results) != 0 {
+		t.Errorf("SyncDatabasesCity() returned %d results, want 0 for empty city", len(results))
+	}
+}

@@ -143,12 +143,12 @@ func doDoltSQL(_ io.Writer, stderr io.Writer) int {
 		args = append(args, "sql")
 	} else {
 		// Embedded mode — find first database directory.
-		databases, err := dolt.ListDatabases(cityPath)
+		databases, err := dolt.ListDatabasesCity(cityPath)
 		if err != nil || len(databases) == 0 {
 			fmt.Fprintln(stderr, "gc dolt sql: no dolt server running and no databases found") //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		dbDir := dolt.RigDatabaseDir(cityPath, databases[0])
+		dbDir := dolt.RigDatabaseDirCity(cityPath, databases[0])
 		args = append(args, "--data-dir", filepath.Dir(dbDir), "sql")
 	}
 
@@ -190,7 +190,7 @@ func doDoltList(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	databases, err := dolt.ListDatabases(cityPath)
+	databases, err := dolt.ListDatabasesCity(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc dolt list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -202,7 +202,7 @@ func doDoltList(stdout, stderr io.Writer) int {
 	}
 
 	for _, db := range databases {
-		dir := dolt.RigDatabaseDir(cityPath, db)
+		dir := dolt.RigDatabaseDirCity(cityPath, db)
 		fmt.Fprintf(stdout, "%s\t%s\n", db, dir) //nolint:errcheck // best-effort stdout
 	}
 	return 0
@@ -243,7 +243,7 @@ func doDoltRecover(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	readOnly, err := dolt.CheckReadOnly(cityPath)
+	readOnly, err := dolt.CheckReadOnlyCity(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc dolt recover: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -254,7 +254,7 @@ func doDoltRecover(stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintln(stdout, "Dolt server is in read-only state. Attempting recovery...") //nolint:errcheck // best-effort stdout
-	if err := dolt.RecoverReadOnly(cityPath); err != nil {
+	if err := dolt.RecoverReadOnlyCity(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc dolt recover: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -302,7 +302,7 @@ func doDoltSync(dryRun, force, gc bool, dbFilter string, stdout, stderr io.Write
 	// Optional GC phase: purge closed ephemerals before sync.
 	// Must run while server is still up (bd purge needs SQL access).
 	if gc {
-		databases, err := dolt.ListDatabases(cityPath)
+		databases, err := dolt.ListDatabasesCity(cityPath)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc dolt sync: listing databases for gc: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -311,7 +311,7 @@ func doDoltSync(dryRun, force, gc bool, dbFilter string, stdout, stderr io.Write
 			if dbFilter != "" && db != dbFilter {
 				continue
 			}
-			purged, err := dolt.PurgeClosedEphemerals(cityPath, db, dryRun)
+			purged, err := dolt.PurgeClosedEphemeralsCity(cityPath, db, dryRun)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt sync: purge %s: %v\n", db, err) //nolint:errcheck // best-effort stderr
 				// Non-fatal — continue with sync.
@@ -336,7 +336,7 @@ func doDoltSync(dryRun, force, gc bool, dbFilter string, stdout, stderr io.Write
 		Force:  force,
 		Filter: dbFilter,
 	}
-	results := dolt.SyncDatabases(cityPath, opts)
+	results := dolt.SyncDatabasesCity(cityPath, opts)
 
 	// Print results.
 	exitCode := 0

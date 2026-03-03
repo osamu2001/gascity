@@ -881,6 +881,265 @@ func runBdInit(store *beads.BdStore, rigPath, prefix, doltHost string, doltPort 
 	return nil
 }
 
+// ── City-scoped wrappers for Gastown functions ───────────────────────
+//
+// These replace the DefaultConfig-based functions in doltserver.go with
+// GasCityConfig-based versions that read from .gc/dolt-data/ and use
+// GC_DOLT_* env vars. cmd/gc/ must ONLY call these versions.
+
+// RigDatabaseDirCity returns the filesystem path for a rig's dolt database
+// within a Gas City's .gc/dolt-data/ directory.
+func RigDatabaseDirCity(cityPath, dbName string) string {
+	config := GasCityConfig(cityPath)
+	return filepath.Join(config.DataDir, dbName)
+}
+
+// FindRigBeadsDirCity resolves the .beads directory for a rig within a
+// Gas City directory. Gas City uses a flat layout: the HQ .beads is at
+// <cityPath>/.beads, and each rig's .beads is at <rigPath>/.beads (where
+// rigPath comes from city.toml, not from the dolt database name). For gc
+// dolt commands that operate on database names (not rig paths), we scan
+// route metadata to resolve database name → beads dir.
+func FindRigBeadsDirCity(cityPath, dbName string) string {
+	if cityPath == "" || dbName == "" {
+		return ""
+	}
+
+	// Check HQ: city-level .beads
+	hqBeads := filepath.Join(cityPath, ".beads")
+	if db := readExistingDoltDatabase(hqBeads); db == dbName {
+		return hqBeads
+	}
+
+	// Check routes for a rig whose dolt_database matches.
+	routesPath := filepath.Join(cityPath, ".beads", "routes.jsonl")
+	if routesData, err := os.ReadFile(routesPath); err == nil {
+		for _, line := range strings.Split(string(routesData), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var route struct {
+				Path string `json:"path"`
+			}
+			if json.Unmarshal([]byte(line), &route) != nil || route.Path == "" {
+				continue
+			}
+			beadsDir := filepath.Join(cityPath, route.Path, ".beads")
+			if db := readExistingDoltDatabase(beadsDir); db == dbName {
+				return beadsDir
+			}
+		}
+	}
+
+	// Broad scan: top-level directories.
+	if entries, err := os.ReadDir(cityPath); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() || entry.Name() == ".gc" || entry.Name() == ".beads" {
+				continue
+			}
+			beadsDir := filepath.Join(cityPath, entry.Name(), ".beads")
+			if db := readExistingDoltDatabase(beadsDir); db == dbName {
+				return beadsDir
+			}
+		}
+	}
+
+	// Fallback: return city-root .beads (same as FindRigBeadsDir default).
+	return filepath.Join(cityPath, ".beads")
+}
+
+// CheckReadOnlyCity checks if the city's dolt server is in read-only state.
+// Uses GasCityConfig and ListDatabasesCity (not Gastown equivalents).
+func CheckReadOnlyCity(cityPath string) (bool, error) {
+	config := GasCityConfig(cityPath)
+
+	databases, err := ListDatabasesCity(cityPath)
+	if err != nil || len(databases) == 0 {
+		return false, nil // Can't probe without a database.
+	}
+
+	db := databases[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	query := fmt.Sprintf(
+		"USE `%s`; CREATE TABLE IF NOT EXISTS `__gc_health_probe` (v INT PRIMARY KEY); REPLACE INTO `__gc_health_probe` VALUES (1); DROP TABLE IF EXISTS `__gc_health_probe`",
+		db,
+	)
+	cmd := buildDoltSQLCmd(ctx, config, "-q", query)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(output))
+		if IsReadOnlyError(msg) {
+			return true, nil
+		}
+		return false, fmt.Errorf("write probe failed: %w (%s)", err, msg)
+	}
+
+	return false, nil
+}
+
+// RecoverReadOnlyCity detects a read-only dolt server and restarts it.
+// Uses StopCity/EnsureRunning (Gas City lifecycle) instead of Gastown's
+// Start/Stop. Returns nil if recovery succeeded or wasn't needed.
+func RecoverReadOnlyCity(cityPath string) error {
+	readOnly, err := CheckReadOnlyCity(cityPath)
+	if err != nil {
+		return fmt.Errorf("read-only probe failed: %w", err)
+	}
+	if !readOnly {
+		return nil
+	}
+
+	fmt.Fprintf(os.Stderr, "Dolt server is in read-only mode, attempting recovery...\n")
+
+	if err := StopCity(cityPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: stop returned error (proceeding with restart): %v\n", err)
+	}
+
+	time.Sleep(1 * time.Second)
+
+	if err := EnsureRunning(cityPath); err != nil {
+		return fmt.Errorf("failed to restart dolt server: %w", err)
+	}
+
+	// Verify recovery with exponential backoff.
+	const maxAttempts = 5
+	const baseBackoff = 500 * time.Millisecond
+	const maxBackoff = 8 * time.Second
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		backoff := baseBackoff
+		for i := 1; i < attempt; i++ {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+				break
+			}
+		}
+		time.Sleep(backoff)
+
+		readOnly, err = CheckReadOnlyCity(cityPath)
+		if err != nil {
+			if attempt == maxAttempts {
+				return fmt.Errorf("post-restart probe failed after %d attempts: %w", maxAttempts, err)
+			}
+			continue
+		}
+		if !readOnly {
+			fmt.Fprintf(os.Stderr, "Dolt server recovered from read-only state\n")
+			return nil
+		}
+	}
+
+	return fmt.Errorf("dolt server still read-only after restart")
+}
+
+// SyncDatabasesCity is the Gas City version of SyncDatabases. Uses
+// ListDatabasesCity and RigDatabaseDirCity to operate on .gc/dolt-data/.
+func SyncDatabasesCity(cityPath string, opts SyncOptions) []SyncResult {
+	databases, err := ListDatabasesCity(cityPath)
+	if err != nil {
+		return []SyncResult{{
+			Database: "(list)",
+			Error:    fmt.Errorf("listing databases: %w", err),
+		}}
+	}
+
+	var results []SyncResult
+
+	for _, db := range databases {
+		if opts.Filter != "" && db != opts.Filter {
+			continue
+		}
+
+		dbDir := RigDatabaseDirCity(cityPath, db)
+		result := SyncResult{Database: db}
+
+		remoteName, remoteURL, err := FindRemote(dbDir)
+		if err != nil {
+			result.Error = fmt.Errorf("checking remote: %w", err)
+			results = append(results, result)
+			continue
+		}
+		result.Remote = remoteURL
+
+		if remoteURL == "" {
+			token := HubToken()
+			org := HubOrg()
+			if token != "" && org != "" {
+				if err := SetupHubRemote(dbDir, org, db, token); err != nil {
+					result.Error = fmt.Errorf("auto-setup DoltHub remote: %w", err)
+					results = append(results, result)
+					continue
+				}
+				remoteName, remoteURL, err = FindRemote(dbDir)
+				if err != nil || remoteURL == "" {
+					result.Error = fmt.Errorf("remote not found after auto-setup")
+					results = append(results, result)
+					continue
+				}
+				result.Remote = remoteURL
+			} else {
+				result.Skipped = true
+				results = append(results, result)
+				continue
+			}
+		}
+
+		if opts.DryRun {
+			result.DryRun = true
+			results = append(results, result)
+			continue
+		}
+
+		if err := CommitWorkingSet(dbDir); err != nil {
+			result.Error = fmt.Errorf("committing: %w", err)
+			results = append(results, result)
+			continue
+		}
+
+		if err := PushDatabase(dbDir, remoteName, opts.Force); err != nil {
+			result.Error = err
+			results = append(results, result)
+			continue
+		}
+
+		result.Pushed = true
+		results = append(results, result)
+	}
+
+	return results
+}
+
+// PurgeClosedEphemeralsCity is the Gas City version of PurgeClosedEphemerals.
+// Uses FindRigBeadsDirCity to locate the .beads directory.
+func PurgeClosedEphemeralsCity(cityPath, dbName string, dryRun bool) (int, error) {
+	beadsDir := FindRigBeadsDirCity(cityPath, dbName)
+
+	if _, err := os.Stat(beadsDir); err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("checking beads dir for %s: %w", dbName, err)
+	}
+
+	metadataPath := filepath.Join(beadsDir, "metadata.json")
+	if info, err := os.Stat(metadataPath); err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("checking metadata for %s: %w", dbName, err)
+	} else if info.IsDir() {
+		return 0, fmt.Errorf("metadata.json for %s is a directory", dbName)
+	}
+
+	// Delegate to the shared purge implementation.
+	return runPurge(beadsDir, dbName, dryRun)
+}
+
 // ── Orphan detection and cleanup (city-scoped) ───────────────────────
 
 // collectReferencedDatabasesCity returns the set of database names referenced by

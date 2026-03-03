@@ -243,6 +243,12 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 		return 0, fmt.Errorf("metadata.json for %s is a directory", dbName)
 	}
 
+	return runPurge(beadsDir, dbName, dryRun)
+}
+
+// runPurge executes "bd purge" against a resolved .beads directory.
+// Shared by PurgeClosedEphemerals (Gastown) and PurgeClosedEphemeralsCity (Gas City).
+func runPurge(beadsDir, dbName string, dryRun bool) (int, error) {
 	// Build bd purge command with safety-net timeout.
 	// bd purge v2 uses batched SQL (completes in seconds), but we keep a
 	// generous timeout as a circuit breaker against future regressions.
