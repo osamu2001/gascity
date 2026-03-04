@@ -14,7 +14,7 @@
 [pack]
 name = "gastown"
 schema = 1
-includes = ["../maintenance", "../../../bd"]
+includes = ["../maintenance", "../../../bd", "../../../dolt-health", "../dashboard"]
 city_agents = ["mayor", "deacon", "boot", "dog"]
 
 [[doctor]]

@@ -52,7 +52,7 @@ func TestSend(t *testing.T) {
 	script := writeScript(t, dir, allOpsScript())
 	p := NewProvider(script)
 
-	m, err := p.Send("human", "mayor", "hello")
+	m, err := p.Send("human", "mayor", "", "hello")
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -80,7 +80,7 @@ esac
 `)
 	p := NewProvider(script)
 
-	_, err := p.Send("alice", "bob", "test body")
+	_, err := p.Send("alice", "bob", "", "test body")
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -318,7 +318,7 @@ esac
 // --- JSON wire format ---
 
 func TestMarshalSendInput(t *testing.T) {
-	data, err := marshalSendInput("alice", "hello world")
+	data, err := marshalSendInput("alice", "", "hello world")
 	if err != nil {
 		t.Fatalf("marshalSendInput: %v", err)
 	}

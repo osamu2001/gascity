@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -178,6 +179,116 @@ func TestCityStatusRigs(t *testing.T) {
 	}
 	if !strings.Contains(out, "(suspended)") {
 		t.Errorf("stdout missing '(suspended)' for frontend, got:\n%s", out)
+	}
+}
+
+func TestCityStatusJSONEmpty(t *testing.T) {
+	sp := session.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "bright-lights"},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatusJSON(sp, cfg, "/home/user/bright-lights", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	var status StatusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+	if status.CityName != "bright-lights" {
+		t.Errorf("city_name = %q, want %q", status.CityName, "bright-lights")
+	}
+	if status.CityPath != "/home/user/bright-lights" {
+		t.Errorf("city_path = %q, want %q", status.CityPath, "/home/user/bright-lights")
+	}
+	if status.Controller.Running {
+		t.Error("controller should not be running")
+	}
+	if status.Suspended {
+		t.Error("suspended should be false")
+	}
+	if status.Summary.TotalAgents != 0 {
+		t.Errorf("total_agents = %d, want 0", status.Summary.TotalAgents)
+	}
+}
+
+func TestCityStatusJSONWithAgents(t *testing.T) {
+	sp := session.NewFake()
+	// Start one agent session (default session name = agent name, no city prefix).
+	if err := sp.Start(context.Background(), "mayor", session.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "mayor"},
+			{Name: "polecat", Dir: "myrig", Pool: &config.PoolConfig{Min: 0, Max: 3}},
+		},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/home/user/myrig"},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatusJSON(sp, cfg, "/home/user/city", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	var status StatusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+
+	// Mayor singleton + 3 pool instances = 4 agents.
+	if status.Summary.TotalAgents != 4 {
+		t.Errorf("total_agents = %d, want 4", status.Summary.TotalAgents)
+	}
+	if status.Summary.RunningAgents != 1 {
+		t.Errorf("running_agents = %d, want 1", status.Summary.RunningAgents)
+	}
+	if len(status.Agents) != 4 {
+		t.Fatalf("got %d agents, want 4", len(status.Agents))
+	}
+
+	// First agent: mayor (singleton, running).
+	if status.Agents[0].Name != "mayor" {
+		t.Errorf("agents[0].name = %q, want %q", status.Agents[0].Name, "mayor")
+	}
+	if status.Agents[0].Scope != "city" {
+		t.Errorf("agents[0].scope = %q, want %q", status.Agents[0].Scope, "city")
+	}
+	if !status.Agents[0].Running {
+		t.Error("agents[0] should be running")
+	}
+	if status.Agents[0].Pool != nil {
+		t.Error("agents[0].pool should be nil for singleton")
+	}
+
+	// Second agent: polecat-1 (pool, not running).
+	if status.Agents[1].QualifiedName != "myrig/polecat-1" {
+		t.Errorf("agents[1].qualified_name = %q, want %q", status.Agents[1].QualifiedName, "myrig/polecat-1")
+	}
+	if status.Agents[1].Scope != "rig" {
+		t.Errorf("agents[1].scope = %q, want %q", status.Agents[1].Scope, "rig")
+	}
+	if status.Agents[1].Pool == nil {
+		t.Fatal("agents[1].pool should not be nil")
+	}
+	if status.Agents[1].Pool.Max != 3 {
+		t.Errorf("agents[1].pool.max = %d, want 3", status.Agents[1].Pool.Max)
+	}
+
+	// Rigs.
+	if len(status.Rigs) != 1 {
+		t.Fatalf("got %d rigs, want 1", len(status.Rigs))
+	}
+	if status.Rigs[0].Name != "myrig" {
+		t.Errorf("rigs[0].name = %q, want %q", status.Rigs[0].Name, "myrig")
 	}
 }
 

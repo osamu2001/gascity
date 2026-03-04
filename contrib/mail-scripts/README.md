@@ -25,7 +25,7 @@ GC_MAIL=exec:contrib/mail-scripts/gc-mail-mcp-agent-mail \
   gc start --foreground
 
 # Send mail
-gc mail send deacon "Check patrol status"
+gc mail send deacon -s "Patrol check" -m "Check patrol status"
 
 # Check inbox
 gc mail inbox mayor
@@ -47,11 +47,18 @@ open http://127.0.0.1:8765/mail
 | gc operation | mcp_agent_mail tool | Notes |
 |--------------|---------------------|-------|
 | `ensure-running` | `GET /health/liveness` + `ensure_project` | Verify server, create project |
-| `send <to>` | `send_message` | Auto-registers agents |
-| `inbox <recipient>` | `fetch_inbox` | Unread messages only |
+| `send <to>` | `send_message` | Auto-registers agents; stdin includes subject |
+| `inbox <recipient>` | `fetch_inbox` | Unread messages only (local filtering) |
 | `check <recipient>` | `fetch_inbox` | Same as inbox (no mark-read) |
-| `read <id>` | `acknowledge_message` + `get_message` | Ack then re-fetch |
+| `get <id>` | `fetch_inbox` | View without marking read |
+| `read <id>` | `acknowledge_message` + `fetch_inbox` | Ack + return message |
+| `mark-read <id>` | `acknowledge_message` | Local + server ack |
+| `mark-unread <id>` | (local only) | Remove local read state |
+| `reply <id>` | `send_message` | Uses `in_reply_to_id` |
+| `thread <id>` | (not supported) | Returns `[]` |
+| `count <recipient>` | `fetch_inbox` | Returns `{"total":N,"unread":N}` |
 | `archive <id>` | `acknowledge_message` | Ack only, no output |
+| `delete <id>` | `acknowledge_message` | Alias for archive |
 
 ### Testing
 

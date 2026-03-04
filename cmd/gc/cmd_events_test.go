@@ -156,6 +156,78 @@ func TestEventsPayloadMatchStandard(t *testing.T) {
 	}
 }
 
+// --- JSON mode tests ---
+
+func TestEventsJSON(t *testing.T) {
+	dir := t.TempDir()
+	ep := newTestProvider(t, dir)
+	ep.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1", Message: "Build Tower of Hanoi"})
+	ep.Record(events.Event{Type: events.AgentStarted, Actor: "gc", Subject: "mayor", Message: "mayor"})
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsJSON(ep, "", "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	var evts []events.Event
+	if err := json.Unmarshal(stdout.Bytes(), &evts); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+	if len(evts) != 2 {
+		t.Fatalf("got %d events, want 2", len(evts))
+	}
+	if evts[0].Type != events.BeadCreated {
+		t.Errorf("evts[0].Type = %q, want %q", evts[0].Type, events.BeadCreated)
+	}
+	if evts[1].Subject != "mayor" {
+		t.Errorf("evts[1].Subject = %q, want %q", evts[1].Subject, "mayor")
+	}
+}
+
+func TestEventsJSONEmpty(t *testing.T) {
+	dir := t.TempDir()
+	ep := newTestProvider(t, dir)
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsJSON(ep, "", "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	var evts []events.Event
+	if err := json.Unmarshal(stdout.Bytes(), &evts); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+	if len(evts) != 0 {
+		t.Errorf("got %d events, want 0", len(evts))
+	}
+}
+
+func TestEventsJSONWithTypeFilter(t *testing.T) {
+	dir := t.TempDir()
+	ep := newTestProvider(t, dir)
+	ep.Record(events.Event{Type: events.BeadCreated, Actor: "human", Subject: "gc-1"})
+	ep.Record(events.Event{Type: events.AgentStarted, Actor: "gc", Subject: "mayor"})
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsJSON(ep, events.BeadCreated, "", nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	var evts []events.Event
+	if err := json.Unmarshal(stdout.Bytes(), &evts); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+	if len(evts) != 1 {
+		t.Fatalf("got %d events, want 1", len(evts))
+	}
+	if evts[0].Type != events.BeadCreated {
+		t.Errorf("evts[0].Type = %q, want %q", evts[0].Type, events.BeadCreated)
+	}
+}
+
 // --- Seq mode tests ---
 
 func TestDoEventsSeq(t *testing.T) {

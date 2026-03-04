@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -10,25 +11,74 @@ import (
 	"github.com/steveyegge/gascity/internal/session"
 )
 
+// StatusJSON is the JSON output format for "gc status --json".
+type StatusJSON struct {
+	CityName   string            `json:"city_name"`
+	CityPath   string            `json:"city_path"`
+	Controller ControllerJSON    `json:"controller"`
+	Suspended  bool              `json:"suspended"`
+	Agents     []StatusAgentJSON `json:"agents"`
+	Rigs       []StatusRigJSON   `json:"rigs"`
+	Summary    StatusSummaryJSON `json:"summary"`
+}
+
+// ControllerJSON represents controller state in JSON output.
+type ControllerJSON struct {
+	Running bool `json:"running"`
+	PID     int  `json:"pid,omitempty"`
+}
+
+// StatusAgentJSON represents an agent in the JSON status output.
+type StatusAgentJSON struct {
+	Name          string    `json:"name"`
+	QualifiedName string    `json:"qualified_name"`
+	Scope         string    `json:"scope"`
+	Running       bool      `json:"running"`
+	Suspended     bool      `json:"suspended"`
+	Pool          *PoolJSON `json:"pool"`
+}
+
+// PoolJSON represents pool configuration in JSON output.
+type PoolJSON struct {
+	Min int `json:"min"`
+	Max int `json:"max"`
+}
+
+// StatusRigJSON represents a rig in the JSON status output.
+type StatusRigJSON struct {
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Suspended bool   `json:"suspended"`
+}
+
+// StatusSummaryJSON is the agent count summary in JSON output.
+type StatusSummaryJSON struct {
+	TotalAgents   int `json:"total_agents"`
+	RunningAgents int `json:"running_agents"`
+}
+
 // newStatusCmd creates the "gc status [path]" command.
 func newStatusCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonFlag bool
+	cmd := &cobra.Command{
 		Use:   "status [path]",
 		Short: "Show city-wide status overview",
 		Long: `Shows a city-wide overview: controller state, suspension,
 all agents with running status, rigs, and a summary count.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdCityStatus(args, stdout, stderr) != 0 {
+			if cmdCityStatus(args, jsonFlag, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output in JSON format")
+	return cmd
 }
 
 // cmdCityStatus is the CLI entry point for the city status overview.
-func cmdCityStatus(args []string, stdout, stderr io.Writer) int {
+func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	var cityPath string
 	var err error
 	if len(args) > 0 {
@@ -54,6 +104,9 @@ func cmdCityStatus(args []string, stdout, stderr io.Writer) int {
 
 	sp := newSessionProvider()
 	dops := newDrainOps(sp)
+	if jsonOutput {
+		return doCityStatusJSON(sp, cfg, cityPath, stdout, stderr)
+	}
 	return doCityStatus(sp, dops, cfg, cityPath, stdout, stderr)
 }
 
@@ -157,5 +210,116 @@ func doCityStatus(
 		}
 	}
 
+	return 0
+}
+
+// doCityStatusJSON outputs city status as JSON. Accepts injected providers
+// for testability.
+func doCityStatusJSON(
+	sp session.Provider,
+	cfg *config.City,
+	cityPath string,
+	stdout, stderr io.Writer,
+) int {
+	_ = stderr // reserved for future error reporting
+
+	cityName := cfg.Workspace.Name
+	if cityName == "" {
+		cityName = filepath.Base(cityPath)
+	}
+
+	// Build suspended rig lookup.
+	suspendedRigs := make(map[string]bool)
+	for _, r := range cfg.Rigs {
+		if r.Suspended {
+			suspendedRigs[r.Name] = true
+		}
+	}
+
+	// Controller.
+	var ctrl ControllerJSON
+	if pid := controllerAlive(cityPath); pid != 0 {
+		ctrl = ControllerJSON{Running: true, PID: pid}
+	}
+
+	// Agents.
+	var agents []StatusAgentJSON
+	var totalAgents, runningAgents int
+	for _, a := range cfg.Agents {
+		suspended := a.Suspended || (a.Dir != "" && suspendedRigs[a.Dir])
+		pool := a.EffectivePool()
+		scope := "city"
+		if a.Dir != "" {
+			scope = "rig"
+		}
+
+		if pool.Max > 1 {
+			// Pool agent — emit each instance.
+			for i := 1; i <= pool.Max; i++ {
+				instanceName := fmt.Sprintf("%s-%d", a.Name, i)
+				qualifiedInstance := instanceName
+				if a.Dir != "" {
+					qualifiedInstance = a.Dir + "/" + instanceName
+				}
+				sn := sessionName(cityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
+				running := sp.IsRunning(sn)
+				agents = append(agents, StatusAgentJSON{
+					Name:          instanceName,
+					QualifiedName: qualifiedInstance,
+					Scope:         scope,
+					Running:       running,
+					Suspended:     suspended,
+					Pool:          &PoolJSON{Min: pool.Min, Max: pool.Max},
+				})
+				totalAgents++
+				if running {
+					runningAgents++
+				}
+			}
+		} else {
+			// Singleton agent.
+			sn := sessionName(cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+			running := sp.IsRunning(sn)
+			agents = append(agents, StatusAgentJSON{
+				Name:          a.Name,
+				QualifiedName: a.QualifiedName(),
+				Scope:         scope,
+				Running:       running,
+				Suspended:     suspended,
+				Pool:          nil,
+			})
+			totalAgents++
+			if running {
+				runningAgents++
+			}
+		}
+	}
+
+	// Rigs.
+	var rigs []StatusRigJSON
+	for _, r := range cfg.Rigs {
+		rigs = append(rigs, StatusRigJSON{
+			Name:      r.Name,
+			Path:      r.Path,
+			Suspended: r.Suspended,
+		})
+	}
+
+	status := StatusJSON{
+		CityName:   cityName,
+		CityPath:   cityPath,
+		Controller: ctrl,
+		Suspended:  citySuspended(cfg),
+		Agents:     agents,
+		Rigs:       rigs,
+		Summary:    StatusSummaryJSON{TotalAgents: totalAgents, RunningAgents: runningAgents},
+	}
+
+	data, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		fmt.Fprintf(stderr, "gc status: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
 	return 0
 }

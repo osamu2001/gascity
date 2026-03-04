@@ -168,7 +168,8 @@ submitting. The refinery reads `metadata.target` — no refinery changes needed.
 **5. Check inbox for additional context:**
 ```bash
 gc mail inbox
-# Read any HANDOFF or assignment messages
+# Read any HANDOFF or assignment messages, then archive after absorbing context
+# gc mail read <id> → process → gc mail archive <id>
 ```
 
 **6. Understand the requirements:**

@@ -215,8 +215,7 @@ gc mail send {{ .RigName }}/alice -s "Urgent" -m "..." --notify
 For multi-line messages, use a heredoc with command substitution:
 
 ```bash
-gc mail send mayor/ "$(cat <<'EOF'
-Status update on auth refactor:
+gc mail send mayor/ -s "Status update: auth refactor" -m "$(cat <<'EOF'
 - Token refresh fixed (3 tests passing)
 - Session middleware still WIP
 - Blocked on: need Redis config for staging

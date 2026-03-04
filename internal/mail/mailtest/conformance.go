@@ -20,7 +20,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 
 	t.Run("Send_ReturnsMatchingFields", func(t *testing.T) {
 		p := newProvider(t)
-		m, err := p.Send("alice", "bob", "hello")
+		m, err := p.Send("alice", "bob", "Greetings", "hello")
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -33,6 +33,9 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 		if m.To != "bob" {
 			t.Errorf("To = %q, want %q", m.To, "bob")
 		}
+		if m.Subject != "Greetings" {
+			t.Errorf("Subject = %q, want %q", m.Subject, "Greetings")
+		}
 		if m.Body != "hello" {
 			t.Errorf("Body = %q, want %q", m.Body, "hello")
 		}
@@ -40,11 +43,11 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 
 	t.Run("Send_AssignsUniqueIDs", func(t *testing.T) {
 		p := newProvider(t)
-		m1, err := p.Send("alice", "bob", "first")
+		m1, err := p.Send("alice", "bob", "", "first")
 		if err != nil {
 			t.Fatalf("Send 1: %v", err)
 		}
-		m2, err := p.Send("alice", "bob", "second")
+		m2, err := p.Send("alice", "bob", "", "second")
 		if err != nil {
 			t.Fatalf("Send 2: %v", err)
 		}
@@ -56,7 +59,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 	t.Run("Send_SetsRecentCreatedAt", func(t *testing.T) {
 		p := newProvider(t)
 		before := time.Now().Add(-time.Minute)
-		m, err := p.Send("alice", "bob", "timestamped")
+		m, err := p.Send("alice", "bob", "", "timestamped")
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -81,7 +84,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 
 	t.Run("Inbox_ReturnsMessagesSentToRecipient", func(t *testing.T) {
 		p := newProvider(t)
-		sent, err := p.Send("alice", "bob", "for bob")
+		sent, err := p.Send("alice", "bob", "", "for bob")
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -99,10 +102,10 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 
 	t.Run("Inbox_FiltersByRecipient", func(t *testing.T) {
 		p := newProvider(t)
-		if _, err := p.Send("alice", "bob", "for bob"); err != nil {
+		if _, err := p.Send("alice", "bob", "", "for bob"); err != nil {
 			t.Fatalf("Send to bob: %v", err)
 		}
-		if _, err := p.Send("alice", "charlie", "for charlie"); err != nil {
+		if _, err := p.Send("alice", "charlie", "", "for charlie"); err != nil {
 			t.Fatalf("Send to charlie: %v", err)
 		}
 		msgs, err := p.Inbox("bob")
@@ -119,7 +122,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 
 	t.Run("Inbox_ExcludesReadMessages", func(t *testing.T) {
 		p := newProvider(t)
-		sent, err := p.Send("alice", "bob", "will be read")
+		sent, err := p.Send("alice", "bob", "", "will be read")
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -139,7 +142,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 
 	t.Run("Check_ReturnsUnreadMessages", func(t *testing.T) {
 		p := newProvider(t)
-		sent, err := p.Send("alice", "bob", "check me")
+		sent, err := p.Send("alice", "bob", "", "check me")
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -157,7 +160,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 
 	t.Run("Check_DoesNotMarkAsRead", func(t *testing.T) {
 		p := newProvider(t)
-		if _, err := p.Send("alice", "bob", "peek"); err != nil {
+		if _, err := p.Send("alice", "bob", "", "peek"); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
 		if _, err := p.Check("bob"); err != nil {
@@ -177,7 +180,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 
 	t.Run("Read_ReturnsCorrectMessage", func(t *testing.T) {
 		p := newProvider(t)
-		sent, err := p.Send("alice", "bob", "read me")
+		sent, err := p.Send("alice", "bob", "Sub", "read me")
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -201,7 +204,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 
 	t.Run("Read_MarksAsRead", func(t *testing.T) {
 		p := newProvider(t)
-		sent, err := p.Send("alice", "bob", "once")
+		sent, err := p.Send("alice", "bob", "", "once")
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -217,6 +220,25 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 		}
 	})
 
+	t.Run("Read_MessageStillAccessible", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "", "still here")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if _, err := p.Read(sent.ID); err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		// Get should still return the message (not closed).
+		m, err := p.Get(sent.ID)
+		if err != nil {
+			t.Fatalf("Get after Read: %v", err)
+		}
+		if m.Body != "still here" {
+			t.Errorf("Body = %q, want %q", m.Body, "still here")
+		}
+	})
+
 	t.Run("Read_UnknownIDReturnsError", func(t *testing.T) {
 		p := newProvider(t)
 		_, err := p.Read("nonexistent")
@@ -225,11 +247,237 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 		}
 	})
 
-	// --- Group 5: Archive ---
+	// --- Group 5: Get ---
+
+	t.Run("Get_ReturnsMessage", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "Hi", "body")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		m, err := p.Get(sent.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if m.ID != sent.ID {
+			t.Errorf("ID = %q, want %q", m.ID, sent.ID)
+		}
+		if m.Body != "body" {
+			t.Errorf("Body = %q, want %q", m.Body, "body")
+		}
+	})
+
+	t.Run("Get_DoesNotMarkRead", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "", "peek")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if _, err := p.Get(sent.ID); err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		// Inbox should still show it.
+		msgs, err := p.Inbox("bob")
+		if err != nil {
+			t.Fatalf("Inbox: %v", err)
+		}
+		if len(msgs) != 1 {
+			t.Errorf("Inbox after Get = %d, want 1 (Get must not mark read)", len(msgs))
+		}
+	})
+
+	t.Run("Get_UnknownIDErrors", func(t *testing.T) {
+		p := newProvider(t)
+		_, err := p.Get("nonexistent")
+		if err == nil {
+			t.Error("Get(nonexistent) should return error")
+		}
+	})
+
+	// --- Group 6: MarkRead / MarkUnread ---
+
+	t.Run("MarkRead_FiltersFromInbox", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "", "mark me")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if err := p.MarkRead(sent.ID); err != nil {
+			t.Fatalf("MarkRead: %v", err)
+		}
+		msgs, err := p.Inbox("bob")
+		if err != nil {
+			t.Fatalf("Inbox: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("Inbox after MarkRead = %d, want 0", len(msgs))
+		}
+	})
+
+	t.Run("MarkUnread_RestoresToInbox", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "", "toggle")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if err := p.MarkRead(sent.ID); err != nil {
+			t.Fatalf("MarkRead: %v", err)
+		}
+		if err := p.MarkUnread(sent.ID); err != nil {
+			t.Fatalf("MarkUnread: %v", err)
+		}
+		msgs, err := p.Inbox("bob")
+		if err != nil {
+			t.Fatalf("Inbox: %v", err)
+		}
+		if len(msgs) != 1 {
+			t.Errorf("Inbox after MarkUnread = %d, want 1", len(msgs))
+		}
+	})
+
+	// --- Group 7: Reply ---
+
+	t.Run("Reply_InheritsThreadID", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "Hello", "first")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		reply, err := p.Reply(sent.ID, "bob", "RE: Hello", "reply")
+		if err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+		if reply.ThreadID != sent.ThreadID {
+			t.Errorf("Reply ThreadID = %q, want %q", reply.ThreadID, sent.ThreadID)
+		}
+	})
+
+	t.Run("Reply_SetsReplyTo", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "Hello", "first")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		reply, err := p.Reply(sent.ID, "bob", "RE: Hello", "reply")
+		if err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+		if reply.ReplyTo != sent.ID {
+			t.Errorf("Reply ReplyTo = %q, want %q", reply.ReplyTo, sent.ID)
+		}
+	})
+
+	t.Run("Reply_GoesToOriginalSender", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "Hello", "first")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		reply, err := p.Reply(sent.ID, "bob", "RE: Hello", "reply")
+		if err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+		if reply.To != "alice" {
+			t.Errorf("Reply To = %q, want %q (original sender)", reply.To, "alice")
+		}
+		if reply.From != "bob" {
+			t.Errorf("Reply From = %q, want %q", reply.From, "bob")
+		}
+	})
+
+	// --- Group 8: Thread ---
+
+	t.Run("Thread_ReturnsAllInThread", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "Hello", "first")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if _, err := p.Reply(sent.ID, "bob", "RE: Hello", "second"); err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+		msgs, err := p.Thread(sent.ThreadID)
+		if err != nil {
+			t.Fatalf("Thread: %v", err)
+		}
+		if len(msgs) != 2 {
+			t.Fatalf("Thread = %d messages, want 2", len(msgs))
+		}
+	})
+
+	t.Run("Thread_Empty", func(t *testing.T) {
+		p := newProvider(t)
+		msgs, err := p.Thread("nonexistent-thread")
+		if err != nil {
+			t.Fatalf("Thread: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("Thread(nonexistent) = %d messages, want 0", len(msgs))
+		}
+	})
+
+	// --- Group 9: Count ---
+
+	t.Run("Count_TotalAndUnread", func(t *testing.T) {
+		p := newProvider(t)
+		if _, err := p.Send("alice", "bob", "", "msg1"); err != nil {
+			t.Fatalf("Send 1: %v", err)
+		}
+		m2, err := p.Send("alice", "bob", "", "msg2")
+		if err != nil {
+			t.Fatalf("Send 2: %v", err)
+		}
+		if err := p.MarkRead(m2.ID); err != nil {
+			t.Fatalf("MarkRead: %v", err)
+		}
+		total, unread, err := p.Count("bob")
+		if err != nil {
+			t.Fatalf("Count: %v", err)
+		}
+		if total != 2 {
+			t.Errorf("total = %d, want 2", total)
+		}
+		if unread != 1 {
+			t.Errorf("unread = %d, want 1", unread)
+		}
+	})
+
+	t.Run("Count_EmptyInbox", func(t *testing.T) {
+		p := newProvider(t)
+		total, unread, err := p.Count("nobody")
+		if err != nil {
+			t.Fatalf("Count: %v", err)
+		}
+		if total != 0 || unread != 0 {
+			t.Errorf("Count = (%d, %d), want (0, 0)", total, unread)
+		}
+	})
+
+	// --- Group 10: Delete ---
+
+	t.Run("Delete_RemovesFromAll", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "", "delete me")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if err := p.Delete(sent.ID); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		msgs, err := p.Inbox("bob")
+		if err != nil {
+			t.Fatalf("Inbox: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("Inbox after Delete = %d, want 0", len(msgs))
+		}
+	})
+
+	// --- Group 11: Archive ---
 
 	t.Run("Archive_RemovesFromInbox", func(t *testing.T) {
 		p := newProvider(t)
-		sent, err := p.Send("alice", "bob", "archive me")
+		sent, err := p.Send("alice", "bob", "", "archive me")
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -247,7 +495,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 
 	t.Run("Archive_AlreadyArchivedReturnsError", func(t *testing.T) {
 		p := newProvider(t)
-		sent, err := p.Send("alice", "bob", "double archive")
+		sent, err := p.Send("alice", "bob", "", "double archive")
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -268,13 +516,13 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 		}
 	})
 
-	// --- Group 6: Lifecycle ---
+	// --- Group 12: Lifecycle ---
 
 	t.Run("Lifecycle_SendInboxReadInboxEmpty", func(t *testing.T) {
 		p := newProvider(t)
 
 		// Send.
-		sent, err := p.Send("alice", "bob", "lifecycle")
+		sent, err := p.Send("alice", "bob", "", "lifecycle")
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -297,7 +545,7 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 			t.Errorf("Body = %q, want %q", m.Body, "lifecycle")
 		}
 
-		// Inbox now empty.
+		// Inbox now empty (read messages filtered out).
 		msgs, err = p.Inbox("bob")
 		if err != nil {
 			t.Fatalf("Inbox after Read: %v", err)
@@ -305,13 +553,22 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 		if len(msgs) != 0 {
 			t.Errorf("Inbox after Read = %d messages, want 0", len(msgs))
 		}
+
+		// But message is still accessible via Get.
+		m, err = p.Get(sent.ID)
+		if err != nil {
+			t.Fatalf("Get after Read: %v", err)
+		}
+		if m.Body != "lifecycle" {
+			t.Errorf("Body = %q, want %q", m.Body, "lifecycle")
+		}
 	})
 
 	t.Run("Lifecycle_SendCheckArchiveInboxEmpty", func(t *testing.T) {
 		p := newProvider(t)
 
 		// Send.
-		sent, err := p.Send("alice", "bob", "check-archive")
+		sent, err := p.Send("alice", "bob", "", "check-archive")
 		if err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -337,6 +594,39 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 		}
 		if len(msgs) != 0 {
 			t.Errorf("Inbox after Archive = %d messages, want 0", len(msgs))
+		}
+	})
+
+	t.Run("Lifecycle_MarkReadUnreadToggle", func(t *testing.T) {
+		p := newProvider(t)
+
+		sent, err := p.Send("alice", "bob", "", "toggle")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+
+		// MarkRead → not in inbox.
+		if err := p.MarkRead(sent.ID); err != nil {
+			t.Fatalf("MarkRead: %v", err)
+		}
+		msgs, err := p.Inbox("bob")
+		if err != nil {
+			t.Fatalf("Inbox: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("Inbox after MarkRead = %d, want 0", len(msgs))
+		}
+
+		// MarkUnread → back in inbox.
+		if err := p.MarkUnread(sent.ID); err != nil {
+			t.Fatalf("MarkUnread: %v", err)
+		}
+		msgs, err = p.Inbox("bob")
+		if err != nil {
+			t.Fatalf("Inbox: %v", err)
+		}
+		if len(msgs) != 1 {
+			t.Errorf("Inbox after MarkUnread = %d, want 1", len(msgs))
 		}
 	})
 }

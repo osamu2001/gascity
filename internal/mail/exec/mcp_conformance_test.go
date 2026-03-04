@@ -195,13 +195,14 @@ if [[ "$url" == */mcp ]] && [ -n "$data" ]; then
     fetch_inbox)
       name=$(echo "$args" | jq -r '.agent_name')
       include_bodies=$(echo "$args" | jq -r '.include_bodies // false')
+      # Return ALL messages for this recipient (the script does local
+      # read/archived filtering). mcp_agent_mail returns all messages too.
       msgs="[]"
       for f in "$STATE_DIR/messages/"*.json; do
         [ -f "$f" ] || continue
         msg=$(cat "$f")
         rcpt=$(echo "$msg" | jq -r '.to')
-        acked=$(echo "$msg" | jq -r '.acknowledged')
-        if [ "$rcpt" = "$name" ] && [ "$acked" = "false" ]; then
+        if [ "$rcpt" = "$name" ]; then
           if [ "$include_bodies" = "true" ]; then
             msgs=$(echo "$msgs" | jq --argjson m "$msg" '. + [$m]')
           else
@@ -225,14 +226,7 @@ if [[ "$url" == */mcp ]] && [ -n "$data" ]; then
         }'
         exit 0
       fi
-      acked=$(jq -r '.acknowledged' "$file")
-      if [ "$acked" = "true" ]; then
-        jq -n '{
-          jsonrpc: "2.0", id: 1,
-          error: {code: -32000, message: "already archived"}
-        }'
-        exit 0
-      fi
+      # mcp_agent_mail acknowledge is idempotent — no error on re-ack.
       contents=$(jq '.acknowledged = true' "$file")
       echo "$contents" > "$file"
       ts=$(now_ts)

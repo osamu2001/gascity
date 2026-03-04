@@ -14,7 +14,7 @@ func TestSend(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	m, err := p.Send("human", "mayor", "hello there")
+	m, err := p.Send("human", "mayor", "Hello", "hello there")
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -27,11 +27,17 @@ func TestSend(t *testing.T) {
 	if m.To != "mayor" {
 		t.Errorf("To = %q, want %q", m.To, "mayor")
 	}
+	if m.Subject != "Hello" {
+		t.Errorf("Subject = %q, want %q", m.Subject, "Hello")
+	}
 	if m.Body != "hello there" {
 		t.Errorf("Body = %q, want %q", m.Body, "hello there")
 	}
 	if m.CreatedAt.IsZero() {
 		t.Error("CreatedAt is zero")
+	}
+	if m.ThreadID == "" {
+		t.Error("ThreadID is empty — new messages should get a thread ID")
 	}
 
 	// Verify underlying bead.
@@ -44,6 +50,9 @@ func TestSend(t *testing.T) {
 	}
 	if b.Status != "open" {
 		t.Errorf("bead Status = %q, want %q", b.Status, "open")
+	}
+	if !hasLabel(b.Labels, "gc:message") {
+		t.Error("bead missing gc:message label")
 	}
 }
 
@@ -67,11 +76,11 @@ func TestInboxFilters(t *testing.T) {
 	p := New(store)
 
 	// Message to mayor.
-	if _, err := p.Send("human", "mayor", "for mayor"); err != nil {
+	if _, err := p.Send("human", "mayor", "", "for mayor"); err != nil {
 		t.Fatal(err)
 	}
 	// Message to worker.
-	if _, err := p.Send("human", "worker", "for worker"); err != nil {
+	if _, err := p.Send("human", "worker", "", "for worker"); err != nil {
 		t.Fatal(err)
 	}
 	// Task bead (not a message).
@@ -89,15 +98,15 @@ func TestInboxFilters(t *testing.T) {
 	}
 }
 
-func TestInboxExcludesClosed(t *testing.T) {
+func TestInboxExcludesRead(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	m, err := p.Send("human", "mayor", "will be read")
+	m, err := p.Send("human", "mayor", "", "will be read")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Read (marks as closed).
+	// Read (marks as read, NOT closed).
 	if _, err := p.Read(m.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -111,13 +120,49 @@ func TestInboxExcludesClosed(t *testing.T) {
 	}
 }
 
+// --- Get ---
+
+func TestGet(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "Subject", "body")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := p.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if m.Subject != "Subject" {
+		t.Errorf("Subject = %q, want %q", m.Subject, "Subject")
+	}
+	if m.Body != "body" {
+		t.Errorf("Body = %q, want %q", m.Body, "body")
+	}
+	if m.Read {
+		t.Error("Get should not mark as read")
+	}
+}
+
+func TestGetNotFound(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	_, err := p.Get("gc-999")
+	if err == nil {
+		t.Error("Get should fail for nonexistent ID")
+	}
+}
+
 // --- Read ---
 
 func TestRead(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	sent, err := p.Send("human", "mayor", "read me")
+	sent, err := p.Send("human", "mayor", "Sub", "read me")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,29 +174,59 @@ func TestRead(t *testing.T) {
 	if m.Body != "read me" {
 		t.Errorf("Body = %q, want %q", m.Body, "read me")
 	}
+	if !m.Read {
+		t.Error("Read should set Read = true")
+	}
 
-	// Bead should be closed now.
+	// Bead should still be open (not closed).
 	b, err := store.Get(sent.ID)
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
-	if b.Status != "closed" {
-		t.Errorf("bead Status = %q, want %q", b.Status, "closed")
+	if b.Status != "open" {
+		t.Errorf("bead Status = %q, want %q (Read must not close beads)", b.Status, "open")
+	}
+	if !hasLabel(b.Labels, "read") {
+		t.Error("bead missing 'read' label")
 	}
 }
 
-func TestReadAlreadyClosed(t *testing.T) {
+func TestReadDoesNotClose(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	sent, err := p.Send("human", "mayor", "old news")
+	sent, err := p.Send("human", "mayor", "", "still accessible")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Close it first.
-	store.Close(sent.ID) //nolint:errcheck
 
-	// Reading already-closed message should still return it.
+	// Read it.
+	if _, err := p.Read(sent.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Get should still return it.
+	m, err := p.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("Get after Read: %v", err)
+	}
+	if m.Body != "still accessible" {
+		t.Errorf("Body = %q, want %q", m.Body, "still accessible")
+	}
+}
+
+func TestReadAlreadyRead(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "old news")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mark as read via label.
+	store.Update(sent.ID, beads.UpdateOpts{Labels: []string{"read"}}) //nolint:errcheck
+
+	// Reading already-read message should still return it.
 	m, err := p.Read(sent.ID)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -171,13 +246,49 @@ func TestReadNotFound(t *testing.T) {
 	}
 }
 
+// --- MarkRead / MarkUnread ---
+
+func TestMarkReadMarkUnread(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "toggle me")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// MarkRead.
+	if err := p.MarkRead(sent.ID); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	msgs, err := p.Inbox("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("Inbox after MarkRead = %d, want 0", len(msgs))
+	}
+
+	// MarkUnread.
+	if err := p.MarkUnread(sent.ID); err != nil {
+		t.Fatalf("MarkUnread: %v", err)
+	}
+	msgs, err = p.Inbox("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 {
+		t.Errorf("Inbox after MarkUnread = %d, want 1", len(msgs))
+	}
+}
+
 // --- Archive ---
 
 func TestArchive(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	sent, err := p.Send("human", "mayor", "dismiss me")
+	sent, err := p.Send("human", "mayor", "", "dismiss me")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +327,7 @@ func TestArchiveAlreadyClosed(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	sent, err := p.Send("human", "mayor", "old")
+	sent, err := p.Send("human", "mayor", "", "old")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,13 +350,145 @@ func TestArchiveNotFound(t *testing.T) {
 	}
 }
 
+// --- Delete ---
+
+func TestDelete(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "delete me")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.Delete(sent.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead Status = %q, want %q", b.Status, "closed")
+	}
+}
+
+// --- Reply ---
+
+func TestReply(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first message")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "RE: Hello", "reply body")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	if reply.To != "alice" {
+		t.Errorf("Reply To = %q, want %q (original sender)", reply.To, "alice")
+	}
+	if reply.From != "bob" {
+		t.Errorf("Reply From = %q, want %q", reply.From, "bob")
+	}
+	if reply.ThreadID != sent.ThreadID {
+		t.Errorf("Reply ThreadID = %q, want %q (inherited)", reply.ThreadID, sent.ThreadID)
+	}
+	if reply.ReplyTo != sent.ID {
+		t.Errorf("Reply ReplyTo = %q, want %q", reply.ReplyTo, sent.ID)
+	}
+}
+
+// --- Thread ---
+
+func TestThread(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.Reply(sent.ID, "bob", "RE: Hello", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.Thread(sent.ThreadID)
+	if err != nil {
+		t.Fatalf("Thread: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("Thread = %d messages, want 2", len(msgs))
+	}
+	// First should be the original (earlier CreatedAt).
+	if msgs[0].Body != "first" {
+		t.Errorf("Thread[0].Body = %q, want %q", msgs[0].Body, "first")
+	}
+	if msgs[1].Body != "second" {
+		t.Errorf("Thread[1].Body = %q, want %q", msgs[1].Body, "second")
+	}
+}
+
+func TestThreadEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	msgs, err := p.Thread("nonexistent")
+	if err != nil {
+		t.Fatalf("Thread: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("Thread = %d messages, want 0", len(msgs))
+	}
+}
+
+// --- Count ---
+
+func TestCount(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	if _, err := p.Send("alice", "bob", "", "msg1"); err != nil {
+		t.Fatal(err)
+	}
+	m2, err := p.Send("alice", "bob", "", "msg2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Send("alice", "charlie", "", "not bob's"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mark one as read.
+	if err := p.MarkRead(m2.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	total, unread, err := p.Count("bob")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("total = %d, want 2", total)
+	}
+	if unread != 1 {
+		t.Errorf("unread = %d, want 1", unread)
+	}
+}
+
 // --- Check ---
 
 func TestCheck(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)
 
-	if _, err := p.Send("human", "mayor", "check me"); err != nil {
+	if _, err := p.Send("human", "mayor", "", "check me"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -260,13 +503,49 @@ func TestCheck(t *testing.T) {
 		t.Errorf("Body = %q, want %q", msgs[0].Body, "check me")
 	}
 
-	// Check should NOT mark as read (bead still open).
+	// Check should NOT mark as read (bead still open, no read label).
 	b, err := store.Get(msgs[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if b.Status != "open" {
 		t.Errorf("bead Status = %q, want %q (Check must not close beads)", b.Status, "open")
+	}
+	if hasLabel(b.Labels, "read") {
+		t.Error("Check should not add read label")
+	}
+}
+
+// --- Backward compat ---
+
+func TestBackwardCompatOldMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	// Old-style message: body in Title, no Description, no gc:message label.
+	_, err := store.Create(beads.Bead{
+		Title:    "old body text",
+		Type:     "message",
+		Assignee: "mayor",
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.Inbox("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox = %d, want 1", len(msgs))
+	}
+	// Old message: body comes from Title, subject is empty.
+	if msgs[0].Body != "old body text" {
+		t.Errorf("Body = %q, want %q", msgs[0].Body, "old body text")
+	}
+	if msgs[0].Subject != "" {
+		t.Errorf("Subject = %q, want empty (old message)", msgs[0].Subject)
 	}
 }
 

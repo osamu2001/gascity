@@ -105,6 +105,69 @@ func TestMemStoreListByLabel(t *testing.T) {
 	}
 }
 
+func TestMemStoreRemoveLabels(t *testing.T) {
+	s := beads.NewMemStore()
+	b, err := s.Create(beads.Bead{Title: "test", Labels: []string{"a", "b", "c"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove label "b".
+	if err := s.Update(b.ID, beads.UpdateOpts{RemoveLabels: []string{"b"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Labels) != 2 || got.Labels[0] != "a" || got.Labels[1] != "c" {
+		t.Errorf("Labels = %v, want [a c]", got.Labels)
+	}
+}
+
+func TestMemStoreRemoveLabelsNonexistent(t *testing.T) {
+	s := beads.NewMemStore()
+	b, err := s.Create(beads.Bead{Title: "test", Labels: []string{"a", "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Removing a label that doesn't exist is a no-op.
+	if err := s.Update(b.ID, beads.UpdateOpts{RemoveLabels: []string{"z"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Labels) != 2 {
+		t.Errorf("Labels = %v, want [a b]", got.Labels)
+	}
+}
+
+func TestMemStoreAddAndRemoveLabels(t *testing.T) {
+	s := beads.NewMemStore()
+	b, err := s.Create(beads.Bead{Title: "test", Labels: []string{"a", "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add "c" and remove "a" in the same call. Add happens first, then remove.
+	if err := s.Update(b.ID, beads.UpdateOpts{
+		Labels:       []string{"c"},
+		RemoveLabels: []string{"a"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Labels) != 2 || got.Labels[0] != "b" || got.Labels[1] != "c" {
+		t.Errorf("Labels = %v, want [b c]", got.Labels)
+	}
+}
+
 func TestMemStoreMolCookDefaultTitle(t *testing.T) {
 	s := beads.NewMemStore()
 	id, err := s.MolCook("deploy", "", nil)

@@ -29,9 +29,10 @@ type Bead struct {
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
 type UpdateOpts struct {
-	Description *string
-	ParentID    *string
-	Labels      []string // append these labels (nil = no change)
+	Description  *string
+	ParentID     *string
+	Labels       []string // append these labels (nil = no change)
+	RemoveLabels []string // remove these labels (nil = no change)
 }
 
 // containerTypes enumerates bead types that group child beads for

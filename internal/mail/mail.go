@@ -13,33 +13,64 @@ import (
 // has already been archived. CLI code uses this to print a distinct message.
 var ErrAlreadyArchived = errors.New("already archived")
 
+// ErrNotFound is returned when a message ID does not exist.
+var ErrNotFound = errors.New("message not found")
+
 // Message represents a mail message between agents or humans.
 type Message struct {
 	ID        string    `json:"id"`
 	From      string    `json:"from"`
 	To        string    `json:"to"`
+	Subject   string    `json:"subject"`
 	Body      string    `json:"body"`
 	CreatedAt time.Time `json:"created_at"`
+	Read      bool      `json:"read"`
+	ThreadID  string    `json:"thread_id,omitempty"`
+	ReplyTo   string    `json:"reply_to,omitempty"`
+	Priority  int       `json:"priority,omitempty"`
+	CC        []string  `json:"cc,omitempty"`
 }
 
 // Provider is the internal interface for mail backends. Implementations
 // include beadmail (built-in default backed by beads.Store) and exec
 // (user-supplied script via fork/exec).
 type Provider interface {
-	// Send creates a message from sender to recipient. Returns the
-	// created message with its assigned ID and timestamp.
-	Send(from, to, body string) (Message, error)
+	// Send creates a message. Subject is the summary line, body is the
+	// full content. Returns the created message with assigned ID.
+	Send(from, to, subject, body string) (Message, error)
 
-	// Inbox returns all unread messages for the recipient.
+	// Inbox returns unread messages for the recipient.
 	Inbox(recipient string) ([]Message, error)
 
+	// Get retrieves a message by ID without marking it read.
+	Get(id string) (Message, error)
+
 	// Read retrieves a message by ID and marks it as read.
+	// The message remains in the store (not closed).
 	Read(id string) (Message, error)
 
-	// Archive closes a message without reading it.
+	// MarkRead marks a message as read (adds "read" label).
+	MarkRead(id string) error
+
+	// MarkUnread marks a message as unread (removes "read" label).
+	MarkUnread(id string) error
+
+	// Archive closes a message bead (removes from all views).
 	Archive(id string) error
 
-	// Check returns unread messages for the recipient (used for hook
-	// injection). Unlike Inbox, Check does not mark messages as read.
+	// Delete is an alias for Archive (closes the bead).
+	Delete(id string) error
+
+	// Check returns unread messages without marking them read.
 	Check(recipient string) ([]Message, error)
+
+	// Reply creates a reply to an existing message. Inherits ThreadID
+	// from the original, sets ReplyTo to the original's ID.
+	Reply(id, from, subject, body string) (Message, error)
+
+	// Thread returns all messages sharing a thread ID, ordered by time.
+	Thread(threadID string) ([]Message, error)
+
+	// Count returns (total, unread) message counts for a recipient.
+	Count(recipient string) (total int, unread int, err error)
 }

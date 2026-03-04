@@ -4,7 +4,11 @@
 package beadmail
 
 import (
+	"crypto/rand"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/steveyegge/gascity/internal/beads"
 	"github.com/steveyegge/gascity/internal/mail"
@@ -20,13 +24,18 @@ func New(store beads.Store) *Provider {
 	return &Provider{store: store}
 }
 
-// Send creates a message bead.
-func (p *Provider) Send(from, to, body string) (mail.Message, error) {
+// Send creates a message bead with subject in Title and body in Description.
+func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
+	threadID := generateThreadID()
+	labels := []string{"gc:message", "thread:" + threadID}
+
 	b, err := p.store.Create(beads.Bead{
-		Title:    body,
-		Type:     "message",
-		Assignee: to,
-		From:     from,
+		Title:       subject,
+		Description: body,
+		Type:        "message",
+		Assignee:    to,
+		From:        from,
+		Labels:      labels,
 	})
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
@@ -36,21 +45,49 @@ func (p *Provider) Send(from, to, body string) (mail.Message, error) {
 
 // Inbox returns all unread messages for the recipient.
 func (p *Provider) Inbox(recipient string) ([]mail.Message, error) {
-	return p.filterMessages(recipient)
+	return p.filterMessages(recipient, false)
 }
 
-// Read retrieves a message by ID and marks it as read (closes the bead).
+// Get retrieves a message by ID without marking it read.
+func (p *Provider) Get(id string) (mail.Message, error) {
+	b, err := p.store.Get(id)
+	if err != nil {
+		return mail.Message{}, fmt.Errorf("beadmail get: %w", err)
+	}
+	return beadToMessage(b), nil
+}
+
+// Read retrieves a message by ID and marks it as read (adds "read" label).
+// The message remains in the store (not closed).
 func (p *Provider) Read(id string) (mail.Message, error) {
 	b, err := p.store.Get(id)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail read: %w", err)
 	}
-	if b.Status != "closed" {
-		if err := p.store.Close(id); err != nil {
+	if !hasLabel(b.Labels, "read") {
+		if err := p.store.Update(id, beads.UpdateOpts{Labels: []string{"read"}}); err != nil {
 			return mail.Message{}, fmt.Errorf("beadmail read: marking as read: %w", err)
 		}
 	}
-	return beadToMessage(b), nil
+	msg := beadToMessage(b)
+	msg.Read = true
+	return msg, nil
+}
+
+// MarkRead marks a message as read (adds "read" label).
+func (p *Provider) MarkRead(id string) error {
+	if _, err := p.store.Get(id); err != nil {
+		return fmt.Errorf("beadmail mark-read: %w", err)
+	}
+	return p.store.Update(id, beads.UpdateOpts{Labels: []string{"read"}})
+}
+
+// MarkUnread marks a message as unread (removes "read" label).
+func (p *Provider) MarkUnread(id string) error {
+	if _, err := p.store.Get(id); err != nil {
+		return fmt.Errorf("beadmail mark-unread: %w", err)
+	}
+	return p.store.Update(id, beads.UpdateOpts{RemoveLabels: []string{"read"}})
 }
 
 // Archive closes a message bead without reading it.
@@ -71,33 +108,181 @@ func (p *Provider) Archive(id string) error {
 	return nil
 }
 
+// Delete is an alias for Archive (closes the bead).
+func (p *Provider) Delete(id string) error {
+	return p.Archive(id)
+}
+
 // Check returns unread messages for the recipient without marking them read.
 func (p *Provider) Check(recipient string) ([]mail.Message, error) {
-	return p.filterMessages(recipient)
+	return p.filterMessages(recipient, false)
+}
+
+// Reply creates a reply to an existing message. Inherits ThreadID from the
+// original, sets ReplyTo to the original's ID. Reply is addressed to the
+// original sender.
+func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
+	original, err := p.store.Get(id)
+	if err != nil {
+		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
+	}
+
+	threadID := extractLabel(original.Labels, "thread:")
+	if threadID == "" {
+		threadID = generateThreadID()
+	}
+
+	labels := []string{"gc:message", "thread:" + threadID, "reply-to:" + id}
+
+	b, err := p.store.Create(beads.Bead{
+		Title:       subject,
+		Description: body,
+		Type:        "message",
+		Assignee:    original.From, // reply goes back to sender
+		From:        from,
+		Labels:      labels,
+	})
+	if err != nil {
+		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
+	}
+	return beadToMessage(b), nil
+}
+
+// Thread returns all messages sharing a thread ID, ordered by creation time.
+func (p *Provider) Thread(threadID string) ([]mail.Message, error) {
+	bs, err := p.store.ListByLabel("thread:"+threadID, 0)
+	if err != nil {
+		return nil, fmt.Errorf("beadmail thread: %w", err)
+	}
+	msgs := make([]mail.Message, len(bs))
+	for i, b := range bs {
+		msgs[i] = beadToMessage(b)
+	}
+	// Sort by creation time ascending.
+	sort.Slice(msgs, func(i, j int) bool {
+		return msgs[i].CreatedAt.Before(msgs[j].CreatedAt)
+	})
+	return msgs, nil
+}
+
+// Count returns (total, unread) message counts for a recipient.
+func (p *Provider) Count(recipient string) (int, int, error) {
+	all, err := p.store.List()
+	if err != nil {
+		return 0, 0, fmt.Errorf("beadmail count: %w", err)
+	}
+	var total, unread int
+	for _, b := range all {
+		if isMessage(b) && b.Status == "open" && b.Assignee == recipient {
+			total++
+			if !hasLabel(b.Labels, "read") {
+				unread++
+			}
+		}
+	}
+	return total, unread, nil
 }
 
 // filterMessages returns open message beads assigned to the recipient.
-func (p *Provider) filterMessages(recipient string) ([]mail.Message, error) {
+// When includeRead is false, messages with the "read" label are excluded.
+func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Message, error) {
 	all, err := p.store.List()
 	if err != nil {
 		return nil, fmt.Errorf("beadmail: listing beads: %w", err)
 	}
 	var msgs []mail.Message
 	for _, b := range all {
-		if b.Type == "message" && b.Status == "open" && b.Assignee == recipient {
+		if isMessage(b) && b.Status == "open" && b.Assignee == recipient {
+			if !includeRead && hasLabel(b.Labels, "read") {
+				continue
+			}
 			msgs = append(msgs, beadToMessage(b))
 		}
 	}
 	return msgs, nil
 }
 
+// isMessage returns true if the bead is a message (by Type or gc:message label).
+func isMessage(b beads.Bead) bool {
+	return b.Type == "message" || hasLabel(b.Labels, "gc:message")
+}
+
 // beadToMessage converts a bead to a mail.Message.
 func beadToMessage(b beads.Bead) mail.Message {
+	subject := b.Title
+	body := b.Description
+	// Backward compat: old messages have body in Title, no Description,
+	// and no gc:message label.
+	if body == "" && !hasLabel(b.Labels, "gc:message") {
+		body = subject
+		subject = ""
+	}
 	return mail.Message{
 		ID:        b.ID,
 		From:      b.From,
 		To:        b.Assignee,
-		Body:      b.Title,
+		Subject:   subject,
+		Body:      body,
 		CreatedAt: b.CreatedAt,
+		Read:      hasLabel(b.Labels, "read"),
+		ThreadID:  extractLabel(b.Labels, "thread:"),
+		ReplyTo:   extractLabel(b.Labels, "reply-to:"),
+		Priority:  extractPriority(b.Labels),
+		CC:        extractCC(b.Labels),
 	}
 }
+
+// hasLabel reports whether labels contains the target string.
+func hasLabel(labels []string, target string) bool {
+	for _, l := range labels {
+		if l == target {
+			return true
+		}
+	}
+	return false
+}
+
+// extractLabel returns the value after the prefix from the first matching
+// label, or "" if none match. E.g. "thread:abc" with prefix "thread:" → "abc".
+func extractLabel(labels []string, prefix string) string {
+	for _, l := range labels {
+		if strings.HasPrefix(l, prefix) {
+			return l[len(prefix):]
+		}
+	}
+	return ""
+}
+
+// extractPriority parses a "priority:N" label, returning 0 if not found.
+func extractPriority(labels []string) int {
+	s := extractLabel(labels, "priority:")
+	if s == "" {
+		return 0
+	}
+	n, _ := strconv.Atoi(s)
+	return n
+}
+
+// extractCC extracts CC recipients from "cc:<addr>" labels.
+func extractCC(labels []string) []string {
+	var result []string
+	for _, l := range labels {
+		if strings.HasPrefix(l, "cc:") {
+			result = append(result, l[3:])
+		}
+	}
+	return result
+}
+
+// generateThreadID returns a unique thread identifier.
+func generateThreadID() string {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback: should never happen.
+		return "thread-fallback"
+	}
+	return fmt.Sprintf("thread-%x", b)
+}
+
+// Compile-time interface check.
+var _ mail.Provider = (*Provider)(nil)

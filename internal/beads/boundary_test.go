@@ -41,6 +41,7 @@ func TestNoBdExecOutsideBeads(t *testing.T) {
 		filepath.Join("internal", "deps") + string(filepath.Separator), // version checks only (bd version)
 		filepath.Join("internal", "dolt") + string(filepath.Separator), // upstream-synced from gastown
 		filepath.Join("test", "integration") + string(filepath.Separator),
+		filepath.Join("examples", "gastown", "packs", "dashboard") + string(filepath.Separator), // standalone server uses bd directly
 	}
 
 	var violations []string

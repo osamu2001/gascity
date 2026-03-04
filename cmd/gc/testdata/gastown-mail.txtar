@@ -44,8 +44,8 @@ stdout 'deacon'
 stdout 'Patrol complete'
 
 exec gc mail read gc-2
-stdout 'From:   deacon'
-stdout 'To:     mayor'
+stdout 'From:     deacon'
+stdout 'To:       mayor'
 
 # --- 6. Multi-agent mail chain ---
 
@@ -56,8 +56,8 @@ stdout 'Sent message gc-3 to witness'
 # Witness reads and replies
 env GC_AGENT=witness
 exec gc mail read gc-3
-stdout 'From:   human'
-stdout 'Body:   Check rig health'
+stdout 'From:     human'
+stdout 'Body:     Check rig health'
 
 exec gc mail send mayor 'Rig healthy, 2 polecats active'
 stdout 'Sent message gc-4 to mayor'
@@ -74,10 +74,10 @@ stdout 'Archived message gc-4'
 exec gc mail inbox mayor
 ! stdout 'gc-4'
 
-# --- 8. Archived message still readable ---
+# --- 8. Read message still accessible via peek ---
 
-exec gc mail read gc-2
-stdout 'From:   deacon'
+exec gc mail peek gc-2
+stdout 'From:     deacon'
 
 # --- 9. Multiple messages to same agent ---
 

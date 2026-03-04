@@ -18,6 +18,7 @@ func newEventsCmd(stdout, stderr io.Writer) *cobra.Command {
 	var watchFlag bool
 	var followFlag bool
 	var seqFlag bool
+	var jsonFlag bool
 	var timeoutFlag string
 	var afterFlag uint64
 	var payloadMatch []string
@@ -56,7 +57,7 @@ scripting and automation).`,
 				}
 				return nil
 			}
-			if cmdEvents(typeFilter, sinceFlag, payloadMatch, stdout, stderr) != 0 {
+			if cmdEvents(typeFilter, sinceFlag, payloadMatch, jsonFlag, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -70,11 +71,12 @@ scripting and automation).`,
 	cmd.Flags().StringVar(&timeoutFlag, "timeout", "30s", "Max wait duration for --watch (e.g. 30s, 5m)")
 	cmd.Flags().Uint64Var(&afterFlag, "after", 0, "Resume watching from this sequence number (0 = current head)")
 	cmd.Flags().StringArrayVar(&payloadMatch, "payload-match", nil, "Filter by payload field (key=value, repeatable)")
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output in JSON format (list mode only)")
 	return cmd
 }
 
 // cmdEvents is the CLI entry point for viewing the event log.
-func cmdEvents(typeFilter, sinceFlag string, payloadMatchArgs []string, stdout, stderr io.Writer) int {
+func cmdEvents(typeFilter, sinceFlag string, payloadMatchArgs []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	pm, err := parsePayloadMatch(payloadMatchArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -85,6 +87,9 @@ func cmdEvents(typeFilter, sinceFlag string, payloadMatchArgs []string, stdout, 
 		return code
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
+	if jsonOutput {
+		return doEventsJSON(ep, typeFilter, sinceFlag, pm, stdout, stderr)
+	}
 	return doEvents(ep, typeFilter, sinceFlag, pm, stdout, stderr)
 }
 
@@ -153,6 +158,40 @@ func doEvents(ep events.Provider, typeFilter, sinceFlag string, payloadMatch map
 		)
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
+	return 0
+}
+
+// doEventsJSON reads events and outputs them as a JSON array.
+func doEventsJSON(ep events.Provider, typeFilter, sinceFlag string, payloadMatch map[string][]string, stdout, stderr io.Writer) int {
+	var filter events.Filter
+	filter.Type = typeFilter
+
+	if sinceFlag != "" {
+		d, err := time.ParseDuration(sinceFlag)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc events: invalid --since %q: %v\n", sinceFlag, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		filter.Since = time.Now().Add(-d)
+	}
+
+	evts, err := ep.List(filter)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Apply payload-match filter if specified.
+	if len(payloadMatch) > 0 {
+		evts = filterEventsByPayload(evts, payloadMatch)
+	}
+
+	data, err := json.MarshalIndent(evts, "", "  ")
+	if err != nil {
+		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
 	return 0
 }
 

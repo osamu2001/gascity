@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -114,6 +115,105 @@ max = 5
 	}
 	if !strings.Contains(stdout.String(), "max=5") {
 		t.Errorf("stdout should show max: %q", stdout.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// doAgentListJSON — JSON output (dashboard support)
+// ---------------------------------------------------------------------------
+
+func TestDoAgentListJSON(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "myrig"
+path = "/path/to/myrig"
+suspended = true
+
+[[agents]]
+name = "mayor"
+
+[[agents]]
+name = "polecat"
+dir = "myrig"
+[agents.pool]
+min = 1
+max = 3
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentListJSON(fs, "/city", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	var entries []AgentListEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+
+	// Mayor: city-scoped, not suspended.
+	if entries[0].Name != "mayor" {
+		t.Errorf("entries[0].name = %q, want %q", entries[0].Name, "mayor")
+	}
+	if entries[0].Scope != "city" {
+		t.Errorf("entries[0].scope = %q, want %q", entries[0].Scope, "city")
+	}
+	if entries[0].Pool != nil {
+		t.Error("entries[0].pool should be nil")
+	}
+
+	// Polecat: rig-scoped, rig suspended, pool config.
+	if entries[1].QualifiedName != "myrig/polecat" {
+		t.Errorf("entries[1].qualified_name = %q, want %q", entries[1].QualifiedName, "myrig/polecat")
+	}
+	if entries[1].Scope != "rig" {
+		t.Errorf("entries[1].scope = %q, want %q", entries[1].Scope, "rig")
+	}
+	if !entries[1].RigSuspended {
+		t.Error("entries[1].rig_suspended should be true")
+	}
+	if entries[1].Pool == nil {
+		t.Fatal("entries[1].pool should not be nil")
+	}
+	if entries[1].Pool.Max != 3 {
+		t.Errorf("entries[1].pool.max = %d, want 3", entries[1].Pool.Max)
+	}
+}
+
+func TestDoAgentListJSONDirFilter(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+
+[[agents]]
+name = "mayor"
+
+[[agents]]
+name = "worker"
+dir = "myrig"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentListJSON(fs, "/city", "myrig", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	var entries []AgentListEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1 (dir filter)", len(entries))
+	}
+	if entries[0].Name != "worker" {
+		t.Errorf("entries[0].name = %q, want %q", entries[0].Name, "worker")
 	}
 }
 

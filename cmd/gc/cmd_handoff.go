@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"fmt"
 	"io"
 	"os"
@@ -147,6 +148,7 @@ func doHandoff(store beads.Store, rec events.Recorder, dops drainOps,
 		Type:        "message",
 		Assignee:    agentName,
 		From:        agentName,
+		Labels:      []string{"gc:message", "thread:" + handoffThreadID()},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -192,6 +194,7 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp session.Provider
 		Type:        "message",
 		Assignee:    targetName,
 		From:        sender,
+		Labels:      []string{"gc:message", "thread:" + handoffThreadID()},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: creating mail: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -222,4 +225,11 @@ func doHandoffRemote(store beads.Store, rec events.Recorder, sp session.Provider
 
 	fmt.Fprintf(stdout, "Handoff: sent mail %s to %s, killed session (reconciler will restart)\n", b.ID, targetName) //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// handoffThreadID generates a unique thread ID for handoff messages.
+func handoffThreadID() string {
+	b := make([]byte, 6)
+	rand.Read(b) //nolint:errcheck
+	return fmt.Sprintf("thread-%x", b)
 }

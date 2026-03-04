@@ -29,7 +29,7 @@ stdout 'Sent message gc-2 to mayor'
 # --- Read mail → should emit mail.read ---
 
 exec gc mail read gc-2
-stdout 'Body:   hey there'
+stdout 'Body:     hey there'
 
 # --- View all events ---
 

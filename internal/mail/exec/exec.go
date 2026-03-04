@@ -32,10 +32,10 @@ func NewProvider(script string) *Provider {
 	}
 }
 
-// Send delegates to: script send <to> with JSON {"from":"...","body":"..."} on stdin.
-func (p *Provider) Send(from, to, body string) (mail.Message, error) {
+// Send delegates to: script send <to> with JSON {"from":"...","subject":"...","body":"..."} on stdin.
+func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 	p.ensureRunning()
-	data, err := marshalSendInput(from, body)
+	data, err := marshalSendInput(from, subject, body)
 	if err != nil {
 		return mail.Message{}, err
 	}
@@ -59,6 +59,16 @@ func (p *Provider) Inbox(recipient string) ([]mail.Message, error) {
 	return unmarshalMessages(out)
 }
 
+// Get delegates to: script get <id>
+func (p *Provider) Get(id string) (mail.Message, error) {
+	p.ensureRunning()
+	out, err := p.run(nil, "get", id)
+	if err != nil {
+		return mail.Message{}, err
+	}
+	return unmarshalMessage(out)
+}
+
 // Read delegates to: script read <id>
 func (p *Provider) Read(id string) (mail.Message, error) {
 	p.ensureRunning()
@@ -69,6 +79,20 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 	return unmarshalMessage(out)
 }
 
+// MarkRead delegates to: script mark-read <id>
+func (p *Provider) MarkRead(id string) error {
+	p.ensureRunning()
+	_, err := p.run(nil, "mark-read", id)
+	return err
+}
+
+// MarkUnread delegates to: script mark-unread <id>
+func (p *Provider) MarkUnread(id string) error {
+	p.ensureRunning()
+	_, err := p.run(nil, "mark-unread", id)
+	return err
+}
+
 // Archive delegates to: script archive <id>
 // If the script writes "already archived" to stderr and exits non-zero,
 // the error wraps [mail.ErrAlreadyArchived].
@@ -77,6 +101,16 @@ func (p *Provider) Archive(id string) error {
 	_, err := p.run(nil, "archive", id)
 	if err != nil && strings.Contains(err.Error(), "already archived") {
 		return fmt.Errorf("exec mail archive: %w", mail.ErrAlreadyArchived)
+	}
+	return err
+}
+
+// Delete delegates to: script delete <id>
+func (p *Provider) Delete(id string) error {
+	p.ensureRunning()
+	_, err := p.run(nil, "delete", id)
+	if err != nil && strings.Contains(err.Error(), "already archived") {
+		return fmt.Errorf("exec mail delete: %w", mail.ErrAlreadyArchived)
 	}
 	return err
 }
@@ -92,6 +126,46 @@ func (p *Provider) Check(recipient string) ([]mail.Message, error) {
 		return nil, nil
 	}
 	return unmarshalMessages(out)
+}
+
+// Reply delegates to: script reply <id> with JSON {"from":"...","subject":"...","body":"..."} on stdin.
+func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
+	p.ensureRunning()
+	data, err := marshalReplyInput(from, subject, body)
+	if err != nil {
+		return mail.Message{}, err
+	}
+	out, err := p.run(data, "reply", id)
+	if err != nil {
+		return mail.Message{}, err
+	}
+	return unmarshalMessage(out)
+}
+
+// Thread delegates to: script thread <thread-id>
+func (p *Provider) Thread(threadID string) ([]mail.Message, error) {
+	p.ensureRunning()
+	out, err := p.run(nil, "thread", threadID)
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return unmarshalMessages(out)
+}
+
+// Count delegates to: script count <recipient>
+func (p *Provider) Count(recipient string) (int, int, error) {
+	p.ensureRunning()
+	out, err := p.run(nil, "count", recipient)
+	if err != nil {
+		return 0, 0, err
+	}
+	if out == "" {
+		return 0, 0, nil
+	}
+	return unmarshalCount(out)
 }
 
 // ensureRunning calls "ensure-running" on the script once per provider

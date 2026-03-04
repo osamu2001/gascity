@@ -364,6 +364,9 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 	for _, l := range opts.Labels {
 		args = append(args, "--add-label", l)
 	}
+	for _, l := range opts.RemoveLabels {
+		args = append(args, "--remove-label", l)
+	}
 	_, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
 		return fmt.Errorf("updating bead %q: %w", id, err)

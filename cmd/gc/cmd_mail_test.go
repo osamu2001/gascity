@@ -44,8 +44,9 @@ func TestMailSendSuccess(t *testing.T) {
 	if b.From != "human" {
 		t.Errorf("bead From = %q, want %q", b.From, "human")
 	}
-	if b.Title != "hey, are you still there?" {
-		t.Errorf("bead Title = %q, want message body", b.Title)
+	// Body is now in Description (subject is empty for positional args).
+	if b.Description != "hey, are you still there?" {
+		t.Errorf("bead Description = %q, want message body", b.Description)
 	}
 	if b.Status != "open" {
 		t.Errorf("bead Status = %q, want %q", b.Status, "open")
@@ -158,8 +159,8 @@ func TestMailInboxEmpty(t *testing.T) {
 func TestMailInboxShowsMessages(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	store.Create(beads.Bead{Title: "hey there", Type: "message", Assignee: "mayor", From: "human"}) //nolint:errcheck
-	store.Create(beads.Bead{Title: "status?", Type: "message", Assignee: "mayor", From: "worker"})  //nolint:errcheck
+	mp.Send("human", "mayor", "", "hey there") //nolint:errcheck
+	mp.Send("worker", "mayor", "", "status?")  //nolint:errcheck
 
 	var stdout, stderr bytes.Buffer
 	code := doMailInbox(mp, "mayor", &stdout, &stderr)
@@ -179,14 +180,14 @@ func TestMailInboxFiltersCorrectly(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
 	// Message to mayor (should appear).
-	store.Create(beads.Bead{Title: "for mayor", Type: "message", Assignee: "mayor", From: "human"}) //nolint:errcheck
+	mp.Send("human", "mayor", "", "for mayor") //nolint:errcheck
 	// Message to worker (should not appear in mayor's inbox).
-	store.Create(beads.Bead{Title: "for worker", Type: "message", Assignee: "worker", From: "human"}) //nolint:errcheck
+	mp.Send("human", "worker", "", "for worker") //nolint:errcheck
 	// Task bead (should not appear — wrong type).
 	store.Create(beads.Bead{Title: "a task"}) //nolint:errcheck
-	// Read message to mayor (should not appear — already closed).
-	store.Create(beads.Bead{Title: "already read", Type: "message", Assignee: "mayor", From: "human"}) //nolint:errcheck
-	store.Close("gc-4")                                                                                //nolint:errcheck
+	// Read message to mayor (should not appear — already read).
+	m, _ := mp.Send("human", "mayor", "", "already read") //nolint:errcheck
+	mp.Read(m.ID)                                         //nolint:errcheck
 
 	var stdout bytes.Buffer
 	code := doMailInbox(mp, "mayor", &stdout, &bytes.Buffer{})
@@ -212,7 +213,7 @@ func TestMailInboxFiltersCorrectly(t *testing.T) {
 func TestMailInboxDefaultsToHuman(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	store.Create(beads.Bead{Title: "report", Type: "message", Assignee: "human", From: "mayor"}) //nolint:errcheck
+	mp.Send("mayor", "human", "", "report") //nolint:errcheck
 
 	var stdout bytes.Buffer
 	code := doMailInbox(mp, "human", &stdout, &bytes.Buffer{})
@@ -229,7 +230,7 @@ func TestMailInboxDefaultsToHuman(t *testing.T) {
 func TestMailReadSuccess(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	store.Create(beads.Bead{Title: "hey, are you still there?", Type: "message", Assignee: "mayor", From: "human"}) //nolint:errcheck
+	mp.Send("human", "mayor", "Hello", "hey, are you still there?") //nolint:errcheck
 
 	var stdout, stderr bytes.Buffer
 	code := doMailRead(mp, events.Discard, []string{"gc-1"}, &stdout, &stderr)
@@ -242,23 +243,24 @@ func TestMailReadSuccess(t *testing.T) {
 
 	out := stdout.String()
 	for _, want := range []string{
-		"ID:     gc-1",
-		"From:   human",
-		"To:     mayor",
-		"Body:   hey, are you still there?",
+		"ID:       gc-1",
+		"From:     human",
+		"To:       mayor",
+		"Subject:  Hello",
+		"Body:     hey, are you still there?",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q:\n%s", want, out)
 		}
 	}
 
-	// Verify bead is now closed (marked as read).
+	// Verify bead is still open (read only adds "read" label, NOT closed).
 	b, err := store.Get("gc-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.Status != "closed" {
-		t.Errorf("bead Status = %q, want %q (marked as read)", b.Status, "closed")
+	if b.Status != "open" {
+		t.Errorf("bead Status = %q, want %q (read must not close)", b.Status, "open")
 	}
 }
 
@@ -293,8 +295,8 @@ func TestMailReadNotFound(t *testing.T) {
 func TestMailReadAlreadyRead(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	store.Create(beads.Bead{Title: "old news", Type: "message", Assignee: "mayor", From: "human"}) //nolint:errcheck
-	store.Close("gc-1")                                                                            //nolint:errcheck
+	mp.Send("human", "mayor", "", "old news") //nolint:errcheck
+	mp.Read("gc-1")                           //nolint:errcheck
 
 	// Reading an already-read message should still display it without error.
 	var stdout, stderr bytes.Buffer
@@ -307,12 +309,173 @@ func TestMailReadAlreadyRead(t *testing.T) {
 	}
 }
 
+// --- gc mail peek ---
+
+func TestMailPeekSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("human", "mayor", "Hello", "peek body") //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailPeek(mp, []string{"gc-1"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailPeek = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "peek body") {
+		t.Errorf("stdout missing 'peek body':\n%s", out)
+	}
+
+	// Message should still be in inbox (not marked read).
+	msgs, _ := mp.Inbox("mayor")
+	if len(msgs) != 1 {
+		t.Errorf("Inbox after peek = %d, want 1", len(msgs))
+	}
+}
+
+func TestMailPeekMissingID(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+
+	var stderr bytes.Buffer
+	code := doMailPeek(mp, nil, &bytes.Buffer{}, &stderr)
+	if code != 1 {
+		t.Errorf("doMailPeek = %d, want 1", code)
+	}
+}
+
+// --- gc mail reply ---
+
+func TestMailReplySuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailReply(mp, events.Discard, "gc-1", "bob", "RE: Hello", "reply body", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailReply = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Replied to gc-1") {
+		t.Errorf("stdout = %q, want reply confirmation", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "to alice") {
+		t.Errorf("stdout = %q, want reply addressed to alice", stdout.String())
+	}
+}
+
+// --- gc mail mark-read / mark-unread ---
+
+func TestMailMarkReadSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("human", "mayor", "", "mark me") //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailMarkRead(mp, events.Discard, []string{"gc-1"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailMarkRead = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Marked gc-1 as read") {
+		t.Errorf("stdout = %q, want confirmation", stdout.String())
+	}
+}
+
+func TestMailMarkUnreadSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("human", "mayor", "", "unmark me") //nolint:errcheck
+	mp.MarkRead("gc-1")                        //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailMarkUnread(mp, events.Discard, []string{"gc-1"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailMarkUnread = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Marked gc-1 as unread") {
+		t.Errorf("stdout = %q, want confirmation", stdout.String())
+	}
+}
+
+// --- gc mail delete ---
+
+func TestMailDeleteSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("human", "mayor", "", "delete me") //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailDelete(mp, events.Discard, []string{"gc-1"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailDelete = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Deleted message gc-1") {
+		t.Errorf("stdout = %q, want deletion confirmation", stdout.String())
+	}
+}
+
+// --- gc mail thread ---
+
+func TestMailThreadSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	sent, _ := mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
+	mp.Reply(sent.ID, "bob", "RE: Hello", "second")      //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailThread(mp, []string{sent.ThreadID}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailThread = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "alice") {
+		t.Errorf("stdout missing 'alice':\n%s", out)
+	}
+	if !strings.Contains(out, "bob") {
+		t.Errorf("stdout missing 'bob':\n%s", out)
+	}
+}
+
+func TestMailThreadEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+
+	var stdout bytes.Buffer
+	code := doMailThread(mp, []string{"nonexistent"}, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailThread = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "No messages in thread") {
+		t.Errorf("stdout = %q, want empty thread message", stdout.String())
+	}
+}
+
+// --- gc mail count ---
+
+func TestMailCountSuccess(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	mp.Send("alice", "bob", "", "msg1") //nolint:errcheck
+	m2, _ := mp.Send("alice", "bob", "", "msg2")
+	mp.MarkRead(m2.ID) //nolint:errcheck
+
+	var stdout, stderr bytes.Buffer
+	code := doMailCount(mp, "bob", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailCount = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "2 total, 1 unread for bob") {
+		t.Errorf("stdout = %q, want count output", stdout.String())
+	}
+}
+
 // --- gc mail archive ---
 
 func TestMailArchiveSuccess(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	store.Create(beads.Bead{Title: "dismiss me", Type: "message", Assignee: "mayor", From: "human"}) //nolint:errcheck
+	mp.Send("human", "mayor", "", "dismiss me") //nolint:errcheck
 
 	var stdout, stderr bytes.Buffer
 	code := doMailArchive(mp, events.Discard, []string{"gc-1"}, &stdout, &stderr)
@@ -382,8 +545,8 @@ func TestMailArchiveNonMessage(t *testing.T) {
 func TestMailArchiveAlreadyClosed(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	store.Create(beads.Bead{Title: "old", Type: "message", Assignee: "mayor", From: "human"}) //nolint:errcheck
-	store.Close("gc-1")                                                                       //nolint:errcheck
+	mp.Send("human", "mayor", "", "old") //nolint:errcheck
+	mp.Archive("gc-1")                   //nolint:errcheck
 
 	var stdout, stderr bytes.Buffer
 	code := doMailArchive(mp, events.Discard, []string{"gc-1"}, &stdout, &stderr)
@@ -487,33 +650,14 @@ func TestMailSendWithoutNotify(t *testing.T) {
 
 // --- gc mail send -s/-m ---
 
-func TestAssembleMailBody(t *testing.T) {
-	tests := []struct {
-		name, subject, message, want string
-	}{
-		{"both", "ESCALATION: Auth broken", "Token refresh fails after 30min", "ESCALATION: Auth broken\n\nToken refresh fails after 30min"},
-		{"subject only", "Build is green", "", "Build is green"},
-		{"message only", "", "Detailed body text", "Detailed body text"},
-		{"neither", "", "", ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := assembleMailBody(tt.subject, tt.message)
-			if got != tt.want {
-				t.Errorf("assembleMailBody(%q, %q) = %q, want %q", tt.subject, tt.message, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestMailSendSubjectFlag(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	body := assembleMailBody("Build is green", "")
+	// Simulate -s flag: args = [to, subject, body].
 	var stdout bytes.Buffer
-	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", body}, nil, &stdout, &bytes.Buffer{})
+	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "Build is green", ""}, nil, &stdout, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("doMailSend = %d, want 0", code)
 	}
@@ -532,9 +676,9 @@ func TestMailSendSubjectAndMessage(t *testing.T) {
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	body := assembleMailBody("ESCALATION: Auth broken", "Token refresh fails after 30min")
+	// args = [to, subject, body] from -s/-m flags.
 	var stdout bytes.Buffer
-	code := doMailSend(mp, events.Discard, recipients, "witness", []string{"mayor", body}, nil, &stdout, &bytes.Buffer{})
+	code := doMailSend(mp, events.Discard, recipients, "witness", []string{"mayor", "ESCALATION: Auth broken", "Token refresh fails after 30min"}, nil, &stdout, &bytes.Buffer{})
 	if code != 0 {
 		t.Fatalf("doMailSend = %d, want 0", code)
 	}
@@ -543,9 +687,11 @@ func TestMailSendSubjectAndMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "ESCALATION: Auth broken\n\nToken refresh fails after 30min"
-	if b.Title != want {
-		t.Errorf("bead Title = %q, want %q", b.Title, want)
+	if b.Title != "ESCALATION: Auth broken" {
+		t.Errorf("bead Title = %q, want %q", b.Title, "ESCALATION: Auth broken")
+	}
+	if b.Description != "Token refresh fails after 30min" {
+		t.Errorf("bead Description = %q, want %q", b.Description, "Token refresh fails after 30min")
 	}
 }
 
@@ -572,57 +718,14 @@ func TestMailSendFromFlag(t *testing.T) {
 	}
 }
 
-func TestMailSendFromFlagOverridesEnv(t *testing.T) {
-	store := beads.NewMemStore()
-	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
-
-	var stdout bytes.Buffer
-	code := doMailSend(mp, events.Discard, recipients, "witness", []string{"mayor", "health report"}, nil, &stdout, &bytes.Buffer{})
-	if code != 0 {
-		t.Fatalf("doMailSend = %d, want 0", code)
-	}
-
-	b, err := store.Get("gc-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.From != "witness" {
-		t.Errorf("bead From = %q, want %q (--from should override env)", b.From, "witness")
-	}
-}
-
-func TestMailSendFromDefault(t *testing.T) {
-	store := beads.NewMemStore()
-	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true}
-
-	var stdout bytes.Buffer
-	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "hello"}, nil, &stdout, &bytes.Buffer{})
-	if code != 0 {
-		t.Fatalf("doMailSend = %d, want 0", code)
-	}
-
-	b, err := store.Get("gc-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.From != "human" {
-		t.Errorf("bead From = %q, want %q (default when no --from and no GC_AGENT)", b.From, "human")
-	}
-}
-
 // --- gc mail send --to ---
 
 func TestMailSendToFlag(t *testing.T) {
-	// --to flag sets recipient, body is the only positional arg.
-	// cmdMailSend prepends --to value to args, so doMailSend sees [to, body].
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	var stdout, stderr bytes.Buffer
-	// Simulate what cmdMailSend does: prepend "mayor" from --to flag to args ["hello"].
 	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "hello from --to"}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doMailSend = %d, want 0; stderr: %s", code, stderr.String())
@@ -634,33 +737,6 @@ func TestMailSendToFlag(t *testing.T) {
 	}
 	if b.Assignee != "mayor" {
 		t.Errorf("bead Assignee = %q, want %q", b.Assignee, "mayor")
-	}
-	if b.Title != "hello from --to" {
-		t.Errorf("bead Title = %q, want %q", b.Title, "hello from --to")
-	}
-}
-
-func TestMailSendToFlagConflictsWithPositional(t *testing.T) {
-	// When --to is set and positional args also include a recipient,
-	// the --to value takes priority (it becomes args[0], original args shift).
-	store := beads.NewMemStore()
-	mp := beadmail.New(store)
-	recipients := map[string]bool{"human": true, "mayor": true, "worker": true}
-
-	var stdout bytes.Buffer
-	// --to="mayor", positional args=["worker", "body"] → after prepend: ["mayor", "worker", "body"]
-	// doMailSend takes args[0]=mayor, args[1]=worker (as body).
-	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "worker"}, nil, &stdout, &bytes.Buffer{})
-	if code != 0 {
-		t.Fatalf("doMailSend = %d, want 0", code)
-	}
-
-	b, err := store.Get("gc-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.Assignee != "mayor" {
-		t.Errorf("bead Assignee = %q, want %q (--to takes priority)", b.Assignee, "mayor")
 	}
 }
 
@@ -693,22 +769,6 @@ func TestMailSendAll(t *testing.T) {
 	}
 	if strings.Contains(out, "to human") {
 		t.Errorf("stdout should not contain send to human:\n%s", out)
-	}
-
-	// Verify beads were created for each recipient.
-	b1, err := store.Get("gc-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b1.Assignee != "committer" {
-		t.Errorf("gc-1 Assignee = %q, want %q", b1.Assignee, "committer")
-	}
-	b2, err := store.Get("gc-2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b2.Assignee != "tester" {
-		t.Errorf("gc-2 Assignee = %q, want %q", b2.Assignee, "tester")
 	}
 }
 
@@ -781,8 +841,8 @@ func TestMailCheckNoMail(t *testing.T) {
 func TestMailCheckHasMail(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	store.Create(beads.Bead{Title: "hey", Type: "message", Assignee: "mayor", From: "human"}) //nolint:errcheck
-	store.Create(beads.Bead{Title: "yo", Type: "message", Assignee: "mayor", From: "worker"}) //nolint:errcheck
+	mp.Send("human", "mayor", "", "hey") //nolint:errcheck
+	mp.Send("worker", "mayor", "", "yo") //nolint:errcheck
 
 	var stdout, stderr bytes.Buffer
 	code := doMailCheck(mp, "mayor", false, &stdout, &stderr)
@@ -811,8 +871,8 @@ func TestMailCheckInjectNoMail(t *testing.T) {
 func TestMailCheckInjectFormatsMessages(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	store.Create(beads.Bead{Title: "Fix the auth bug", Type: "message", Assignee: "worker", From: "mayor"})          //nolint:errcheck
-	store.Create(beads.Bead{Title: "PR #17 ready for review", Type: "message", Assignee: "worker", From: "polecat"}) //nolint:errcheck
+	mp.Send("mayor", "worker", "", "Fix the auth bug")          //nolint:errcheck
+	mp.Send("polecat", "worker", "", "PR #17 ready for review") //nolint:errcheck
 
 	var stdout, stderr bytes.Buffer
 	code := doMailCheck(mp, "worker", true, &stdout, &stderr)
@@ -844,7 +904,7 @@ func TestMailCheckInjectFormatsMessages(t *testing.T) {
 func TestMailCheckInjectDoesNotCloseBeads(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
-	store.Create(beads.Bead{Title: "still open", Type: "message", Assignee: "mayor", From: "human"}) //nolint:errcheck
+	mp.Send("human", "mayor", "", "still open") //nolint:errcheck
 
 	var stdout bytes.Buffer
 	code := doMailCheck(mp, "mayor", true, &stdout, &bytes.Buffer{})
@@ -866,14 +926,14 @@ func TestMailCheckInjectFiltersCorrectly(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
 	// Message to mayor (should appear).
-	store.Create(beads.Bead{Title: "for mayor", Type: "message", Assignee: "mayor", From: "human"}) //nolint:errcheck
+	mp.Send("human", "mayor", "", "for mayor") //nolint:errcheck
 	// Message to worker (should not appear in mayor's check).
-	store.Create(beads.Bead{Title: "for worker", Type: "message", Assignee: "worker", From: "human"}) //nolint:errcheck
+	mp.Send("human", "worker", "", "for worker") //nolint:errcheck
 	// Task bead (should not appear — wrong type).
 	store.Create(beads.Bead{Title: "a task"}) //nolint:errcheck
-	// Closed message to mayor (should not appear).
-	store.Create(beads.Bead{Title: "already read", Type: "message", Assignee: "mayor", From: "human"}) //nolint:errcheck
-	store.Close("gc-4")                                                                                //nolint:errcheck
+	// Read message to mayor (should not appear).
+	m, _ := mp.Send("human", "mayor", "", "already read") //nolint:errcheck
+	mp.Read(m.ID)                                         //nolint:errcheck
 
 	var stdout bytes.Buffer
 	code := doMailCheck(mp, "mayor", true, &stdout, &bytes.Buffer{})

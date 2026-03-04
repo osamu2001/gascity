@@ -4,59 +4,64 @@ Tracks the full Gastown mail feature set and when we expect to need each
 piece. Nothing here is speculative — every feature exists in Gastown
 production. The question is ordering.
 
-## Phase 1 — Tutorial 05: Basic Mail
+## Phase 1 — Basic Mail ✓
 
 Minimum viable mail. Human ↔ agent conversation, agents check inbox in loop.
+**Implemented.**
 
-| Feature | Notes |
-|---------|-------|
-| Mail = bead with type "message" | Core storage model |
-| `gc mail send <to> "<body>"` | Create message bead |
-| `gc mail inbox [agent]` | List unread messages |
-| `gc mail read <id>` | Show message, mark as read |
-| `from` / `to` fields | Via assignee + labels |
-| Unread tracking | open = unread, closed = read |
-| Implicit "human" sender/recipient | CLI defaults |
-| Validate recipient exists | Error on nonexistent agent |
-| `prompts/loop-mail.md` | Loop with inbox check step |
+| Feature | Status |
+|---------|--------|
+| Mail = bead with type "message" | ✓ |
+| `gc mail send <to> -s "subject" -m "body"` | ✓ |
+| `gc mail inbox [agent]` | ✓ |
+| `gc mail read <id>` (marks read, keeps open) | ✓ |
+| `gc mail peek <id>` (view without marking read) | ✓ |
+| `from` / `to` fields | ✓ |
+| Unread tracking via "read" label | ✓ |
+| Implicit "human" sender/recipient | ✓ |
+| Validate recipient exists | ✓ |
 
-## Phase 2 — Agent-to-Agent Coordination
+## Phase 2 — Agent-to-Agent Coordination ✓
 
-When agents need to talk to each other to resolve issues.
+**Implemented.** Subject/body separation, threading, and reply.
 
-| Feature | Why deferred |
-|---------|-------------|
-| Agent → agent mail | Needs multiple agents with distinct roles |
-| `--subject` flag | Short messages don't need subject vs body split |
-| Reply-to / threading | Needs conversation patterns to justify |
-| `gc mail reply <id> "<body>"` | Sugar for send with thread linkage |
+| Feature | Status |
+|---------|--------|
+| Agent → agent mail | ✓ |
+| `-s` / `--subject` flag | ✓ |
+| Reply-to / threading via labels | ✓ |
+| `gc mail reply <id> -s "..." -m "..."` | ✓ |
+| `gc mail thread <thread-id>` | ✓ |
 
-## Phase 3 — Message Lifecycle
+## Phase 3 — Message Lifecycle ✓
 
-When inbox bloat becomes a problem.
+**Implemented.** Read/unread toggle, archive, delete, count.
 
-| Feature | Why deferred |
-|---------|-------------|
-| Wisps (ephemeral, default) | Needs patrol/cleanup to auto-purge |
-| `--permanent` flag | Only meaningful once wisps are default |
-| Pinned messages | Needs context cycling to justify |
-| `gc mail archive` | Needs enough messages to warrant cleanup |
-| `gc mail delete` | Needs archive first |
-| `gc mail mark-read` / `mark-unread` | Read without closing |
-| Stale message archival | Needs session restart awareness |
+| Feature | Status |
+|---------|--------|
+| `gc mail archive <id>` | ✓ |
+| `gc mail delete <id>` | ✓ |
+| `gc mail mark-read <id>` | ✓ |
+| `gc mail mark-unread <id>` | ✓ |
+| `gc mail count [agent]` | ✓ |
+| Wisps (ephemeral, default) | Deferred — needs patrol/cleanup |
+| `--permanent` flag | Deferred — needs wisps first |
+| Pinned messages | Deferred — needs context cycling |
+| Stale message archival | Deferred — needs session restart awareness |
 
 ## Phase 4 — Priority & Urgency
 
 When health patrol exists and can act on priority.
 
-| Feature | Why deferred |
-|---------|-------------|
-| Priority tiers (urgent/high/normal/low) | Needs health patrol to interrupt |
-| `--urgent` flag | Needs priority to exist |
-| Nudge on send | Needs nudge infrastructure |
-| Idle-aware notification | Needs tmux idle detection |
-| Nudge enqueue for busy agents | Needs nudge queue |
-| Priority-stratified inbox check | Needs `gc mail check --inject` |
+| Feature | Status |
+|---------|--------|
+| Priority field in Message struct | ✓ (field exists, CLI not yet exposed) |
+| CC field in Message struct | ✓ (field exists, CLI not yet exposed) |
+| `--urgent` flag | Deferred — needs priority CLI |
+| Nudge on send (`--notify`) | ✓ |
+| Idle-aware notification | Deferred — needs tmux idle detection |
+| Nudge enqueue for busy agents | Deferred — needs nudge queue |
+| Priority-stratified inbox check | Deferred — needs priority CLI |
 
 ## Phase 5 — Routing & Groups
 
@@ -68,7 +73,7 @@ When multi-project and team packs exist.
 | `gc mail claim` / `gc mail release` | Queue consumer commands |
 | Announce/channel (broadcast) | Needs subscriber concept |
 | @group expansion (@town, @rig) | Needs project scoping |
-| CC recipients | Needs multi-recipient patterns |
+| CC recipients CLI | CC field exists; CLI support deferred |
 | List addresses (fan-out) | Needs messaging.json config |
 
 ## Phase 6 — Delivery Guarantees

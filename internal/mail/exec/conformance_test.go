@@ -11,7 +11,7 @@ import (
 
 // statefulScript returns a shell script body that maintains message state
 // in a temp directory. Each message is stored as a file with line-based
-// format: id\nfrom\nto\nbody\ntimestamp\nstatus
+// format: id\nfrom\nto\nsubject\nbody\ntimestamp\nstatus\nthread_id\nreply_to
 func statefulScript(stateDir string) string {
 	return `#!/bin/sh
 set -e
@@ -30,40 +30,71 @@ case "$op" in
     ;; # no-op
   send)
     to="$1"
-    # Read JSON from stdin, extract from and body fields (no jq dependency).
+    # Read JSON from stdin, extract fields.
     input=$(cat)
     from=$(echo "$input" | sed 's/.*"from":"\([^"]*\)".*/\1/')
-    body=$(echo "$input" | sed 's/.*"body":"\([^"]*\)".*/\1/')
+    # Extract subject — may be empty string.
+    subject=""
+    if echo "$input" | grep -q '"subject"'; then
+      subject=$(echo "$input" | sed 's/.*"subject":"\([^"]*\)".*/\1/')
+    fi
+    body=""
+    if echo "$input" | grep -q '"body"'; then
+      body=$(echo "$input" | sed 's/.*"body":"\([^"]*\)".*/\1/')
+    fi
     id=$(cat "$STATE/next_id")
     echo $((id + 1)) > "$STATE/next_id"
     msgid="msg-$id"
     ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$msgid" "$from" "$to" "$body" "$ts" "open" > "$STATE/messages/$msgid"
-    printf '{"id":"%s","from":"%s","to":"%s","body":"%s","created_at":"%s"}\n' "$msgid" "$from" "$to" "$body" "$ts"
+    thread_id="thread-$id"
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$msgid" "$from" "$to" "$subject" "$body" "$ts" "open" "$thread_id" "" > "$STATE/messages/$msgid"
+    printf '{"id":"%s","from":"%s","to":"%s","subject":"%s","body":"%s","created_at":"%s","thread_id":"%s"}\n' "$msgid" "$from" "$to" "$subject" "$body" "$ts" "$thread_id"
     ;;
   inbox|check)
     recipient="$1"
-    # Collect matching messages into a variable first.
     result=""
     for f in "$STATE"/messages/*; do
       [ -f "$f" ] || continue
-      status=$(sed -n '6p' "$f")
+      status=$(sed -n '7p' "$f")
       [ "$status" = "open" ] || continue
       msg_to=$(sed -n '3p' "$f")
       [ "$msg_to" = "$recipient" ] || continue
       msgid=$(sed -n '1p' "$f")
       from=$(sed -n '2p' "$f")
-      body=$(sed -n '4p' "$f")
-      ts=$(sed -n '5p' "$f")
+      subject=$(sed -n '4p' "$f")
+      body=$(sed -n '5p' "$f")
+      ts=$(sed -n '6p' "$f")
+      thread_id=$(sed -n '8p' "$f")
+      reply_to=$(sed -n '9p' "$f")
       if [ -n "$result" ]; then
         result="$result,"
       fi
-      result="${result}{\"id\":\"$msgid\",\"from\":\"$from\",\"to\":\"$msg_to\",\"body\":\"$body\",\"created_at\":\"$ts\"}"
+      result="${result}{\"id\":\"$msgid\",\"from\":\"$from\",\"to\":\"$msg_to\",\"subject\":\"$subject\",\"body\":\"$body\",\"created_at\":\"$ts\",\"thread_id\":\"$thread_id\",\"reply_to\":\"$reply_to\"}"
     done
-    # Empty stdout signals no messages (exec provider returns nil).
     if [ -n "$result" ]; then
       printf '[%s]\n' "$result"
     fi
+    ;;
+  get)
+    msgid="$1"
+    f="$STATE/messages/$msgid"
+    if [ ! -f "$f" ]; then
+      echo "message \"$msgid\" not found" >&2
+      exit 1
+    fi
+    from=$(sed -n '2p' "$f")
+    msg_to=$(sed -n '3p' "$f")
+    subject=$(sed -n '4p' "$f")
+    body=$(sed -n '5p' "$f")
+    ts=$(sed -n '6p' "$f")
+    status=$(sed -n '7p' "$f")
+    thread_id=$(sed -n '8p' "$f")
+    reply_to=$(sed -n '9p' "$f")
+    read_flag="false"
+    if [ "$status" = "read" ]; then
+      read_flag="true"
+    fi
+    printf '{"id":"%s","from":"%s","to":"%s","subject":"%s","body":"%s","created_at":"%s","read":%s,"thread_id":"%s","reply_to":"%s"}\n' "$msgid" "$from" "$msg_to" "$subject" "$body" "$ts" "$read_flag" "$thread_id" "$reply_to"
     ;;
   read)
     msgid="$1"
@@ -74,25 +105,113 @@ case "$op" in
     fi
     from=$(sed -n '2p' "$f")
     msg_to=$(sed -n '3p' "$f")
-    body=$(sed -n '4p' "$f")
-    ts=$(sed -n '5p' "$f")
+    subject=$(sed -n '4p' "$f")
+    body=$(sed -n '5p' "$f")
+    ts=$(sed -n '6p' "$f")
+    thread_id=$(sed -n '8p' "$f")
+    reply_to=$(sed -n '9p' "$f")
     # Mark as read.
-    sed -i '6s/.*/read/' "$f"
-    printf '{"id":"%s","from":"%s","to":"%s","body":"%s","created_at":"%s"}\n' "$msgid" "$from" "$msg_to" "$body" "$ts"
+    sed -i '7s/.*/read/' "$f"
+    printf '{"id":"%s","from":"%s","to":"%s","subject":"%s","body":"%s","created_at":"%s","read":true,"thread_id":"%s","reply_to":"%s"}\n' "$msgid" "$from" "$msg_to" "$subject" "$body" "$ts" "$thread_id" "$reply_to"
     ;;
-  archive)
+  mark-read)
     msgid="$1"
     f="$STATE/messages/$msgid"
     if [ ! -f "$f" ]; then
       echo "message \"$msgid\" not found" >&2
       exit 1
     fi
-    status=$(sed -n '6p' "$f")
+    sed -i '7s/.*/read/' "$f"
+    ;;
+  mark-unread)
+    msgid="$1"
+    f="$STATE/messages/$msgid"
+    if [ ! -f "$f" ]; then
+      echo "message \"$msgid\" not found" >&2
+      exit 1
+    fi
+    sed -i '7s/.*/open/' "$f"
+    ;;
+  archive|delete)
+    msgid="$1"
+    f="$STATE/messages/$msgid"
+    if [ ! -f "$f" ]; then
+      echo "message \"$msgid\" not found" >&2
+      exit 1
+    fi
+    status=$(sed -n '7p' "$f")
     if [ "$status" = "archived" ]; then
       echo "already archived" >&2
       exit 1
     fi
-    sed -i '6s/.*/archived/' "$f"
+    sed -i '7s/.*/archived/' "$f"
+    ;;
+  reply)
+    msgid="$1"
+    f="$STATE/messages/$msgid"
+    if [ ! -f "$f" ]; then
+      echo "message \"$msgid\" not found" >&2
+      exit 1
+    fi
+    orig_from=$(sed -n '2p' "$f")
+    orig_thread=$(sed -n '8p' "$f")
+    # Read JSON from stdin.
+    input=$(cat)
+    from=$(echo "$input" | sed 's/.*"from":"\([^"]*\)".*/\1/')
+    subject=""
+    if echo "$input" | grep -q '"subject"'; then
+      subject=$(echo "$input" | sed 's/.*"subject":"\([^"]*\)".*/\1/')
+    fi
+    body=""
+    if echo "$input" | grep -q '"body"'; then
+      body=$(echo "$input" | sed 's/.*"body":"\([^"]*\)".*/\1/')
+    fi
+    id=$(cat "$STATE/next_id")
+    echo $((id + 1)) > "$STATE/next_id"
+    new_msgid="msg-$id"
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$new_msgid" "$from" "$orig_from" "$subject" "$body" "$ts" "open" "$orig_thread" "$msgid" > "$STATE/messages/$new_msgid"
+    printf '{"id":"%s","from":"%s","to":"%s","subject":"%s","body":"%s","created_at":"%s","thread_id":"%s","reply_to":"%s"}\n' "$new_msgid" "$from" "$orig_from" "$subject" "$body" "$ts" "$orig_thread" "$msgid"
+    ;;
+  thread)
+    thread_id="$1"
+    result=""
+    for f in "$STATE"/messages/*; do
+      [ -f "$f" ] || continue
+      msg_thread=$(sed -n '8p' "$f")
+      [ "$msg_thread" = "$thread_id" ] || continue
+      msgid=$(sed -n '1p' "$f")
+      from=$(sed -n '2p' "$f")
+      msg_to=$(sed -n '3p' "$f")
+      subject=$(sed -n '4p' "$f")
+      body=$(sed -n '5p' "$f")
+      ts=$(sed -n '6p' "$f")
+      reply_to=$(sed -n '9p' "$f")
+      if [ -n "$result" ]; then
+        result="$result,"
+      fi
+      result="${result}{\"id\":\"$msgid\",\"from\":\"$from\",\"to\":\"$msg_to\",\"subject\":\"$subject\",\"body\":\"$body\",\"created_at\":\"$ts\",\"thread_id\":\"$thread_id\",\"reply_to\":\"$reply_to\"}"
+    done
+    if [ -n "$result" ]; then
+      printf '[%s]\n' "$result"
+    fi
+    ;;
+  count)
+    recipient="$1"
+    total=0
+    unread=0
+    for f in "$STATE"/messages/*; do
+      [ -f "$f" ] || continue
+      status=$(sed -n '7p' "$f")
+      [ "$status" = "archived" ] && continue
+      msg_to=$(sed -n '3p' "$f")
+      [ "$msg_to" = "$recipient" ] || continue
+      total=$((total + 1))
+      if [ "$status" = "open" ]; then
+        unread=$((unread + 1))
+      fi
+    done
+    printf '{"total":%d,"unread":%d}\n' "$total" "$unread"
     ;;
   *)
     exit 2 ;; # unknown operation

@@ -69,6 +69,19 @@ func (m *MemStore) Update(id string, opts UpdateOpts) error {
 			if len(opts.Labels) > 0 {
 				m.beads[i].Labels = append(m.beads[i].Labels, opts.Labels...)
 			}
+			if len(opts.RemoveLabels) > 0 {
+				remove := make(map[string]bool, len(opts.RemoveLabels))
+				for _, rl := range opts.RemoveLabels {
+					remove[rl] = true
+				}
+				filtered := m.beads[i].Labels[:0]
+				for _, l := range m.beads[i].Labels {
+					if !remove[l] {
+						filtered = append(filtered, l)
+					}
+				}
+				m.beads[i].Labels = filtered
+			}
 			return nil
 		}
 	}

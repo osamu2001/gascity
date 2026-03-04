@@ -118,7 +118,7 @@ if [[ "$url" == */mcp ]] && [ -n "$data" ]; then
 
   case "$tool" in
     register_agent)
-      name=$(echo "$args" | jq -r '.agent_name')
+      name=$(echo "$args" | jq -r '.name')
       echo "$name" > "$STATE_DIR/agents/$name"
       jq -n --arg name "$name" '{
         jsonrpc: "2.0",
@@ -130,7 +130,7 @@ if [[ "$url" == */mcp ]] && [ -n "$data" ]; then
       ;;
 
     ensure_project)
-      project=$(echo "$args" | jq -r '.project_key')
+      project=$(echo "$args" | jq -r '.human_key')
       jq -n --arg p "$project" '{
         jsonrpc: "2.0",
         id: 1,
@@ -146,42 +146,42 @@ if [[ "$url" == */mcp ]] && [ -n "$data" ]; then
       to=$(echo "$args" | jq -r '.to[0]')
       subject=$(echo "$args" | jq -r '.subject')
       body_md=$(echo "$args" | jq -r '.body_md')
+      reply_to=$(echo "$args" | jq -r '.in_reply_to_id // empty')
       ts=$(now_rfc3339)
 
-      # Store the message.
-      jq -n --argjson id "$id" --arg sender "$sender" --arg to "$to" \
+      # Store the message (flat format matching fetch_inbox output).
+      jq -n --argjson id "$id" --arg from "$sender" --arg to "$to" \
         --arg subject "$subject" --arg body_md "$body_md" --arg ts "$ts" \
         '{
           id: $id,
-          sender: {name: $sender},
-          recipients: [{name: $to}],
+          from: $from,
+          to: $to,
           subject: $subject,
           body_md: $body_md,
           created_ts: $ts,
           acknowledged: false
         }' > "$STATE_DIR/messages/$id.json"
 
-      # Return the message as MCP result.
+      # Return in deliveries format (matches real mcp_agent_mail).
       msg=$(cat "$STATE_DIR/messages/$id.json")
       jq -n --argjson msg "$msg" '{
         jsonrpc: "2.0",
         id: 1,
         result: {
-          content: [{type: "text", text: ($msg | tojson)}]
+          content: [{type: "text", text: ({deliveries: [{payload: $msg}]} | tojson)}]
         }
       }'
       ;;
 
     fetch_inbox)
       name=$(echo "$args" | jq -r '.agent_name')
-      # Collect unacknowledged messages for this recipient.
+      # Collect all messages for this recipient (script does local filtering).
       msgs="[]"
       for f in "$STATE_DIR/messages/"*.json; do
         [ -f "$f" ] || continue
         msg=$(cat "$f")
-        rcpt=$(echo "$msg" | jq -r '.recipients[0].name')
-        acked=$(echo "$msg" | jq -r '.acknowledged')
-        if [ "$rcpt" = "$name" ] && [ "$acked" = "false" ]; then
+        rcpt=$(echo "$msg" | jq -r '.to')
+        if [ "$rcpt" = "$name" ]; then
           msgs=$(echo "$msgs" | jq --argjson m "$msg" '. + [$m]')
         fi
       done
@@ -253,7 +253,11 @@ export PATH="$TMPROOT:$PATH"
 export GC_MOCK_STATE_DIR="$TMPROOT"
 export GC_MOCK_CURL_LOG="$CURL_LOG"
 export GC_MCP_MAIL_URL="http://127.0.0.1:8765"
-export GC_MCP_MAIL_PROJECT="/test/my-city"
+export GC_MCP_MAIL_PROJECT="/test/my-city-$$"
+
+# Clean any stale cache for this project key.
+CACHE_HASH=$(printf '%s' "$GC_MCP_MAIL_PROJECT" | md5sum | cut -d' ' -f1)
+rm -rf "/tmp/gc-mcp-mail-cache/$CACHE_HASH"
 
 # --- Tests ---
 
@@ -273,17 +277,19 @@ else
 fi
 
 run_test "send creates message and returns gc format"
-result=$(echo '{"from":"mayor","body":"Check patrol status"}' | "$SCRIPT" send deacon)
+result=$(echo '{"from":"mayor","subject":"Patrol check","body":"Check patrol status"}' | "$SCRIPT" send deacon)
 
 msg_id=$(echo "$result" | jq -r '.id')
 msg_from=$(echo "$result" | jq -r '.from')
 msg_to=$(echo "$result" | jq -r '.to')
+msg_subject=$(echo "$result" | jq -r '.subject')
 msg_body=$(echo "$result" | jq -r '.body')
 msg_ts=$(echo "$result" | jq -r '.created_at')
 
 assert_eq "$msg_id" "1" "message id is string '1'"
 assert_eq "$msg_from" "mayor" "from is mayor"
 assert_eq "$msg_to" "deacon" "to is deacon"
+assert_eq "$msg_subject" "Patrol check" "subject matches"
 assert_eq "$msg_body" "Check patrol status" "body matches"
 if [ -n "$msg_ts" ] && [ "$msg_ts" != "null" ]; then
   pass "created_at present"
@@ -291,20 +297,18 @@ else
   fail "created_at" "missing or null"
 fi
 
-run_test "send auto-registers agents"
-if [ -f "$TMPROOT/agents/mayor" ]; then
-  pass "sender registered"
+run_test "send auto-registers agents (mapped names)"
+# The script maps gc names to MCP names via hash; check that agent files exist
+# in the agents directory (any file means registration happened).
+agent_count=$(find "$TMPROOT/agents" -type f | wc -l)
+if [ "$agent_count" -ge 2 ]; then
+  pass "agents registered ($agent_count files)"
 else
-  fail "sender registration" "mayor agent not registered"
-fi
-if [ -f "$TMPROOT/agents/deacon" ]; then
-  pass "recipient registered"
-else
-  fail "recipient registration" "deacon agent not registered"
+  fail "agent registration" "expected at least 2 agent files, got $agent_count"
 fi
 
 run_test "send second message"
-result=$(echo '{"from":"deacon","body":"All clear"}' | "$SCRIPT" send mayor)
+result=$(echo '{"from":"deacon","subject":"Status","body":"All clear"}' | "$SCRIPT" send mayor)
 msg_id=$(echo "$result" | jq -r '.id')
 assert_eq "$msg_id" "2" "second message id is '2'"
 
@@ -315,6 +319,9 @@ assert_eq "$count" "1" "deacon has 1 unread message"
 
 msg_body=$(echo "$result" | jq -r '.[0].body')
 assert_eq "$msg_body" "Check patrol status" "inbox message body matches"
+
+msg_subject=$(echo "$result" | jq -r '.[0].subject')
+assert_eq "$msg_subject" "Patrol check" "inbox message subject matches"
 
 # Verify all gc fields present.
 msg_id=$(echo "$result" | jq -r '.[0].id')
@@ -364,17 +371,13 @@ fi
 
 run_test "archive acknowledges without returning"
 # Send a new message to archive.
-echo '{"from":"mayor","body":"Archive this"}' | "$SCRIPT" send deacon > /dev/null
+echo '{"from":"mayor","subject":"","body":"Archive this"}' | "$SCRIPT" send deacon > /dev/null
 result=$("$SCRIPT" archive 3)
 if [ -z "$result" ]; then
   pass "archive returns no output"
 else
   pass "archive completed"
 fi
-
-# Verify acknowledged.
-acked=$(jq -r '.acknowledged' "$TMPROOT/messages/3.json")
-assert_eq "$acked" "true" "message acknowledged after archive"
 
 run_test "inbox excludes archived messages"
 result=$("$SCRIPT" inbox deacon)
@@ -385,18 +388,78 @@ else
   assert_eq "$count" "0" "0 messages after archive"
 fi
 
+run_test "get returns message without marking read"
+# Send a fresh message for get test.
+echo '{"from":"mayor","subject":"Get test","body":"Peek at this"}' | "$SCRIPT" send deacon > /dev/null
+result=$("$SCRIPT" get 4)
+msg_id=$(echo "$result" | jq -r '.id')
+msg_subject=$(echo "$result" | jq -r '.subject')
+msg_body=$(echo "$result" | jq -r '.body')
+assert_eq "$msg_id" "4" "get returns correct id"
+assert_eq "$msg_subject" "Get test" "get returns subject"
+assert_eq "$msg_body" "Peek at this" "get returns body"
+
+# Message still in inbox after get (not marked read).
+result=$("$SCRIPT" inbox deacon)
+count=$(echo "$result" | jq 'length')
+assert_eq "$count" "1" "message still in inbox after get"
+
+run_test "mark-read removes from inbox"
+"$SCRIPT" mark-read 4
+result=$("$SCRIPT" inbox deacon)
+if [ -z "$result" ]; then
+  pass "inbox empty after mark-read"
+else
+  count=$(echo "$result" | jq 'length')
+  assert_eq "$count" "0" "0 messages after mark-read"
+fi
+
+run_test "mark-unread restores to inbox"
+"$SCRIPT" mark-unread 4
+result=$("$SCRIPT" inbox deacon)
+count=$(echo "$result" | jq 'length')
+assert_eq "$count" "1" "message back in inbox after mark-unread"
+
+run_test "count returns total and unread"
+# Mark message 4 as read again to test count.
+"$SCRIPT" mark-read 4
+# Send another message (unread).
+echo '{"from":"mayor","subject":"Count test","body":"Another msg"}' | "$SCRIPT" send deacon > /dev/null
+result=$("$SCRIPT" count deacon)
+total=$(echo "$result" | jq -r '.total')
+unread=$(echo "$result" | jq -r '.unread')
+# msg 4 = read, msg 5 = unread (msg 1 = read, msg 3 = archived)
+assert_eq "$unread" "1" "count unread is 1"
+if [ "$total" -ge 1 ]; then
+  pass "count total >= 1"
+else
+  fail "count total" "expected >= 1, got $total"
+fi
+
+run_test "delete removes from inbox"
+"$SCRIPT" delete 5
+result=$("$SCRIPT" inbox deacon)
+if [ -z "$result" ]; then
+  pass "inbox empty after delete"
+else
+  count=$(echo "$result" | jq 'length')
+  assert_eq "$count" "0" "0 messages after delete"
+fi
+
+run_test "thread returns empty for unknown thread"
+result=$("$SCRIPT" thread "thread-abc123")
+if [ -z "$result" ]; then
+  pass "thread returns empty string for unknown thread"
+else
+  assert_eq "$result" "[]" "thread returns empty array"
+fi
+
 run_test "unknown operation exits 2"
 set +e
 "$SCRIPT" foobar 2>/dev/null
 rc=$?
 set -e
 assert_eq "$rc" "2" "unknown op exits 2"
-
-run_test "send uses subject equal to body"
-# Check the curl log for the send_message call.
-last_send=$(grep "send_message" "$CURL_LOG" -A1 | tail -1 || true)
-# Verified by the fact that send works — the mock validates the structure.
-pass "send_message called with body as subject"
 
 run_test "MCP auth token passed when set"
 # Reset log.

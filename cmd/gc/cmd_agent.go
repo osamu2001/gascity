@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,17 @@ import (
 	"github.com/steveyegge/gascity/internal/fsys"
 	"github.com/steveyegge/gascity/internal/session"
 )
+
+// AgentListEntry is the JSON output format for a single agent in "gc agent list --json".
+type AgentListEntry struct {
+	Name          string    `json:"name"`
+	QualifiedName string    `json:"qualified_name"`
+	Dir           string    `json:"dir"`
+	Scope         string    `json:"scope"`
+	Suspended     bool      `json:"suspended"`
+	RigSuspended  bool      `json:"rig_suspended"`
+	Pool          *PoolJSON `json:"pool"`
+}
 
 // loadCityConfig loads the city configuration with full pack expansion.
 // Most CLI commands need this instead of config.Load so that agents defined
@@ -179,6 +191,7 @@ scope the agent to a rig's working directory.`,
 
 func newAgentListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var dir string
+	var jsonFlag bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List workspace agents",
@@ -189,13 +202,14 @@ inheritance, and pool configuration. Use --dir to filter by working
 directory.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdAgentList(dir, stdout, stderr) != 0 {
+			if cmdAgentList(dir, jsonFlag, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "Filter agents by working directory")
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output in JSON format")
 	return cmd
 }
 
@@ -671,13 +685,68 @@ func doAgentPeek(a agent.Agent, lines int, stdout, stderr io.Writer) int {
 
 // cmdAgentList is the CLI entry point for listing agents. It locates
 // the city root and delegates to doAgentList.
-func cmdAgentList(dirFilter string, stdout, stderr io.Writer) int {
+func cmdAgentList(dirFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if jsonOutput {
+		return doAgentListJSON(fsys.OSFS{}, cityPath, dirFilter, stdout, stderr)
+	}
 	return doAgentList(fsys.OSFS{}, cityPath, dirFilter, stdout, stderr)
+}
+
+// doAgentListJSON outputs agent list as a JSON array. Accepts an injected FS
+// for testability.
+func doAgentListJSON(fs fsys.FS, cityPath, dirFilter string, stdout, stderr io.Writer) int {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	cfg, err := loadCityConfigFS(fs, tomlPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Pre-compute suspended rig names.
+	suspendedRigs := make(map[string]bool)
+	for _, r := range cfg.Rigs {
+		if r.Suspended {
+			suspendedRigs[r.Name] = true
+		}
+	}
+
+	var entries []AgentListEntry
+	for _, a := range cfg.Agents {
+		if dirFilter != "" && a.Dir != dirFilter {
+			continue
+		}
+		scope := "city"
+		if a.Dir != "" {
+			scope = "rig"
+		}
+		rigSuspended := a.Dir != "" && suspendedRigs[a.Dir]
+		var pool *PoolJSON
+		if a.Pool != nil {
+			pool = &PoolJSON{Min: a.Pool.Min, Max: a.Pool.Max}
+		}
+		entries = append(entries, AgentListEntry{
+			Name:          a.Name,
+			QualifiedName: a.QualifiedName(),
+			Dir:           a.Dir,
+			Scope:         scope,
+			Suspended:     a.Suspended,
+			RigSuspended:  rigSuspended,
+			Pool:          pool,
+		})
+	}
+
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		fmt.Fprintf(stderr, "gc agent list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	fmt.Fprintln(stdout, string(data)) //nolint:errcheck // best-effort stdout
+	return 0
 }
 
 // ---------------------------------------------------------------------------

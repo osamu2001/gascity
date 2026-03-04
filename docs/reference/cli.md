@@ -179,6 +179,7 @@ gc agent list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--dir` | string |  | Filter agents by working directory |
+| `--json` | bool |  | Output in JSON format |
 
 ## gc agent nudge
 
@@ -965,6 +966,7 @@ gc events
 |------|------|---------|-------------|
 | `--after` | uint64 |  | Resume watching from this sequence number (0 = current head) |
 | `--follow` | bool |  | Continuously stream events as they arrive |
+| `--json` | bool |  | Output in JSON format (list mode only) |
 | `--payload-match` | stringArray |  | Filter by payload field (key=value, repeatable) |
 | `--seq` | bool |  | Print the current head sequence number and exit |
 | `--since` | string |  | Show events since duration ago (e.g. 1h, 30m) |
@@ -1104,7 +1106,7 @@ gc init
 Send and receive messages between agents and humans.
 
 Mail is implemented as beads with type="message". Messages have a
-sender, recipient, and body. Use "gc mail check --inject" in agent
+sender, recipient, subject, and body. Use "gc mail check --inject" in agent
 hooks to deliver mail notifications into agent prompts.
 
 ```
@@ -1115,9 +1117,16 @@ gc mail
 |------------|-------------|
 | [gc mail archive](#gc-mail-archive) | Archive a message without reading it |
 | [gc mail check](#gc-mail-check) | Check for unread mail (use --inject for hook output) |
+| [gc mail count](#gc-mail-count) | Show total/unread message count |
+| [gc mail delete](#gc-mail-delete) | Delete a message (closes the bead) |
 | [gc mail inbox](#gc-mail-inbox) | List unread messages (defaults to your inbox) |
+| [gc mail mark-read](#gc-mail-mark-read) | Mark a message as read |
+| [gc mail mark-unread](#gc-mail-mark-unread) | Mark a message as unread |
+| [gc mail peek](#gc-mail-peek) | Show a message without marking it as read |
 | [gc mail read](#gc-mail-read) | Read a message and mark it as read |
+| [gc mail reply](#gc-mail-reply) | Reply to a message |
 | [gc mail send](#gc-mail-send) | Send a message to an agent or human |
+| [gc mail thread](#gc-mail-thread) | List all messages in a thread |
 
 ## gc mail archive
 
@@ -1155,28 +1164,88 @@ gc mail check
 |------|------|---------|-------------|
 | `--inject` | bool |  | output <system-reminder> block for hook injection |
 
+## gc mail count
+
+Show total and unread message counts for an agent or human.
+The recipient defaults to $GC_AGENT or "human".
+
+```
+gc mail count [agent]
+```
+
+## gc mail delete
+
+Delete a message by closing the bead. Same effect as archive but with different user intent.
+
+```
+gc mail delete <id>
+```
+
 ## gc mail inbox
 
 List all unread messages for an agent or human.
 
-Shows message ID, sender, and body in a table. The recipient defaults
+Shows message ID, sender, subject, and body in a table. The recipient defaults
 to $GC_AGENT or "human". Pass an agent name to view another agent's inbox.
 
 ```
 gc mail inbox [agent]
 ```
 
+## gc mail mark-read
+
+Mark a message as read without displaying it. The message will no longer appear in inbox results.
+
+```
+gc mail mark-read <id>
+```
+
+## gc mail mark-unread
+
+Mark a message as unread. The message will appear again in inbox results.
+
+```
+gc mail mark-unread <id>
+```
+
+## gc mail peek
+
+Display a message without marking it as read.
+
+Same output as "gc mail read" but does not change the message's read status.
+The message will continue to appear in inbox results.
+
+```
+gc mail peek <id>
+```
+
 ## gc mail read
 
 Display a message and mark it as read.
 
-Shows the full message details (ID, sender, recipient, date, body) and
-closes the message bead. Closed messages no longer appear in mail check
-or inbox results.
+Shows the full message details (ID, sender, recipient, subject, date, body).
+The message stays in the store — use "gc mail archive" to permanently close it.
 
 ```
 gc mail read <id>
 ```
+
+## gc mail reply
+
+Reply to a message. The reply is addressed to the original sender.
+
+Inherits the thread ID from the original message for conversation tracking.
+Use -s/--subject for the reply subject and -m/--message for the reply body.
+
+```
+gc mail reply <id> [-s subject] [-m body] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `-m`, `--message` | string |  | reply body text |
+| `--notify` | bool |  | nudge the recipient after replying |
+| `-s`, `--subject` | string |  | reply subject line |
 
 ## gc mail send
 
@@ -1186,8 +1255,7 @@ Creates a message bead addressed to the recipient. The sender defaults
 to $GC_AGENT (in agent sessions) or "human". Use --notify to nudge
 the recipient after sending. Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
-Use -s/--subject and -m/--message as alternatives to the positional
-<body> argument (when both are set, they are joined with a blank line).
+Use -s/--subject for the summary line and -m/--message for the body text.
 Use --all to broadcast to all agents (excluding sender and "human").
 
 ```
@@ -1214,6 +1282,14 @@ gc mail send mayor "Build is green"
 | `--notify` | bool |  | nudge the recipient after sending |
 | `-s`, `--subject` | string |  | message subject line |
 | `--to` | string |  | recipient address (alternative to positional argument) |
+
+## gc mail thread
+
+Show all messages sharing a thread ID, ordered by time.
+
+```
+gc mail thread <thread-id>
+```
 
 ## gc pack
 
@@ -1462,8 +1538,12 @@ Shows a city-wide overview: controller state, suspension,
 all agents with running status, rigs, and a summary count.
 
 ```
-gc status [path]
+gc status [path] [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output in JSON format |
 
 ## gc stop
 
