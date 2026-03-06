@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 )
 
 // cityPatchRequest is the JSON body for PATCH /v0/city.
@@ -34,6 +35,10 @@ func (s *Server) handleCityPatch(w http.ResponseWriter, r *http.Request) {
 		err = sm.ResumeCity()
 	}
 	if err != nil {
+		if strings.Contains(err.Error(), "validating") {
+			writeError(w, http.StatusBadRequest, "invalid", err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
