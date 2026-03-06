@@ -1752,30 +1752,29 @@ func (h *APIHandler) handleSSEProxy(w http.ResponseWriter, r *http.Request) {
 	// The browser parses the event type from the JSON data payload and
 	// uses Last-Event-ID for automatic reconnection on disconnect.
 	//
-	// ASSUMPTION: upstream sends exactly one "data:" line per event (single-line
-	// JSON). Multi-line "data:" (valid per SSE spec) would produce split JSON
-	// fragments that fail JSON.parse on the client, falling through to a
-	// full-page refresh. This matches the upstream writeSSE implementation.
+	// Fields are buffered until the blank-line delimiter, then emitted as a
+	// complete event. This eliminates any dependency on field ordering
+	// (the SSE spec does not mandate id-before-data).
 	scanner := bufio.NewScanner(resp.Body)
-	var currentID string
+	var currentID, currentData string
 	for scanner.Scan() {
 		line := scanner.Text()
 		switch {
 		case strings.HasPrefix(line, "id:"):
 			currentID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
 		case strings.HasPrefix(line, "data:"):
-			data := strings.TrimPrefix(line, "data:")
-			if currentID != "" {
-				fmt.Fprintf(w, "event: gc-event\nid: %s\ndata:%s\n\n", currentID, data) //nolint:errcheck // best-effort SSE write
-			} else {
-				fmt.Fprintf(w, "event: gc-event\ndata:%s\n\n", data) //nolint:errcheck // best-effort SSE write
-			}
-			flusher.Flush()
-			currentID = ""
+			currentData = strings.TrimPrefix(line, "data:")
 		case line == "":
-			// Blank line is the SSE event delimiter. Reset currentID to prevent
-			// cross-event leakage if upstream ever sends data before id.
-			currentID = ""
+			// Blank line = SSE event delimiter. Emit buffered event.
+			if currentData != "" {
+				if currentID != "" {
+					fmt.Fprintf(w, "event: gc-event\nid: %s\ndata:%s\n\n", currentID, currentData) //nolint:errcheck // best-effort SSE write
+				} else {
+					fmt.Fprintf(w, "event: gc-event\ndata:%s\n\n", currentData) //nolint:errcheck // best-effort SSE write
+				}
+				flusher.Flush()
+			}
+			currentID, currentData = "", ""
 		case strings.HasPrefix(line, ":"):
 			// Forward keepalive comments to prevent connection timeout.
 			fmt.Fprintf(w, ": keepalive\n\n") //nolint:errcheck // best-effort SSE write

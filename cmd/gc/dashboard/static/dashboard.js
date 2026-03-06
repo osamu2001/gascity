@@ -3022,7 +3022,8 @@
             if (agent) agents[agent] = true;
         });
 
-        // Repopulate rig dropdown, preserving current selection
+        // Repopulate rig dropdown, preserving current selection.
+        // If the previously selected value no longer exists, reset to "all".
         if (rigFilter) {
             var currentRig = rigFilter.value;
             while (rigFilter.options.length > 1) rigFilter.remove(1);
@@ -3033,9 +3034,10 @@
                 rigFilter.appendChild(opt);
             });
             rigFilter.value = currentRig;
+            if (rigFilter.value !== currentRig) rigFilter.value = 'all';
         }
 
-        // Repopulate agent dropdown, preserving current selection
+        // Repopulate agent dropdown, preserving current selection.
         if (agentFilter) {
             var currentAgent = agentFilter.value;
             while (agentFilter.options.length > 1) agentFilter.remove(1);
@@ -3046,6 +3048,7 @@
                 agentFilter.appendChild(opt);
             });
             agentFilter.value = currentAgent;
+            if (agentFilter.value !== currentAgent) agentFilter.value = 'all';
         }
 
         _syncCategoryButtons();
