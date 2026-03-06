@@ -330,9 +330,10 @@ func (f *APIFetcher) FetchConvoys() ([]ConvoyRow, error) {
 			Progress:  fmt.Sprintf("%d/%d", detail.Progress.Closed, detail.Progress.Total),
 		}
 
-		// Build tracked issues and find most recent activity.
+		// Build tracked issues, compute work breakdown, and find most recent activity.
 		var mostRecentUpdated time.Time
 		tracked := make([]TrackedIssue, 0, len(detail.Children))
+		assigneeSet := make(map[string]bool)
 		for _, child := range detail.Children {
 			tracked = append(tracked, TrackedIssue{
 				ID:       child.ID,
@@ -343,8 +344,23 @@ func (f *APIFetcher) FetchConvoys() ([]ConvoyRow, error) {
 			if child.CreatedAt.After(mostRecentUpdated) {
 				mostRecentUpdated = child.CreatedAt
 			}
+			if child.Status != "closed" {
+				if child.Assignee != "" {
+					row.InProgress++
+					assigneeSet[child.Assignee] = true
+				} else {
+					row.ReadyBeads++
+				}
+			}
 		}
 		row.TrackedIssues = tracked
+		if row.Total > 0 {
+			row.ProgressPct = (row.Completed * 100) / row.Total
+		}
+		for a := range assigneeSet {
+			row.Assignees = append(row.Assignees, a)
+		}
+		sort.Strings(row.Assignees)
 
 		if !mostRecentUpdated.IsZero() {
 			row.LastActivity = calculateActivity(mostRecentUpdated)

@@ -1071,7 +1071,7 @@ Gas Town internal fixes, test improvements, and operational items. All N/A.
   test.
 - [-] **fbfb3cfa** — Add server-side timeouts to prevent CLOSE_WAIT
   accumulation (Dolt).
-- [-] **3b9b0f04** — Enrich dashboard convoy panel with progress % and
+- [x] **3b9b0f04** — Enrich dashboard convoy panel with progress % and
   assignees.
 - [-] **aa123968** — Use t.TempDir() in resetAbandonedBead tests.
 - [-] **e237a5ca** — Detect default branch from HEAD in bare clone.
