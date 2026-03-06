@@ -95,7 +95,10 @@ func doConvoyCreateWith(store beads.Store, rec events.Recorder, args []string, f
 	name := args[0]
 	issueIDs := args[1:]
 
-	convoy, err := store.Create(beads.Bead{Title: name, Type: "convoy"})
+	b := beads.Bead{Title: name, Type: "convoy"}
+	applyConvoyFields(&b, fields)
+
+	convoy, err := store.Create(b)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -119,11 +122,6 @@ func doConvoyCreateWith(store beads.Store, rec events.Recorder, args []string, f
 		Subject: convoy.ID,
 		Message: name,
 	})
-
-	if err := setConvoyFields(store, convoy.ID, fields); err != nil {
-		fmt.Fprintf(stderr, "gc convoy create: setting fields: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 
 	if len(issueIDs) > 0 {
 		fmt.Fprintf(stdout, "Created convoy %s %q tracking %d issue(s)\n", convoy.ID, name, len(issueIDs)) //nolint:errcheck // best-effort stdout

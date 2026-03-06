@@ -36,13 +36,19 @@ func NewMemStoreFrom(seq int, existing []Bead, deps []Dep) *MemStore {
 // a copy of all deps. Used by FileStore for serialization. Caller must hold m.mu.
 func (m *MemStore) snapshot() (int, []Bead, []Dep) {
 	b := make([]Bead, len(m.beads))
-	copy(b, m.beads)
-	for i := range b {
-		b[i].Metadata = maps.Clone(b[i].Metadata)
+	for i, bead := range m.beads {
+		b[i] = cloneBead(bead)
 	}
 	d := make([]Dep, len(m.deps))
 	copy(d, m.deps)
 	return m.seq, b, d
+}
+
+// cloneBead returns a deep copy of a bead, cloning reference fields
+// (Metadata) to prevent shared-map races between callers and the store.
+func cloneBead(b Bead) Bead {
+	b.Metadata = maps.Clone(b.Metadata)
+	return b
 }
 
 // Create persists a new bead in memory with a sequential ID.
@@ -58,8 +64,9 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	}
 	b.CreatedAt = time.Now()
 
+	b.Metadata = maps.Clone(b.Metadata)
 	m.beads = append(m.beads, b)
-	return b, nil
+	return cloneBead(b), nil
 }
 
 // Update modifies fields of an existing bead. Only non-nil fields in opts
@@ -119,7 +126,9 @@ func (m *MemStore) List() ([]Bead, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	result := make([]Bead, len(m.beads))
-	copy(result, m.beads)
+	for i, b := range m.beads {
+		result[i] = cloneBead(b)
+	}
 	return result, nil
 }
 
@@ -130,7 +139,7 @@ func (m *MemStore) Ready() ([]Bead, error) {
 	var result []Bead
 	for _, b := range m.beads {
 		if b.Status == "open" {
-			result = append(result, b)
+			result = append(result, cloneBead(b))
 		}
 	}
 	return result, nil
@@ -144,8 +153,7 @@ func (m *MemStore) Get(id string) (Bead, error) {
 
 	for _, b := range m.beads {
 		if b.ID == id {
-			b.Metadata = maps.Clone(b.Metadata)
-			return b, nil
+			return cloneBead(b), nil
 		}
 	}
 	return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
@@ -160,7 +168,7 @@ func (m *MemStore) Children(parentID string) ([]Bead, error) {
 	var result []Bead
 	for _, b := range m.beads {
 		if b.ParentID == parentID {
-			result = append(result, b)
+			result = append(result, cloneBead(b))
 		}
 	}
 	return result, nil
@@ -177,7 +185,7 @@ func (m *MemStore) ListByLabel(label string, limit int) ([]Bead, error) {
 	for i := len(m.beads) - 1; i >= 0; i-- {
 		for _, l := range m.beads[i].Labels {
 			if l == label {
-				result = append(result, m.beads[i])
+				result = append(result, cloneBead(m.beads[i]))
 				if limit > 0 && len(result) >= limit {
 					return result, nil
 				}
