@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -30,8 +31,9 @@ const sessionBeadType = "agent_session"
 // Beads for names in configuredNames but not in the agents slice are marked
 // "suspended" (the agent exists in config but isn't currently runnable).
 //
-// This is Phase 1 of the unified session model: beads record reality alongside
-// the existing reconciler. Phase 2 switches to a bead-driven reconciler.
+// Phase 1 (additive): beads record reality alongside the existing reconciler.
+// Phase 2 (lifecycle): beads are closed when agents are orphaned or suspended,
+// completing the bead lifecycle. A fresh bead is created when the agent returns.
 func syncSessionBeads(
 	store beads.Store,
 	agents []agent.Agent,
@@ -156,14 +158,17 @@ func syncSessionBeads(
 		}
 	}
 
-	// Classify beads with no matching runnable agent.
+	// Classify and close beads with no matching runnable agent.
 	// - If the session name is in configuredNames but not in desired (runnable),
-	//   the agent is suspended/disabled — mark "suspended".
+	//   the agent is suspended/disabled — close the bead with reason "suspended".
 	// - If the session name is not in configuredNames at all, the agent was
-	//   removed from config — mark "orphaned". This includes pool/multi
-	//   instances: they are ephemeral (not user-configured) and correctly
-	//   become orphaned when their template is suspended or removed.
-	// Do NOT close beads (that's Phase 2).
+	//   removed from config — close the bead with reason "orphaned". This
+	//   includes pool/multi instances: they are ephemeral (not user-configured)
+	//   and correctly become orphaned when their template is suspended or removed.
+	//
+	// Closing the bead completes its lifecycle record. When the agent returns
+	// (e.g., resumed from suspension), a fresh bead is created automatically
+	// because the indexing loop above skips closed beads.
 	for _, b := range existing {
 		sn := b.Metadata["session_name"]
 		if sn == "" || desired[sn] {
@@ -174,16 +179,10 @@ func syncSessionBeads(
 		}
 		if configuredNames[sn] {
 			// Still in config but not runnable (suspended/disabled).
-			if b.Metadata["state"] != "suspended" {
-				setMeta(store, b.ID, "state", "suspended", stderr)                                 //nolint:errcheck
-				setMeta(store, b.ID, "synced_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
-			}
+			closeBead(store, b.ID, "suspended", now, stderr)
 		} else {
 			// Not in config at all — orphaned.
-			if b.Metadata["state"] != "orphaned" {
-				setMeta(store, b.ID, "state", "orphaned", stderr)                                  //nolint:errcheck
-				setMeta(store, b.ID, "synced_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
-			}
+			closeBead(store, b.ID, "orphaned", now, stderr)
 		}
 	}
 }
@@ -208,6 +207,19 @@ func setMeta(store beads.Store, id, key, value string, stderr io.Writer) error {
 		return err
 	}
 	return nil
+}
+
+// closeBead sets final metadata on a session bead and closes it.
+// This completes the bead's lifecycle record. The close_reason distinguishes
+// why the bead was closed (e.g., "orphaned", "suspended").
+func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Writer) {
+	setMeta(store, id, "state", reason, stderr)                                      //nolint:errcheck
+	setMeta(store, id, "close_reason", reason, stderr)                               //nolint:errcheck
+	setMeta(store, id, "closed_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
+	setMeta(store, id, "synced_at", now.Format("2006-01-02T15:04:05Z07:00"), stderr) //nolint:errcheck
+	if err := store.Close(id); err != nil {
+		fmt.Fprintf(stderr, "session beads: closing %s: %v\n", id, err) //nolint:errcheck
+	}
 }
 
 // generateToken returns a cryptographically random hex token.

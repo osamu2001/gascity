@@ -184,7 +184,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 	}
 
-	// Phase 1: initial session bead sync (before first patrol tick).
+	// Session bead sync: record agent state and close orphaned/suspended beads.
 	{
 		var store beads.Store
 		if cr.cs != nil {
@@ -261,7 +261,7 @@ func (cr *CityRuntime) tick(
 		cr.stdout, cr.stderr, ctx)
 	ensureObservers(agents, *observePaths)
 
-	// Phase 1: sync session beads alongside the existing reconciler.
+	// Sync session beads: record agent state and close orphaned/suspended beads.
 	{
 		var store beads.Store
 		if cr.cs != nil {

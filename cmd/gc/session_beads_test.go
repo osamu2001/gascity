@@ -169,7 +169,7 @@ func TestSyncSessionBeads_OrphanDetection(t *testing.T) {
 	// configuredNames only has new-agent — old-agent is truly orphaned.
 	syncSessionBeads(store, agents, allConfigured(agents), clk, &stderr)
 
-	// old-agent's bead should be marked orphaned.
+	// old-agent's bead should be closed with reason "orphaned".
 	all, _ := store.ListByLabel(sessionBeadLabel, 0)
 	var oldBead beads.Bead
 	for _, b := range all {
@@ -178,8 +178,17 @@ func TestSyncSessionBeads_OrphanDetection(t *testing.T) {
 			break
 		}
 	}
+	if oldBead.Status != "closed" {
+		t.Errorf("old-agent status = %q, want %q", oldBead.Status, "closed")
+	}
 	if oldBead.Metadata["state"] != "orphaned" {
 		t.Errorf("old-agent state = %q, want %q", oldBead.Metadata["state"], "orphaned")
+	}
+	if oldBead.Metadata["close_reason"] != "orphaned" {
+		t.Errorf("old-agent close_reason = %q, want %q", oldBead.Metadata["close_reason"], "orphaned")
+	}
+	if oldBead.Metadata["closed_at"] == "" {
+		t.Error("old-agent closed_at is empty")
 	}
 }
 
@@ -304,13 +313,81 @@ func TestSyncSessionBeads_PoolInstanceOrphaned(t *testing.T) {
 	syncSessionBeads(store, nil, configuredNames, clk, &stderr)
 
 	// Pool instances are ephemeral (not user-configured), so they become
-	// "orphaned" when no longer running — regardless of template status.
+	// closed with reason "orphaned" when no longer running.
 	all, _ := store.ListByLabel(sessionBeadLabel, 0)
 	for _, b := range all {
+		if b.Status != "closed" {
+			t.Errorf("pool instance %s status = %q, want %q",
+				b.Metadata["session_name"], b.Status, "closed")
+		}
 		if b.Metadata["state"] != "orphaned" {
 			t.Errorf("pool instance %s state = %q, want %q",
 				b.Metadata["session_name"], b.Metadata["state"], "orphaned")
 		}
+		if b.Metadata["close_reason"] != "orphaned" {
+			t.Errorf("pool instance %s close_reason = %q, want %q",
+				b.Metadata["session_name"], b.Metadata["close_reason"], "orphaned")
+		}
+	}
+}
+
+func TestSyncSessionBeads_ResumedAfterSuspension(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+
+	agents := []agent.Agent{
+		&agent.Fake{
+			FakeName:          "worker",
+			FakeSessionName:   "worker",
+			Running:           true,
+			FakeSessionConfig: runtime.Config{Command: "claude"},
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads(store, agents, allConfigured(agents), clk, &stderr)
+
+	// Suspend the agent: remove from runnable but keep in configuredNames.
+	clk.Advance(5 * time.Second)
+	configuredNames := map[string]bool{"worker": true}
+	syncSessionBeads(store, nil, configuredNames, clk, &stderr)
+
+	// Verify the bead is closed.
+	all, _ := store.ListByLabel(sessionBeadLabel, 0)
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead after suspension, got %d", len(all))
+	}
+	if all[0].Status != "closed" {
+		t.Fatalf("bead status = %q, want %q", all[0].Status, "closed")
+	}
+
+	// Resume the agent: return it to the runnable set.
+	clk.Advance(5 * time.Second)
+	syncSessionBeads(store, agents, allConfigured(agents), clk, &stderr)
+
+	// Should have 2 beads: 1 closed (old lifecycle) + 1 open (new lifecycle).
+	all, _ = store.ListByLabel(sessionBeadLabel, 0)
+	if len(all) != 2 {
+		t.Fatalf("expected 2 beads after resume, got %d", len(all))
+	}
+
+	var closedCount, openCount int
+	for _, b := range all {
+		switch b.Status {
+		case "closed":
+			closedCount++
+		case "open":
+			openCount++
+			if b.Metadata["state"] != "active" {
+				t.Errorf("resumed bead state = %q, want %q", b.Metadata["state"], "active")
+			}
+			if b.Metadata["generation"] != "1" {
+				t.Errorf("resumed bead generation = %q, want %q (fresh lifecycle)", b.Metadata["generation"], "1")
+			}
+		}
+	}
+	if closedCount != 1 || openCount != 1 {
+		t.Errorf("expected 1 closed + 1 open, got %d closed + %d open", closedCount, openCount)
 	}
 }
 
@@ -346,7 +423,7 @@ func TestSyncSessionBeads_SuspendedAgentNotOrphaned(t *testing.T) {
 	clk.Advance(5 * time.Second)
 	syncSessionBeads(store, runnableAgents, configuredNames, clk, &stderr)
 
-	// Worker should be "suspended", not "orphaned".
+	// Worker should be closed with reason "suspended", not "orphaned".
 	all, _ := store.ListByLabel(sessionBeadLabel, 0)
 	var workerBead beads.Bead
 	for _, b := range all {
@@ -355,7 +432,13 @@ func TestSyncSessionBeads_SuspendedAgentNotOrphaned(t *testing.T) {
 			break
 		}
 	}
+	if workerBead.Status != "closed" {
+		t.Errorf("worker status = %q, want %q", workerBead.Status, "closed")
+	}
 	if workerBead.Metadata["state"] != "suspended" {
 		t.Errorf("worker state = %q, want %q", workerBead.Metadata["state"], "suspended")
+	}
+	if workerBead.Metadata["close_reason"] != "suspended" {
+		t.Errorf("worker close_reason = %q, want %q", workerBead.Metadata["close_reason"], "suspended")
 	}
 }
