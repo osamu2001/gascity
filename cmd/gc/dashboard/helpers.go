@@ -364,6 +364,16 @@ type prResponse struct {
 	} `json:"statusCheckRollup"`
 }
 
+// scopedPath rewrites a bare API path for supervisor city-scoped routing.
+// When cityScope is empty (standalone mode), returns path unchanged.
+// When set, "/v0/agents" becomes "/v0/city/{cityScope}/agents".
+func scopedPath(path, cityScope string) string {
+	if cityScope == "" || !strings.HasPrefix(path, "/v0/") {
+		return path
+	}
+	return "/v0/city/" + cityScope + "/" + strings.TrimPrefix(path, "/v0/")
+}
+
 // gitURLToRepoPath converts a git URL to owner/repo format.
 func gitURLToRepoPath(gitURL string) string {
 	if strings.HasPrefix(gitURL, "https://github.com/") {

@@ -134,17 +134,25 @@ func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Bare /v0/... — backward compat, route to first running city.
+	// Bare /v0/... — backward compat, route to sole running city.
+	// When multiple cities are running, require explicit city scope.
 	if strings.HasPrefix(path, "/v0/") || path == "/v0" {
 		cities := sm.resolver.ListCities()
-		sort.Slice(cities, func(i, j int) bool { return cities[i].Name < cities[j].Name })
+		var running []CityInfo
 		for _, c := range cities {
 			if c.Running {
-				sm.serveCityRequest(w, r, c.Name, path)
-				return
+				running = append(running, c)
 			}
 		}
-		writeError(w, http.StatusServiceUnavailable, "no_cities", "no cities running")
+		switch len(running) {
+		case 0:
+			writeError(w, http.StatusServiceUnavailable, "no_cities", "no cities running")
+		case 1:
+			sm.serveCityRequest(w, r, running[0].Name, path)
+		default:
+			writeError(w, http.StatusBadRequest, "city_required",
+				"multiple cities running; use /v0/city/{name}/... to specify which city")
+		}
 		return
 	}
 

@@ -36,6 +36,16 @@ type ConvoyData struct {
 	Summary     *Summary
 	Expand      string // Panel to show fullscreen (from ?expand=name)
 	CSRFToken   string // Token for CSRF protection on POST requests
+
+	// Supervisor mode: city selector.
+	Cities       []CityTab // all managed cities (empty in standalone mode)
+	SelectedCity string    // currently displayed city name
+}
+
+// CityTab describes a city for the city selector UI.
+type CityTab struct {
+	Name    string
+	Running bool
 }
 
 // RigRow represents a registered rig in the dashboard.

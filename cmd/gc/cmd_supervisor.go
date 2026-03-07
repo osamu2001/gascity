@@ -219,6 +219,7 @@ func supervisorStatus(stdout, _ io.Writer) int {
 // managedCity tracks a running CityRuntime inside the supervisor.
 type managedCity struct {
 	cr     *CityRuntime
+	name   string // city name at launch — used for name-drift detection
 	cancel context.CancelFunc
 	done   chan struct{} // closed when the city goroutine exits
 	closer io.Closer     // FileRecorder (or nil); closed on city stop
@@ -410,17 +411,19 @@ func reconcileCities(
 
 	// Stop cities no longer in registry. Collect under lock, stop outside
 	// to avoid blocking API requests during graceful shutdown.
-	mu.Lock()
 	var toStop []*managedCity
 	var toStopPaths []string
-	for path, mc := range cities {
-		if _, ok := desired[path]; !ok {
-			toStop = append(toStop, mc)
-			toStopPaths = append(toStopPaths, path)
-			delete(cities, path)
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for path, mc := range cities {
+			if _, ok := desired[path]; !ok {
+				toStop = append(toStop, mc)
+				toStopPaths = append(toStopPaths, path)
+				delete(cities, path)
+			}
 		}
-	}
-	mu.Unlock()
+	}()
 
 	for i, mc := range toStop {
 		name := filepath.Base(toStopPaths[i])
@@ -435,10 +438,12 @@ func reconcileCities(
 			mc.closer.Close() //nolint:errcheck
 		}
 		// Clear backoff so re-registering starts immediately.
-		mu.Lock()
-		delete(panicHistory, toStopPaths[i])
-		delete(initFailures, toStopPaths[i])
-		mu.Unlock()
+		func() {
+			mu.Lock()
+			defer mu.Unlock()
+			delete(panicHistory, toStopPaths[i])
+			delete(initFailures, toStopPaths[i])
+		}()
 		fmt.Fprintf(stdout, "City '%s' stopped.\n", name) //nolint:errcheck
 	}
 
@@ -447,30 +452,64 @@ func reconcileCities(
 	// init (self-removed from cities + recorded backoff) and was then
 	// unregistered — without this, re-registering the fixed city would
 	// inherit the old backoff.
-	mu.Lock()
-	for path := range panicHistory {
-		if _, ok := desired[path]; !ok {
-			delete(panicHistory, path)
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for path := range panicHistory {
+			if _, ok := desired[path]; !ok {
+				delete(panicHistory, path)
+			}
 		}
-	}
-	for path := range initFailures {
-		if _, ok := desired[path]; !ok {
-			delete(initFailures, path)
+		for path := range initFailures {
+			if _, ok := desired[path]; !ok {
+				delete(initFailures, path)
+			}
 		}
-	}
-	mu.Unlock()
+	}()
 
-	// Start new cities. Build list of cities to start under lock, then
-	// release lock for I/O-heavy initialization (config loading, bead
-	// lifecycle, formula materialization, etc.).
-	mu.Lock()
-	var toStart []supervisor.CityEntry
-	for path, entry := range desired {
-		if _, running := cities[path]; !running {
-			toStart = append(toStart, entry)
+	// Detect name drift: if a running city's registry name changed,
+	// schedule a stop/restart so live routing matches registry identity.
+	var nameDriftPaths []string
+	var nameDriftCities []*managedCity
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for path, mc := range cities {
+			if entry, ok := desired[path]; ok {
+				if entry.EffectiveName() != mc.name {
+					nameDriftPaths = append(nameDriftPaths, path)
+					nameDriftCities = append(nameDriftCities, mc)
+					delete(cities, path)
+				}
+			}
+		}
+	}()
+	for i, mc := range nameDriftCities {
+		fmt.Fprintf(stdout, "City name changed at '%s', restarting...\n", nameDriftPaths[i]) //nolint:errcheck
+		mc.cancel()
+		<-mc.done
+		func() {
+			defer func() { recover() }() //nolint:errcheck
+			mc.cr.shutdown()
+		}()
+		if mc.closer != nil {
+			mc.closer.Close() //nolint:errcheck
 		}
 	}
-	mu.Unlock()
+
+	// Start new cities (and name-drifted restarts). Build list under lock,
+	// then release lock for I/O-heavy initialization (config loading, bead
+	// lifecycle, formula materialization, etc.).
+	var toStart []supervisor.CityEntry
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for path, entry := range desired {
+			if _, running := cities[path]; !running {
+				toStart = append(toStart, entry)
+			}
+		}
+	}()
 
 	for _, entry := range toStart {
 		path := entry.Path
@@ -478,10 +517,12 @@ func reconcileCities(
 
 		// Crash-loop backoff: skip cities that panicked recently.
 		// Must read panicHistory under lock since city goroutines write it.
-		mu.Lock()
-		pr := panicHistory[path]
-		skipBackoff := pr != nil && time.Now().Before(pr.backoff)
-		mu.Unlock()
+		skipBackoff := func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			pr := panicHistory[path]
+			return pr != nil && time.Now().Before(pr.backoff)
+		}()
 		if skipBackoff {
 			continue
 		}
@@ -489,19 +530,23 @@ func reconcileCities(
 		// Init failure backoff: skip cities whose init failed recently,
 		// unless the config file has been modified (user may have fixed it).
 		tomlPath := filepath.Join(path, "city.toml")
-		mu.Lock()
-		ifr := initFailures[path]
-		skipInit := ifr != nil && time.Now().Before(ifr.backoff)
-		mu.Unlock()
+		skipInit, ifr := func() (bool, *initFailRecord) {
+			mu.Lock()
+			defer mu.Unlock()
+			rec := initFailures[path]
+			return rec != nil && time.Now().Before(rec.backoff), rec
+		}()
 		if skipInit {
 			// Check if config was modified since last failure.
 			if info, err := os.Stat(tomlPath); err != nil || !info.ModTime().After(ifr.configMod) {
 				continue
 			}
 			// Config changed — reset backoff and retry.
-			mu.Lock()
-			delete(initFailures, path)
-			mu.Unlock()
+			func() {
+				mu.Lock()
+				defer mu.Unlock()
+				delete(initFailures, path)
+			}()
 		}
 
 		// recordInitFailure logs the error and records backoff state.
@@ -511,25 +556,27 @@ func reconcileCities(
 			if info, stErr := os.Stat(tomlPath); stErr == nil {
 				configMod = info.ModTime()
 			}
-			mu.Lock()
-			ifrec := initFailures[path]
-			if ifrec == nil {
-				ifrec = &initFailRecord{}
-				initFailures[path] = ifrec
-			}
-			ifrec.count++
-			exp := ifrec.count - 1
-			if exp > 5 {
-				exp = 5
-			}
-			delay := time.Duration(10<<exp) * time.Second
-			if delay > 5*time.Minute {
-				delay = 5 * time.Minute
-			}
-			ifrec.backoff = time.Now().Add(delay)
-			ifrec.configMod = configMod
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': init failure #%d, next retry in %s\n", cityName, ifrec.count, delay) //nolint:errcheck
-			mu.Unlock()
+			func() {
+				mu.Lock()
+				defer mu.Unlock()
+				ifrec := initFailures[path]
+				if ifrec == nil {
+					ifrec = &initFailRecord{}
+					initFailures[path] = ifrec
+				}
+				ifrec.count++
+				exp := ifrec.count - 1
+				if exp > 5 {
+					exp = 5
+				}
+				delay := time.Duration(10<<exp) * time.Second
+				if delay > 5*time.Minute {
+					delay = 5 * time.Minute
+				}
+				ifrec.backoff = time.Now().Add(delay)
+				ifrec.configMod = configMod
+				fmt.Fprintf(stderr, "gc supervisor: city '%s': init failure #%d, next retry in %s\n", cityName, ifrec.count, delay) //nolint:errcheck
+			}()
 		}
 
 		// Auto-fetch remote packs before full config load (same as doStart).
@@ -625,11 +672,19 @@ func reconcileCities(
 		// Insert into map BEFORE launching goroutine to prevent races
 		// where an early panic deletes a non-existent entry, leaving a
 		// zombie after the post-launch insertion.
-		mu.Lock()
-		// Re-check: another goroutine might have added this city while we
-		// were initializing outside the lock.
-		if _, running := cities[path]; running {
-			mu.Unlock()
+		alreadyRunning := func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			// Re-check: another goroutine might have added this city while we
+			// were initializing outside the lock.
+			if _, running := cities[path]; running {
+				return true
+			}
+			cities[path] = &managedCity{cr: cr, name: cityName, cancel: cityCancel, done: done, closer: fr}
+			delete(initFailures, path) // clear backoff on successful init
+			return false
+		}()
+		if alreadyRunning {
 			cityCancel()
 			cr.shutdown()
 			if fr != nil {
@@ -637,9 +692,6 @@ func reconcileCities(
 			}
 			continue
 		}
-		cities[path] = &managedCity{cr: cr, cancel: cityCancel, done: done, closer: fr}
-		delete(initFailures, path) // clear backoff on successful init
-		mu.Unlock()
 
 		go func(n, p string, cityFr *events.FileRecorder) {
 			defer func() {

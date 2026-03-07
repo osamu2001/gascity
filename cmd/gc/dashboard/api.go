@@ -50,6 +50,9 @@ type APIHandler struct {
 	// apiURL is the GC API server URL. When set, handlers route through
 	// the API instead of spawning subprocesses.
 	apiURL string
+	// cityScope is the supervisor city scope. When set, API paths are
+	// rewritten from /v0/x to /v0/city/{scope}/x for supervisor routing.
+	cityScope string
 	// apiClient is the shared HTTP client for API calls (nil when apiURL is empty).
 	apiClient *http.Client
 	// defaultRunTimeout is the default timeout for command execution.
@@ -73,7 +76,7 @@ const optionsCacheTTL = 30 * time.Second
 const maxConcurrentCommands = 12
 
 // NewAPIHandler creates a new API handler with the given configuration.
-func NewAPIHandler(cityPath, cityName, apiURL string, defaultRunTimeout, maxRunTimeout time.Duration, csrfToken string) *APIHandler {
+func NewAPIHandler(cityPath, cityName, apiURL, cityScope string, defaultRunTimeout, maxRunTimeout time.Duration, csrfToken string) *APIHandler {
 	if csrfToken == "" {
 		log.Printf("WARNING: APIHandler created with empty CSRF token — POST requests will not be protected")
 	}
@@ -81,6 +84,7 @@ func NewAPIHandler(cityPath, cityName, apiURL string, defaultRunTimeout, maxRunT
 		cityPath:          cityPath,
 		cityName:          cityName,
 		apiURL:            strings.TrimRight(apiURL, "/"),
+		cityScope:         cityScope,
 		defaultRunTimeout: defaultRunTimeout,
 		maxRunTimeout:     maxRunTimeout,
 		cmdSem:            make(chan struct{}, maxConcurrentCommands),
@@ -92,9 +96,30 @@ func NewAPIHandler(cityPath, cityName, apiURL string, defaultRunTimeout, maxRunT
 	return h
 }
 
+// withCityScope returns a new APIHandler that routes API calls through
+// /v0/city/{scope}/... for supervisor mode. Shared state (client, cache,
+// semaphore) is referenced by pointer, not copied.
+func (h *APIHandler) withCityScope(scope string) *APIHandler {
+	return &APIHandler{
+		cityPath:          h.cityPath,
+		cityName:          h.cityName,
+		apiURL:            h.apiURL,
+		cityScope:         scope,
+		apiClient:         h.apiClient,
+		defaultRunTimeout: h.defaultRunTimeout,
+		maxRunTimeout:     h.maxRunTimeout,
+		cmdSem:            h.cmdSem,
+		csrfToken:         h.csrfToken,
+		// optionsCache, optionsCacheTime, optionsCacheMu are not copied —
+		// the scoped handler creates its own zero-value mutex and cache.
+		// This is acceptable: the options cache is a minor optimization
+		// and per-city options may differ anyway.
+	}
+}
+
 // apiGet performs a GET against the GC API server and returns the body.
 func (h *APIHandler) apiGet(path string) ([]byte, error) {
-	resp, err := h.apiClient.Get(h.apiURL + path)
+	resp, err := h.apiClient.Get(h.apiURL + scopedPath(path, h.cityScope))
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +141,7 @@ func (h *APIHandler) apiPost(path string, payload any) ([]byte, error) {
 		}
 		reqBody = bytes.NewReader(data)
 	}
-	req, err := http.NewRequest(http.MethodPost, h.apiURL+path, reqBody)
+	req, err := http.NewRequest(http.MethodPost, h.apiURL+scopedPath(path, h.cityScope), reqBody)
 	if err != nil {
 		return nil, err
 	}
@@ -167,44 +192,53 @@ func (h *APIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Per-request city scope for supervisor routing. When the JS
+	// includes ?city=X, set the scope for this request so all upstream
+	// API calls route to that city. We use a wrapper that delegates to
+	// the original handler but overrides cityScope.
+	handler := h
+	if city := r.URL.Query().Get("city"); city != "" {
+		handler = h.withCityScope(city)
+	}
+
 	path := strings.TrimPrefix(r.URL.Path, "/api")
 	switch {
 	case path == "/run" && r.Method == http.MethodPost:
-		h.handleRun(w, r)
+		handler.handleRun(w, r)
 	case path == "/commands" && r.Method == http.MethodGet:
-		h.handleCommands(w, r)
+		handler.handleCommands(w, r)
 	case path == "/options" && r.Method == http.MethodGet:
-		h.handleOptions(w, r)
+		handler.handleOptions(w, r)
 	case path == "/mail/inbox" && r.Method == http.MethodGet:
-		h.handleMailInbox(w, r)
+		handler.handleMailInbox(w, r)
 	case path == "/mail/threads" && r.Method == http.MethodGet:
-		h.handleMailThreads(w, r)
+		handler.handleMailThreads(w, r)
 	case path == "/mail/read" && r.Method == http.MethodGet:
-		h.handleMailRead(w, r)
+		handler.handleMailRead(w, r)
 	case path == "/mail/send" && r.Method == http.MethodPost:
-		h.handleMailSend(w, r)
+		handler.handleMailSend(w, r)
 	case path == "/issues/show" && r.Method == http.MethodGet:
-		h.handleIssueShow(w, r)
+		handler.handleIssueShow(w, r)
 	case path == "/issues/create" && r.Method == http.MethodPost:
-		h.handleIssueCreate(w, r)
+		handler.handleIssueCreate(w, r)
 	case path == "/issues/close" && r.Method == http.MethodPost:
-		h.handleIssueClose(w, r)
+		handler.handleIssueClose(w, r)
 	case path == "/issues/update" && r.Method == http.MethodPost:
-		h.handleIssueUpdate(w, r)
+		handler.handleIssueUpdate(w, r)
 	case path == "/pr/show" && r.Method == http.MethodGet:
-		h.handlePRShow(w, r)
+		handler.handlePRShow(w, r)
 	case path == "/crew" && r.Method == http.MethodGet:
-		h.handleCrew(w, r)
+		handler.handleCrew(w, r)
 	case path == "/ready" && r.Method == http.MethodGet:
-		h.handleReady(w, r)
+		handler.handleReady(w, r)
 	case path == "/events" && r.Method == http.MethodGet:
-		h.handleSSE(w, r)
+		handler.handleSSE(w, r)
 	case path == "/session/preview" && r.Method == http.MethodGet:
-		h.handleSessionPreview(w, r)
+		handler.handleSessionPreview(w, r)
 	case path == "/agent/output" && r.Method == http.MethodGet:
-		h.handleAgentOutput(w, r)
+		handler.handleAgentOutput(w, r)
 	case path == "/agent/output/stream" && r.Method == http.MethodGet:
-		h.handleAgentOutputStream(w, r)
+		handler.handleAgentOutputStream(w, r)
 	default:
 		http.Error(w, "Not found", http.StatusNotFound)
 	}
@@ -1660,7 +1694,7 @@ func (h *APIHandler) handleAgentOutput(w http.ResponseWriter, r *http.Request) {
 		upstream += sep + "before=" + url.QueryEscape(v)
 	}
 
-	resp, err := h.apiClient.Get(h.apiURL + upstream)
+	resp, err := h.apiClient.Get(h.apiURL + scopedPath(upstream, h.cityScope))
 	if err != nil {
 		h.sendError(w, "Failed to fetch agent output", http.StatusBadGateway)
 		return
@@ -1688,7 +1722,7 @@ func (h *APIHandler) handleAgentOutputStream(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	upstream := h.apiURL + "/v0/agent/" + agentName + "/output/stream"
+	upstream := h.apiURL + scopedPath("/v0/agent/"+agentName+"/output/stream", h.cityScope)
 	req, err := http.NewRequestWithContext(r.Context(), "GET", upstream, nil)
 	if err != nil {
 		h.sendError(w, "Failed to create request", http.StatusInternalServerError)
@@ -1798,7 +1832,7 @@ func (h *APIHandler) handleSSEProxy(w http.ResponseWriter, r *http.Request) {
 	// Connect to API event stream. Resume from after_seq if provided.
 	// The client sends after_seq as a query param (manual EventSource creation
 	// doesn't send Last-Event-ID header), so check both sources.
-	sseURL := h.apiURL + "/v0/events/stream"
+	sseURL := h.apiURL + scopedPath("/v0/events/stream", h.cityScope)
 	afterSeq := r.URL.Query().Get("after_seq")
 	if afterSeq == "" {
 		afterSeq = r.Header.Get("Last-Event-ID")

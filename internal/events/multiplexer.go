@@ -76,16 +76,18 @@ func (m *Multiplexer) ListAll(filter Filter) ([]TaggedEvent, error) {
 // is a map of city→seq positions (use ParseCursor/FormatCursor to persist).
 func (m *Multiplexer) Watch(ctx context.Context, cursors map[string]uint64) (*MuxWatcher, error) {
 	providers := m.snapshot()
+	childCtx, cancel := context.WithCancel(ctx)
 	w := &MuxWatcher{
-		ctx:  ctx,
-		ch:   make(chan TaggedEvent, 16),
-		done: make(chan struct{}),
+		ctx:    childCtx,
+		cancel: cancel,
+		ch:     make(chan TaggedEvent, 16),
+		done:   make(chan struct{}),
 	}
 
 	var wg sync.WaitGroup
 	for city, p := range providers {
 		afterSeq := cursors[city]
-		watcher, err := p.Watch(ctx, afterSeq)
+		watcher, err := p.Watch(childCtx, afterSeq)
 		if err != nil {
 			continue // skip cities whose watcher fails
 		}
@@ -123,6 +125,7 @@ func (m *Multiplexer) Watch(ctx context.Context, cursors map[string]uint64) (*Mu
 // a subset of Watcher but returns TaggedEvent instead of Event.
 type MuxWatcher struct {
 	ctx       context.Context
+	cancel    context.CancelFunc
 	ch        chan TaggedEvent
 	done      chan struct{}
 	closeOnce sync.Once
@@ -144,9 +147,14 @@ func (w *MuxWatcher) Next() (TaggedEvent, error) {
 	}
 }
 
-// Close unblocks any pending Next call and stops all underlying watchers.
+// Close unblocks any pending Next call and stops all underlying watchers
+// by canceling the child context, which causes blocked watcher.Next()
+// calls to return.
 func (w *MuxWatcher) Close() error {
-	w.closeOnce.Do(func() { close(w.done) })
+	w.closeOnce.Do(func() {
+		close(w.done)
+		w.cancel()
+	})
 	return nil
 }
 

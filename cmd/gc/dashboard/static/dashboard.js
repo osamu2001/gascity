@@ -2,9 +2,15 @@
     'use strict';
 
     // ============================================
+    // CITY SCOPE (supervisor mode)
+    // ============================================
+    // Selected city from URL query param, used to scope all API calls.
+    var _selectedCity = new URLSearchParams(window.location.search).get('city') || '';
+
+    // ============================================
     // CSRF PROTECTION
     // ============================================
-    // Inject dashboard token into all POST requests to prevent cross-site request forgery.
+    // Inject dashboard token and city scope into all requests.
     var _origFetch = window.fetch;
     var _csrfMeta = document.querySelector('meta[name="dashboard-token"]');
     var _csrfToken = _csrfMeta ? _csrfMeta.getAttribute('content') : '';
@@ -13,6 +19,11 @@
         if (opts.method && opts.method.toUpperCase() === 'POST' && _csrfToken) {
             opts.headers = opts.headers || {};
             opts.headers['X-Dashboard-Token'] = _csrfToken;
+        }
+        // In supervisor mode, add city param to API calls.
+        if (_selectedCity && typeof url === 'string' && url.indexOf('/api/') === 0) {
+            var sep = url.indexOf('?') >= 0 ? '&' : '?';
+            url = url + sep + 'city=' + encodeURIComponent(_selectedCity);
         }
         return _origFetch.call(this, url, opts);
     };
@@ -99,7 +110,9 @@
         }
 
         var sseURL = '/api/events';
-        if (_lastEventId) sseURL += '?after_seq=' + encodeURIComponent(_lastEventId);
+        var sseSep = '?';
+        if (_selectedCity) { sseURL += sseSep + 'city=' + encodeURIComponent(_selectedCity); sseSep = '&'; }
+        if (_lastEventId) { sseURL += sseSep + 'after_seq=' + encodeURIComponent(_lastEventId); }
         evtSource = new EventSource(sseURL);
 
         evtSource.addEventListener('connected', function() {

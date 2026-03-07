@@ -2063,6 +2063,57 @@
             background: var(--text-muted);
         }
 
+        /* City selector tabs (supervisor mode) */
+        .city-tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 16px;
+            padding: 4px;
+            background: var(--bg-card);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            overflow-x: auto;
+        }
+
+        .city-tab {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            border-radius: 6px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 12px;
+            white-space: nowrap;
+            transition: background 0.15s, color 0.15s;
+        }
+
+        .city-tab:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+        }
+
+        .city-tab.active {
+            background: var(--border-accent);
+            color: var(--text-primary);
+        }
+
+        .city-tab.stopped {
+            opacity: 0.5;
+        }
+
+        .city-dot {
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--red);
+        }
+
+        .city-dot.running {
+            background: var(--green);
+        }
+
         /* Mayor status banner */
         .mayor-banner {
             display: flex;

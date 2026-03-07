@@ -1,4 +1,4 @@
-<div class="panel" id="activity-panel" hx-get="/panels/activity" hx-trigger="panel-refresh" hx-swap="morph:outerHTML">
+<div class="panel" id="activity-panel" hx-get="{{if .SelectedCity}}/panels/activity?city={{.SelectedCity}}{{else}}/panels/activity{{end}}" hx-trigger="panel-refresh" hx-swap="morph:outerHTML">
     <div class="panel-header">
         <h2>📜 Activity</h2>
         <span class="count">{{len .Activity}}</span>

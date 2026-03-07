@@ -195,21 +195,18 @@ func TestSupervisorBarePathMultipleCities(t *testing.T) {
 		"beta":  s2,
 	})
 
-	// Bare /v0/status with multiple cities should route to first alphabetically.
+	// Bare /v0/status with multiple cities should return 400 requiring
+	// explicit city scope.
 	req := httptest.NewRequest("GET", "/v0/status", nil)
 	rec := httptest.NewRecorder()
 	sm.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
-
-	var resp statusResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Name != "alpha" {
-		t.Errorf("Name = %q, want %q (first alphabetically)", resp.Name, "alpha")
+	body := rec.Body.String()
+	if !strings.Contains(body, "city_required") {
+		t.Errorf("body = %q, want city_required error", body)
 	}
 }
 

@@ -13,10 +13,11 @@ import (
 
 // APIFetcher implements ConvoyFetcher by calling the GC API server.
 type APIFetcher struct {
-	baseURL  string       // e.g. "http://127.0.0.1:8080"
-	cityPath string       // city directory path
-	cityName string       // for display
-	client   *http.Client // shared client with timeout
+	baseURL   string       // e.g. "http://127.0.0.1:8080"
+	cityPath  string       // city directory path
+	cityName  string       // for display
+	cityScope string       // supervisor city scope; when set, /v0/x → /v0/city/{scope}/x
+	client    *http.Client // shared client with timeout
 }
 
 // NewAPIFetcher creates a new API-backed fetcher.
@@ -29,6 +30,15 @@ func NewAPIFetcher(baseURL, cityPath, cityName string) *APIFetcher {
 			Timeout: 15 * time.Second,
 		},
 	}
+}
+
+// WithScope returns a shallow copy of the fetcher with the given city scope.
+// The copy shares the HTTP client but routes API paths through
+// /v0/city/{scope}/... for supervisor mode.
+func (f *APIFetcher) WithScope(cityScope string) *APIFetcher {
+	cp := *f
+	cp.cityScope = cityScope
+	return &cp
 }
 
 // --- API response types (matching internal/api JSON shapes) ---
@@ -119,7 +129,7 @@ type apiStatusResponse struct {
 
 // get performs a GET request and decodes the JSON response into result.
 func (f *APIFetcher) get(path string, result any) error {
-	resp, err := f.client.Get(f.baseURL + path)
+	resp, err := f.client.Get(f.baseURL + scopedPath(path, f.cityScope))
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", path, err)
 	}

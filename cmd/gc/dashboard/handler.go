@@ -6,10 +6,12 @@ import (
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
+	"encoding/json"
 	"html/template"
 	"io/fs"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -36,14 +38,16 @@ type ConvoyFetcher interface {
 
 // ConvoyHandler handles HTTP requests for the convoy dashboard.
 type ConvoyHandler struct {
-	fetcher      ConvoyFetcher
+	fetcher      *APIFetcher
 	template     *template.Template
 	fetchTimeout time.Duration
 	csrfToken    string
+	isSupervisor bool   // true when connected to a supervisor API
+	apiURL       string // supervisor API URL for city list fetches
 }
 
 // NewConvoyHandler creates a new convoy handler.
-func NewConvoyHandler(fetcher ConvoyFetcher, fetchTimeout time.Duration, csrfToken string) (*ConvoyHandler, error) {
+func NewConvoyHandler(fetcher *APIFetcher, isSupervisor bool, apiURL string, fetchTimeout time.Duration, csrfToken string) (*ConvoyHandler, error) {
 	tmpl, err := LoadTemplates()
 	if err != nil {
 		return nil, err
@@ -54,12 +58,35 @@ func NewConvoyHandler(fetcher ConvoyFetcher, fetchTimeout time.Duration, csrfTok
 		template:     tmpl,
 		fetchTimeout: fetchTimeout,
 		csrfToken:    csrfToken,
+		isSupervisor: isSupervisor,
+		apiURL:       apiURL,
 	}, nil
 }
 
 // ServeHTTP handles GET / requests and renders the convoy dashboard.
 func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	expandPanel := r.URL.Query().Get("expand")
+
+	// In supervisor mode, resolve city list and selected city.
+	var cities []CityTab
+	var selectedCity string
+	fetcher := h.fetcher
+	if h.isSupervisor {
+		cities = fetchCityTabs(h.apiURL)
+		selectedCity = r.URL.Query().Get("city")
+		if selectedCity == "" {
+			// Default to first running city.
+			for _, c := range cities {
+				if c.Running {
+					selectedCity = c.Name
+					break
+				}
+			}
+		}
+		if selectedCity != "" {
+			fetcher = h.fetcher.WithScope(selectedCity)
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), h.fetchTimeout)
 	defer cancel()
@@ -86,7 +113,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		convoys, err = h.fetcher.FetchConvoys()
+		convoys, err = fetcher.FetchConvoys()
 		if err != nil {
 			log.Printf("dashboard: FetchConvoys failed: %v", err)
 		}
@@ -94,7 +121,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		mergeQueue, err = h.fetcher.FetchMergeQueue()
+		mergeQueue, err = fetcher.FetchMergeQueue()
 		if err != nil {
 			log.Printf("dashboard: FetchMergeQueue failed: %v", err)
 		}
@@ -102,7 +129,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		workers, err = h.fetcher.FetchWorkers()
+		workers, err = fetcher.FetchWorkers()
 		if err != nil {
 			log.Printf("dashboard: FetchWorkers failed: %v", err)
 		}
@@ -110,7 +137,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		mail, err = h.fetcher.FetchMail()
+		mail, err = fetcher.FetchMail()
 		if err != nil {
 			log.Printf("dashboard: FetchMail failed: %v", err)
 		}
@@ -118,7 +145,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		rigs, err = h.fetcher.FetchRigs()
+		rigs, err = fetcher.FetchRigs()
 		if err != nil {
 			log.Printf("dashboard: FetchRigs failed: %v", err)
 		}
@@ -126,7 +153,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		dogs, err = h.fetcher.FetchDogs()
+		dogs, err = fetcher.FetchDogs()
 		if err != nil {
 			log.Printf("dashboard: FetchDogs failed: %v", err)
 		}
@@ -134,7 +161,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		escalations, err = h.fetcher.FetchEscalations()
+		escalations, err = fetcher.FetchEscalations()
 		if err != nil {
 			log.Printf("dashboard: FetchEscalations failed: %v", err)
 		}
@@ -142,7 +169,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		health, err = h.fetcher.FetchHealth()
+		health, err = fetcher.FetchHealth()
 		if err != nil {
 			log.Printf("dashboard: FetchHealth failed: %v", err)
 		}
@@ -150,7 +177,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		queues, err = h.fetcher.FetchQueues()
+		queues, err = fetcher.FetchQueues()
 		if err != nil {
 			log.Printf("dashboard: FetchQueues failed: %v", err)
 		}
@@ -158,7 +185,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		assigned, err = h.fetcher.FetchAssigned()
+		assigned, err = fetcher.FetchAssigned()
 		if err != nil {
 			log.Printf("dashboard: FetchAssigned failed: %v", err)
 		}
@@ -166,7 +193,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		mayor, err = h.fetcher.FetchMayor()
+		mayor, err = fetcher.FetchMayor()
 		if err != nil {
 			log.Printf("dashboard: FetchMayor failed: %v", err)
 		}
@@ -174,7 +201,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		issues, err = h.fetcher.FetchIssues()
+		issues, err = fetcher.FetchIssues()
 		if err != nil {
 			log.Printf("dashboard: FetchIssues failed: %v", err)
 		}
@@ -182,7 +209,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer wg.Done()
 		var err error
-		activity, err = h.fetcher.FetchActivity()
+		activity, err = fetcher.FetchActivity()
 		if err != nil {
 			log.Printf("dashboard: FetchActivity failed: %v", err)
 		}
@@ -204,22 +231,24 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	summary := computeSummary(workers, assigned, issues, convoys, escalations, activity)
 
 	data := ConvoyData{
-		Convoys:     convoys,
-		MergeQueue:  mergeQueue,
-		Workers:     workers,
-		Mail:        mail,
-		Rigs:        rigs,
-		Dogs:        dogs,
-		Escalations: escalations,
-		Health:      health,
-		Queues:      queues,
-		Assigned:    assigned,
-		Mayor:       mayor,
-		Issues:      enrichIssuesWithAssignees(issues, assigned),
-		Activity:    activity,
-		Summary:     summary,
-		Expand:      expandPanel,
-		CSRFToken:   h.csrfToken,
+		Convoys:      convoys,
+		MergeQueue:   mergeQueue,
+		Workers:      workers,
+		Mail:         mail,
+		Rigs:         rigs,
+		Dogs:         dogs,
+		Escalations:  escalations,
+		Health:       health,
+		Queues:       queues,
+		Assigned:     assigned,
+		Mayor:        mayor,
+		Issues:       enrichIssuesWithAssignees(issues, assigned),
+		Activity:     activity,
+		Summary:      summary,
+		Expand:       expandPanel,
+		CSRFToken:    h.csrfToken,
+		Cities:       cities,
+		SelectedCity: selectedCity,
 	}
 
 	var buf bytes.Buffer
@@ -239,8 +268,12 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Only fetches activity data (1 API call instead of 13), renders just the
 // activity panel HTML fragment. Used by the JS event router for high-frequency
 // observation events that don't affect other panels.
-func (h *ConvoyHandler) ServeActivityPanel(w http.ResponseWriter, _ *http.Request) {
-	activity, err := h.fetcher.FetchActivity()
+func (h *ConvoyHandler) ServeActivityPanel(w http.ResponseWriter, r *http.Request) {
+	fetcher := h.fetcher
+	if city := r.URL.Query().Get("city"); city != "" {
+		fetcher = h.fetcher.WithScope(city)
+	}
+	activity, err := fetcher.FetchActivity()
 	if err != nil {
 		log.Printf("dashboard: FetchActivity failed: %v", err)
 		// Return 503 so htmx skips the swap, preserving existing panel content.
@@ -310,6 +343,35 @@ func computeSummary(workers []WorkerRow, assigned []AssignedRow, issues []IssueR
 	return summary
 }
 
+// fetchCityTabs fetches the city list from the supervisor API for the city selector.
+func fetchCityTabs(apiURL string) []CityTab {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(strings.TrimRight(apiURL, "/") + "/v0/cities")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close() //nolint:errcheck
+		}
+		return nil
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	var list struct {
+		Items []struct {
+			Name    string `json:"name"`
+			Running bool   `json:"running"`
+		} `json:"items"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&list) != nil {
+		return nil
+	}
+
+	tabs := make([]CityTab, 0, len(list.Items))
+	for _, c := range list.Items {
+		tabs = append(tabs, CityTab{Name: c.Name, Running: c.Running})
+	}
+	return tabs
+}
+
 // enrichIssuesWithAssignees adds Assignee info to issues by cross-referencing assigned beads.
 func enrichIssuesWithAssignees(issues []IssueRow, assigned []AssignedRow) []IssueRow {
 	assigneeMap := make(map[string]string)
@@ -334,17 +396,17 @@ func generateCSRFToken() string {
 }
 
 // NewDashboardMux creates an HTTP handler that serves both the dashboard and API.
-func NewDashboardMux(fetcher ConvoyFetcher, cityPath, cityName, apiURL string,
+func NewDashboardMux(fetcher *APIFetcher, cityPath, cityName, apiURL string, isSupervisor bool,
 	fetchTimeout, defaultRunTimeout, maxRunTimeout time.Duration,
 ) (http.Handler, error) {
 	csrfToken := generateCSRFToken()
 
-	convoyHandler, err := NewConvoyHandler(fetcher, fetchTimeout, csrfToken)
+	convoyHandler, err := NewConvoyHandler(fetcher, isSupervisor, apiURL, fetchTimeout, csrfToken)
 	if err != nil {
 		return nil, err
 	}
 
-	apiHandler := NewAPIHandler(cityPath, cityName, apiURL, defaultRunTimeout, maxRunTimeout, csrfToken)
+	apiHandler := NewAPIHandler(cityPath, cityName, apiURL, "", defaultRunTimeout, maxRunTimeout, csrfToken)
 
 	staticFS, err := fs.Sub(staticFiles, "static")
 	if err != nil {
