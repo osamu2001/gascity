@@ -19,9 +19,11 @@ import (
 //
 // templateName is the base config template name (e.g., "worker" for pool
 // instance "worker-1"). For non-pool agents, templateName == qualifiedName.
+// Phase 1 ignores templateName (lookup uses qualifiedName only); Phase 2
+// will use it for pool instance bead creation and template-based queries.
 //
 // Results are cached in p.beadNames for the duration of the build cycle.
-func (p *agentBuildParams) resolveSessionName(qualifiedName, _ string) string {
+func (p *agentBuildParams) resolveSessionName(qualifiedName, _ /* templateName */ string) string {
 	// Check cache first.
 	if sn, ok := p.beadNames[qualifiedName]; ok {
 		return sn

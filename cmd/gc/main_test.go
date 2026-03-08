@@ -384,6 +384,76 @@ func TestResolveSessionNameWithStore(t *testing.T) {
 	}
 }
 
+func TestFindSessionNameByTemplate_SkipsClosedBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   "session",
+		Labels: []string{"gc:session", "template:worker"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"common_name":  "worker",
+			"session_name": "s-gc-99",
+			"state":        "asleep",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Close the bead — it should be skipped.
+	if err := store.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	got := findSessionNameByTemplate(store, "worker")
+	if got != "" {
+		t.Errorf("findSessionNameByTemplate(closed bead) = %q, want empty", got)
+	}
+}
+
+func TestFindSessionNameByTemplate_SkipsPoolSlotBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	_, err := store.Create(beads.Bead{
+		Title:  "worker-1",
+		Type:   "session",
+		Labels: []string{"gc:session", "template:worker"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"common_name":  "worker-1",
+			"session_name": "s-gc-50",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Querying for the base template "worker" should NOT match the pool instance.
+	got := findSessionNameByTemplate(store, "worker")
+	if got != "" {
+		t.Errorf("findSessionNameByTemplate(pool_slot bead) = %q, want empty", got)
+	}
+}
+
+func TestFindSessionNameByTemplate_SkipsEmptySessionName(t *testing.T) {
+	store := beads.NewMemStore()
+	_, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   "session",
+		Labels: []string{"gc:session", "template:worker"},
+		Metadata: map[string]string{
+			"template":    "worker",
+			"common_name": "worker",
+			// session_name intentionally missing
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := findSessionNameByTemplate(store, "worker")
+	if got != "" {
+		t.Errorf("findSessionNameByTemplate(empty session_name) = %q, want empty", got)
+	}
+}
+
 // --- gc init (doInit with fsys.Fake) ---
 
 func TestDoInitSuccess(t *testing.T) {
