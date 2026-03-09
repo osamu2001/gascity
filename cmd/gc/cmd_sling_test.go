@@ -57,6 +57,7 @@ type fakeRunnerRule struct {
 // Rules are matched in order (first match wins), providing deterministic behavior.
 type fakeRunner struct {
 	calls []string
+	envs  []map[string]string
 	rules []fakeRunnerRule
 }
 
@@ -67,8 +68,9 @@ func (r *fakeRunner) on(prefix, out string, err error) {
 	r.rules = append(r.rules, fakeRunnerRule{prefix: prefix, out: out, err: err})
 }
 
-func (r *fakeRunner) run(_, command string, _ map[string]string) (string, error) {
+func (r *fakeRunner) run(_, command string, env map[string]string) (string, error) {
 	r.calls = append(r.calls, command)
+	r.envs = append(r.envs, env)
 	for _, rule := range r.rules {
 		if strings.Contains(command, rule.prefix) {
 			return rule.out, rule.err
@@ -138,6 +140,60 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Slung BL-42") {
 		t.Errorf("stdout = %q, want to contain 'Slung BL-42'", stdout.String())
 	}
+}
+
+func TestDoSlingEnvPassthrough(t *testing.T) {
+	// Fixed agent: env should contain GC_SLING_TARGET with resolved session name.
+	t.Run("fixed agent", func(t *testing.T) {
+		runner := newFakeRunner()
+		sp := runtime.NewFake()
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		a := config.Agent{Name: "mayor"}
+
+		deps, _, stderr := testDeps(cfg, sp, runner.run)
+		opts := testOpts(a, "BL-42")
+		code := doSling(opts, deps, nil)
+
+		if code != 0 {
+			t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+		}
+		if len(runner.envs) != 1 {
+			t.Fatalf("got %d env captures, want 1", len(runner.envs))
+		}
+		env := runner.envs[0]
+		if env == nil {
+			t.Fatal("env is nil for fixed agent, want GC_SLING_TARGET set")
+		}
+		if _, ok := env["GC_SLING_TARGET"]; !ok {
+			t.Error("env missing GC_SLING_TARGET key")
+		}
+	})
+
+	// Pool agent: env should be nil (label-based dispatch).
+	t.Run("pool agent", func(t *testing.T) {
+		runner := newFakeRunner()
+		sp := runtime.NewFake()
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		a := config.Agent{
+			Name: "polecat",
+			Dir:  "hello-world",
+			Pool: &config.PoolConfig{Min: 1, Max: 3},
+		}
+
+		deps, _, stderr := testDeps(cfg, sp, runner.run)
+		opts := testOpts(a, "HW-7")
+		code := doSling(opts, deps, nil)
+
+		if code != 0 {
+			t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+		}
+		if len(runner.envs) != 1 {
+			t.Fatalf("got %d env captures, want 1", len(runner.envs))
+		}
+		if runner.envs[0] != nil {
+			t.Errorf("env = %v for pool agent, want nil", runner.envs[0])
+		}
+	})
 }
 
 func TestDoSlingBeadToPool(t *testing.T) {
