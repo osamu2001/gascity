@@ -190,6 +190,8 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mgr := s.sessionManager(store)
+
+	hints := sessionCreateHints(resolved)
 	info, err := mgr.CreateWithTransport(
 		r.Context(),
 		template,
@@ -200,7 +202,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		transport,
 		resolved.Env,
 		resume,
-		sessionCreateHints(resolved),
+		hints,
 	)
 	if err != nil {
 		s.idem.unreserve(idemKey)

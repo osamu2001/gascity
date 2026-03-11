@@ -633,7 +633,7 @@ op_init() {
 
     # Custom bead types for bd (extracted from beads core in v0.46.0).
     # GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
-    local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig}"
+    local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session}"
 
     # If already initialized on disk, ensure the database is also registered
     # with the running server. This covers the case where bd init created the
@@ -644,8 +644,8 @@ op_init() {
         ensure_metadata "$dir/.beads/metadata.json" "$prefix"
         # Ensure issue_prefix is set (may be missing if bd init was run
         # manually or metadata was created without full initialization).
-        bd config set issue_prefix "$prefix" --dir "$dir" 2>/dev/null || true
-        bd config set types.custom "$custom_types" --dir "$dir" 2>/dev/null || true
+        bd config set issue_prefix "$prefix" 2>/dev/null || true
+        bd config set types.custom "$custom_types" 2>/dev/null || true
         ensure_config_yaml "$beads_dir" "$prefix"
         exit 0
     fi
@@ -665,10 +665,10 @@ op_init() {
         "$dir" || die "bd init failed for $dir"
 
     # Set issue_prefix.
-    bd config set issue_prefix "$prefix" --dir "$dir" 2>/dev/null || true
+    bd config set issue_prefix "$prefix" 2>/dev/null || true
 
     # Configure custom bead types (required since beads v0.46.0).
-    bd config set types.custom "$custom_types" --dir "$dir" 2>/dev/null || true
+    bd config set types.custom "$custom_types" 2>/dev/null || true
 
     # Drop orphan database created by bd init (upstream gt-sv1h).
     # bd init --prefix creates beads_<prefix> on the Dolt server, but we

@@ -212,7 +212,7 @@ func discoverSessionBeads(
 		// Find the config agent for this template.
 		cfgAgent := findAgentByTemplate(cfg, template)
 		if cfgAgent == nil {
-			continue // no matching config agent — can't resolve template
+			continue
 		}
 		// Resolve TemplateParams for this bead's session.
 		fpExtra := buildFingerprintExtra(cfgAgent)

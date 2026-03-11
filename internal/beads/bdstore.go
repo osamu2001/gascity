@@ -261,22 +261,74 @@ func envWithout(environ []string, key string) []string {
 	return out
 }
 
+// StringMap is a map[string]string that tolerates non-string JSON values
+// (booleans, numbers) by coercing them to their string representation.
+// This prevents bd CLI's type-inference from breaking metadata deserialization
+// (e.g., bd stores "true" as JSON boolean true, "42" as JSON number 42).
+type StringMap map[string]string
+
+// UnmarshalJSON implements json.Unmarshaler for StringMap.
+func (m *StringMap) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	result := make(map[string]string, len(raw))
+	for k, v := range raw {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			result[k] = s
+			continue
+		}
+		// Coerce non-string values to their JSON text representation
+		// (e.g., true → "true", 42 → "42").
+		result[k] = strings.TrimSpace(string(v))
+	}
+	*m = result
+	return nil
+}
+
 // bdIssue is the JSON shape returned by bd CLI commands. We decode only the
 // fields Gas City cares about; all others are silently ignored.
 type bdIssue struct {
-	ID          string            `json:"id"`
-	Title       string            `json:"title"`
-	Status      string            `json:"status"`
-	IssueType   string            `json:"issue_type"`
-	CreatedAt   time.Time         `json:"created_at"`
-	Assignee    string            `json:"assignee"`
-	From        string            `json:"from"`
-	ParentID    string            `json:"parent_id"`
-	Ref         string            `json:"ref"`
-	Needs       []string          `json:"needs"`
-	Description string            `json:"description"`
-	Labels      []string          `json:"labels"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	ID          string    `json:"id"`
+	Title       string    `json:"title"`
+	Status      string    `json:"status"`
+	IssueType   string    `json:"issue_type"`
+	CreatedAt   time.Time `json:"created_at"`
+	Assignee    string    `json:"assignee"`
+	From        string    `json:"from"`
+	ParentID    string    `json:"parent_id"`
+	Ref         string    `json:"ref"`
+	Needs       []string  `json:"needs"`
+	Description string    `json:"description"`
+	Labels      []string  `json:"labels"`
+	Metadata    StringMap `json:"metadata,omitempty"`
+}
+
+// parseIssuesTolerant unmarshals a JSON array of bdIssue objects, skipping
+// any entries that fail to parse (e.g. corrupt metadata with non-string values).
+// This prevents a single bad bead from breaking all list operations.
+func parseIssuesTolerant(data []byte) []bdIssue {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	result := make([]bdIssue, 0, len(raw))
+	for _, r := range raw {
+		var issue bdIssue
+		if err := json.Unmarshal(r, &issue); err != nil {
+			// Skip corrupt entry — log the ID if we can extract it.
+			var peek struct {
+				ID string `json:"id"`
+			}
+			_ = json.Unmarshal(r, &peek)
+			fmt.Fprintf(os.Stderr, "beads: skipping corrupt bead %q: %v\n", peek.ID, err)
+			continue
+		}
+		result = append(result, issue)
+	}
+	return result
 }
 
 // toBead converts a bdIssue to a Gas City Bead. CreatedAt is truncated to
@@ -336,6 +388,13 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	}
 	if b.ParentID != "" {
 		args = append(args, "--parent", b.ParentID)
+	}
+	if len(b.Metadata) > 0 {
+		metaJSON, err := json.Marshal(b.Metadata)
+		if err != nil {
+			return Bead{}, fmt.Errorf("bd create: marshaling metadata: %w", err)
+		}
+		args = append(args, "--metadata", string(metaJSON))
 	}
 	out, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
@@ -459,10 +518,7 @@ func (s *BdStore) List() ([]Bead, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bd list: %w", err)
 	}
-	var issues []bdIssue
-	if err := json.Unmarshal(extractJSON(out), &issues); err != nil {
-		return nil, fmt.Errorf("bd list: parsing JSON: %w", err)
-	}
+	issues := parseIssuesTolerant(extractJSON(out))
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()
@@ -479,10 +535,7 @@ func (s *BdStore) ListByLabel(label string, limit int) ([]Bead, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bd list: %w", err)
 	}
-	var issues []bdIssue
-	if err := json.Unmarshal(extractJSON(out), &issues); err != nil {
-		return nil, fmt.Errorf("bd list: parsing JSON: %w", err)
-	}
+	issues := parseIssuesTolerant(extractJSON(out))
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()
@@ -513,10 +566,7 @@ func (s *BdStore) Ready() ([]Bead, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
 	}
-	var issues []bdIssue
-	if err := json.Unmarshal(extractJSON(out), &issues); err != nil {
-		return nil, fmt.Errorf("bd ready: parsing JSON: %w", err)
-	}
+	issues := parseIssuesTolerant(extractJSON(out))
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()

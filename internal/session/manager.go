@@ -233,7 +233,6 @@ func (m *Manager) CreateWithTransport(ctx context.Context, template, title, comm
 
 	// Start the runtime session.
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-		// Clean up the bead on start failure.
 		if unroute != nil {
 			unroute()
 		}

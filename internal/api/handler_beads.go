@@ -205,10 +205,11 @@ func (s *Server) handleBeadClose(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
-		Assignee     *string  `json:"assignee"`
-		Description  *string  `json:"description"`
-		Labels       []string `json:"labels"`
-		RemoveLabels []string `json:"remove_labels"`
+		Assignee     *string           `json:"assignee"`
+		Description  *string           `json:"description"`
+		Labels       []string          `json:"labels"`
+		RemoveLabels []string          `json:"remove_labels"`
+		Metadata     map[string]string `json:"metadata"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
@@ -231,6 +232,13 @@ func (s *Server) handleBeadUpdate(w http.ResponseWriter, r *http.Request) {
 			}
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
+		}
+		// Apply metadata key-value pairs if provided.
+		if len(body.Metadata) > 0 {
+			if err := store.SetMetadataBatch(id, body.Metadata); err != nil {
+				writeError(w, http.StatusInternalServerError, "internal", err.Error())
+				return
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 		return

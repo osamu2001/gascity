@@ -219,6 +219,9 @@ func syncSessionBeads(
 				"state":          state,
 				"synced_at":      now.Format("2006-01-02T15:04:05Z07:00"),
 			}
+			if tp.WorkDir != "" {
+				meta["work_dir"] = tp.WorkDir
+			}
 			meta["template"] = tp.TemplateName
 			if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
 				meta["pool_slot"] = strconv.Itoa(slot)
@@ -252,6 +255,11 @@ func syncSessionBeads(
 				if setMeta(store, b.ID, "pool_slot", strconv.Itoa(slot), stderr) == nil {
 					b.Metadata["pool_slot"] = strconv.Itoa(slot)
 				}
+			}
+		}
+		if b.Metadata["work_dir"] == "" && tp.WorkDir != "" {
+			if setMeta(store, b.ID, "work_dir", tp.WorkDir, stderr) == nil {
+				b.Metadata["work_dir"] = tp.WorkDir
 			}
 		}
 
