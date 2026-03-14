@@ -224,6 +224,9 @@ func (s *Server) registerRoutes() {
 
 	// Automations
 	s.mux.HandleFunc("GET /v0/automations", s.handleAutomationList)
+	s.mux.HandleFunc("GET /v0/automations/check", s.handleAutomationCheck)
+	s.mux.HandleFunc("GET /v0/automations/history", s.handleAutomationHistory)
+	s.mux.HandleFunc("GET /v0/automation/history/{bead_id}", s.handleAutomationHistoryDetail)
 	s.mux.HandleFunc("GET /v0/automation/{name}", s.handleAutomationGet)
 	s.mux.HandleFunc("POST /v0/automation/{name}/enable", s.handleAutomationEnable)
 	s.mux.HandleFunc("POST /v0/automation/{name}/disable", s.handleAutomationDisable)
