@@ -1681,10 +1681,10 @@ gc sling [target] <bead-or-formula> [flags]
 
 Start the city under the machine-wide supervisor.
 
-Requires an existing city bootstrapped by "gc init". Fetches remote
+Requires an existing city bootstrapped by `gc init`. Fetches remote
 packs as needed, registers the city with the machine-wide supervisor,
 ensures the supervisor is running, and triggers immediate reconciliation.
-Use "gc supervisor run" for foreground operation.
+Use `gc supervisor run` for foreground operation.
 
 ```
 gc start [path] [flags]
@@ -1868,4 +1868,3 @@ When built with go install, VCS metadata is read from the binary.
 ```
 gc version
 ```
-

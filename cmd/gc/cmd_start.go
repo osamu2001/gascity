@@ -191,7 +191,7 @@ func newStartCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Start the city under the machine-wide supervisor",
 		Long: `Start the city under the machine-wide supervisor.
 
-Auto-initializes the city if no .gc/ directory exists. Fetches remote
+Requires an existing city bootstrapped by "gc init". Fetches remote
 packs as needed, registers the city with the machine-wide supervisor,
 ensures the supervisor is running, and triggers immediate reconciliation.
 Use "gc supervisor run" for foreground operation.`,
@@ -235,13 +235,7 @@ func doStart(args []string, controllerMode bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if _, err := findCity(dir); err != nil {
-		doInit(fsys.OSFS{}, dir, defaultWizardConfig(), stdout, stderr)
-		prefix := config.DeriveBeadsPrefix(filepath.Base(dir))
-		initDirIfReady(dir, dir, prefix) //nolint:errcheck // best-effort bootstrap before supervisor starts
-	}
-
-	cityPath, err := findCity(dir)
+	cityPath, err := requireBootstrappedCity(dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -268,11 +262,24 @@ func resolveStartDir(args []string) (string, error) {
 	}
 }
 
-// doStartStandalone boots the city. If a path is given, operates there;
-// otherwise uses cwd. If no city exists at the target, it auto-initializes
-// one first via doInit, then starts all configured agent sessions. When
-// controllerMode is true, enters a persistent reconciliation loop instead of
-// one-shot start.
+func requireBootstrappedCity(dir string) (string, error) {
+	cityPath, err := findCity(dir)
+	if err != nil {
+		absDir, absErr := filepath.Abs(dir)
+		if absErr == nil {
+			return "", fmt.Errorf("%w; run \"gc init %s\" first", err, absDir)
+		}
+		return "", fmt.Errorf("%w; run \"gc init\" first", err)
+	}
+	if !citylayout.HasLegacyRuntimeRoot(cityPath) {
+		return "", fmt.Errorf("city runtime not bootstrapped at %s; run \"gc init %s\" first", cityPath, cityPath)
+	}
+	return cityPath, nil
+}
+
+// doStartStandalone boots an existing city in the legacy per-city mode.
+// If a path is given, operates there; otherwise uses cwd. When controllerMode
+// is true, enters a persistent reconciliation loop instead of one-shot start.
 func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Writer) int {
 	// Strict mode is on by default; --no-strict disables it.
 	strictMode = !noStrictMode
@@ -283,19 +290,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 
-	if _, err := findCity(dir); err != nil {
-		// No city found — auto-init at dir (non-interactive).
-		// doInit is idempotent-safe: if another process initialized the city
-		// concurrently (TOCTOU), it returns non-zero but findCity below will
-		// succeed. Only fail if findCity still fails after the attempt.
-		doInit(fsys.OSFS{}, dir, defaultWizardConfig(), stdout, stderr)
-		dirName := filepath.Base(dir)
-		prefix := config.DeriveBeadsPrefix(dirName)
-		initDirIfReady(dir, dir, prefix) //nolint:errcheck // best-effort auto-init; gc start handles full lifecycle below
-	}
-
-	// Load config to find agents.
-	cityPath, err := findCity(dir)
+	cityPath, err := requireBootstrappedCity(dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
