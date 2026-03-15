@@ -618,6 +618,9 @@ func reconcileCities(
 		if mc.closer != nil {
 			mc.closer.Close() //nolint:errcheck
 		}
+		if err := shutdownBeadsProvider(nameDriftPaths[i]); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
+		}
 	}
 
 	// Start new cities (and name-drifted restarts). Build list under lock,

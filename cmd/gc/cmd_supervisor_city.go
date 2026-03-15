@@ -135,16 +135,16 @@ func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, comma
 	fmt.Fprintf(stdout, "Registered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
 
 	if ensureSupervisorRunningHook(stdout, stderr) != 0 {
-		rollbackRegisteredCity(reg, entry, stderr, commandName, "supervisor did not start")
+		rollbackRegisteredCity(reg, entry, stderr, commandName, "supervisor did not start", false)
 		return 1
 	}
 	if reloadSupervisorHook(stdout, stderr) != 0 {
-		rollbackRegisteredCity(reg, entry, stderr, commandName, "reconcile failed")
+		rollbackRegisteredCity(reg, entry, stderr, commandName, "reconcile failed", true)
 		return 1
 	}
 	if supervisorAliveHook() != 0 {
 		if err := waitForSupervisorCity(cityPath, true, supervisorCityReadyTimeout); err != nil {
-			rollbackRegisteredCity(reg, entry, stderr, commandName, err.Error())
+			rollbackRegisteredCity(reg, entry, stderr, commandName, err.Error(), true)
 			fmt.Fprintf(stderr, "%s: check 'gc supervisor logs' for details\n", commandName) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -152,12 +152,22 @@ func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, comma
 	return 0
 }
 
-func rollbackRegisteredCity(reg *supervisor.Registry, entry supervisor.CityEntry, stderr io.Writer, commandName, reason string) {
+func rollbackRegisteredCity(reg *supervisor.Registry, entry supervisor.CityEntry, stderr io.Writer, commandName, reason string, stopLaunchedCity bool) {
 	if err := reg.Unregister(entry.Path); err != nil {
 		fmt.Fprintf(stderr, "%s: %s; rollback failed for '%s': %v\n", commandName, reason, entry.Path, err) //nolint:errcheck // best-effort stderr
 		return
 	}
 	fmt.Fprintf(stderr, "%s: %s; registration rolled back for '%s'\n", commandName, reason, entry.EffectiveName()) //nolint:errcheck // best-effort stderr
+	if !stopLaunchedCity || supervisorAliveHook() == 0 {
+		return
+	}
+	if reloadSupervisorHook(io.Discard, stderr) != 0 {
+		fmt.Fprintf(stderr, "%s: registration rolled back for '%s', but stopping the launched city may require 'gc supervisor reload'\n", commandName, entry.EffectiveName()) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if err := waitForSupervisorCity(entry.Path, false, supervisorCityReadyTimeout); err != nil {
+		fmt.Fprintf(stderr, "%s: registration rolled back for '%s', but the launched city may still be stopping: %v\n", commandName, entry.EffectiveName(), err) //nolint:errcheck // best-effort stderr
+	}
 }
 
 func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Duration) error {

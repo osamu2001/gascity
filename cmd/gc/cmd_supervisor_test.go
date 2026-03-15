@@ -150,9 +150,14 @@ func TestControllerStatusForSupervisorManagedCity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	old := supervisorAliveHook
+	oldAlive := supervisorAliveHook
+	oldRunning := supervisorCityRunningHook
 	supervisorAliveHook = func() int { return 4242 }
-	defer func() { supervisorAliveHook = old }()
+	supervisorCityRunningHook = func(string) (bool, bool) { return true, true }
+	defer func() {
+		supervisorAliveHook = oldAlive
+		supervisorCityRunningHook = oldRunning
+	}()
 
 	ctrl := controllerStatusForCity(cityPath)
 	if !ctrl.Running || ctrl.PID != 4242 || ctrl.Mode != "supervisor" {

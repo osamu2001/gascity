@@ -8,10 +8,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -55,10 +59,14 @@ func TestRegisterCityWithSupervisorRollsBackWhenCityNeverBecomesReady(t *testing
 		t.Fatal(err)
 	}
 
+	reloads := 0
 	withSupervisorTestHooks(
 		t,
 		func(_, _ io.Writer) int { return 0 },
-		func(_, _ io.Writer) int { return 0 },
+		func(_, _ io.Writer) int {
+			reloads++
+			return 0
+		},
 		func() int { return 4242 },
 		func(string) (bool, bool) { return false, true },
 		20*time.Millisecond,
@@ -72,6 +80,9 @@ func TestRegisterCityWithSupervisorRollsBackWhenCityNeverBecomesReady(t *testing
 	}
 	if !strings.Contains(stderr.String(), "registration rolled back") {
 		t.Fatalf("stderr = %q, want rollback message", stderr.String())
+	}
+	if reloads != 2 {
+		t.Fatalf("reloadSupervisorHook called %d times, want 2 (start + rollback cleanup)", reloads)
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
@@ -346,6 +357,73 @@ func TestCmdStopSupervisorManagedCityStopsLegacyControllerAndBeads(t *testing.T)
 	ops := readOpLog(t, logFile)
 	if len(ops) != 2 {
 		t.Fatalf("expected bead provider stop+shutdown, got %v", ops)
+	}
+	if !strings.HasPrefix(ops[0], "stop") || !strings.HasPrefix(ops[1], "shutdown") {
+		t.Fatalf("unexpected bead provider ops: %v", ops)
+	}
+}
+
+func TestReconcileCitiesNameDriftStopsBeadsProvider(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	root, err := os.MkdirTemp("", "gc-drift-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) }) //nolint:errcheck
+
+	cityPath := filepath.Join(root, "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	logFile := filepath.Join(t.TempDir(), "ops.log")
+	script := writeSpyScript(t, logFile)
+	t.Setenv("GC_BEADS", "exec:"+script)
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "new-name"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultCity("old-name")
+	sp := runtime.NewFake()
+	var cityOut, cityErr bytes.Buffer
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "old-name",
+		Cfg:      &cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) map[string]TemplateParams {
+			return nil
+		},
+		Rec:    events.Discard,
+		Stdout: &cityOut,
+		Stderr: &cityErr,
+	})
+
+	done := make(chan struct{})
+	close(done)
+	cities := map[string]*managedCity{
+		cityPath: {
+			cr:      cr,
+			name:    "old-name",
+			started: true,
+			cancel:  func() {},
+			done:    done,
+		},
+	}
+	panicHistory := make(map[string]*panicRecord)
+	initFailures := make(map[string]*initFailRecord)
+	var mu sync.RWMutex
+	var stdout, stderr bytes.Buffer
+
+	reconcileCities(reg, cities, &mu, panicHistory, initFailures, supervisor.PublicationConfig{}, &stdout, &stderr)
+
+	ops := readOpLog(t, logFile)
+	if len(ops) != 2 {
+		t.Fatalf("expected bead provider stop+shutdown during name-drift restart, got %v", ops)
 	}
 	if !strings.HasPrefix(ops[0], "stop") || !strings.HasPrefix(ops[1], "shutdown") {
 		t.Fatalf("unexpected bead provider ops: %v", ops)
