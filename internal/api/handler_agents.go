@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -626,14 +627,41 @@ func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *confi
 }
 
 func poolSharesWorkDir(cityPath, cityName, target string, a config.Agent, rigs []config.Rig) bool {
-	if !a.IsPool() {
+	if !a.IsPool() || a.Pool == nil {
 		return false
 	}
-	if a.WorkDir == "" {
-		return workdirutil.ResolveWorkDirPath(cityPath, cityName, a.QualifiedName(), a, rigs) == target
-	}
-	if workdirutil.TemplateUsesAgentIdentity(a.WorkDir) {
+
+	if !a.Pool.IsUnlimited() {
+		for slot := 1; slot <= a.Pool.Max; slot++ {
+			if workdirutil.ResolveWorkDirPath(cityPath, cityName, poolQualifiedNameForSlot(a, slot), a, rigs) == target {
+				return true
+			}
+		}
 		return false
 	}
-	return workdirutil.ResolveWorkDirPath(cityPath, cityName, a.QualifiedName(), a, rigs) == target
+
+	for _, qualifiedName := range []string{
+		poolQualifiedNameForSlot(a, 1),
+		poolQualifiedNameForSlot(a, 2),
+	} {
+		if workdirutil.ResolveWorkDirPath(cityPath, cityName, qualifiedName, a, rigs) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func poolQualifiedNameForSlot(a config.Agent, slot int) string {
+	name := poolInstanceNameForAPI(a.Name, slot, *a.Pool)
+	if a.Dir == "" {
+		return name
+	}
+	return a.Dir + "/" + name
+}
+
+func poolInstanceNameForAPI(base string, slot int, pool config.PoolConfig) string {
+	if slot >= 1 && slot <= len(pool.NamepoolNames) {
+		return pool.NamepoolNames[slot-1]
+	}
+	return fmt.Sprintf("%s-%d", base, slot)
 }

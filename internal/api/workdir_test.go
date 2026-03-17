@@ -40,6 +40,27 @@ func TestCanAttributeSessionRejectsSharedRigRootWhenClaudePoolExists(t *testing.
 	}
 }
 
+func TestCanAttributeSessionRejectsSharedPoolTemplateEvenWhenItMentionsAgentIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "claude"},
+		Rigs:      []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		Agents: []config.Agent{
+			{Name: "refinery", Dir: "demo", WorkDir: ".gc/shared"},
+			{
+				Name:    "polecat",
+				Dir:     "demo",
+				WorkDir: `{{if .AgentBase}}.gc/shared{{end}}`,
+				Pool:    &config.PoolConfig{Min: 0, Max: 2},
+			},
+		},
+	}
+
+	if canAttributeSession(cfg.Agents[0], "demo/refinery", cfg, cityPath) {
+		t.Fatal("canAttributeSession() = true, want false when pooled template still resolves to a shared path")
+	}
+}
+
 func TestResolveSessionTemplateUsesConfiguredWorkDir(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Agents[0].WorkDir = ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
@@ -68,6 +89,22 @@ func TestResolveSessionTemplateUsesCityNameFallbackForWorkDirTemplates(t *testin
 	}
 
 	want := filepath.Join(state.cityPath, ".gc", "agents", filepath.Base(state.cityPath), "worker")
+	if workDir != want {
+		t.Fatalf("resolveSessionTemplate() workDir = %q, want %q", workDir, want)
+	}
+}
+
+func TestResolveSessionTemplateUsesQualifiedNameForWorkDirTemplates(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents[0].WorkDir = ".gc/worktrees/{{.Agent}}"
+	srv := New(state)
+
+	_, workDir, _, _, err := srv.resolveSessionTemplate("worker")
+	if err != nil {
+		t.Fatalf("resolveSessionTemplate: %v", err)
+	}
+
+	want := filepath.Join(state.cityPath, ".gc", "worktrees", "myrig", "worker")
 	if workDir != want {
 		t.Fatalf("resolveSessionTemplate() workDir = %q, want %q", workDir, want)
 	}

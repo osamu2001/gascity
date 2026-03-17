@@ -115,7 +115,7 @@ func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvid
 	workDir := workdirutil.ResolveWorkDirPath(
 		s.state.CityPath(),
 		workdirutil.CityName(s.state.CityPath(), cfg),
-		template,
+		agentCfg.QualifiedName(),
 		agentCfg,
 		cfg.Rigs,
 	)

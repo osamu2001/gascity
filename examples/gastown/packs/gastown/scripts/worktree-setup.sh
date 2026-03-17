@@ -18,6 +18,8 @@ ARG2="${2:?missing target-dir}"
 ARG3="${3:?missing agent-name}"
 
 is_path_like() {
+    # Legacy mode passes the city path as arg 3. Agent names are validated
+    # elsewhere and are not expected to look like filesystem paths.
     case "$1" in
         */*|.*|*:*|*\\*) return 0 ;;
         *) return 1 ;;
@@ -45,19 +47,6 @@ fi
 mkdir -p "$(dirname "$WT")"
 
 STAGE=""
-if [ -d "$WT" ] && [ "$(find "$WT" -mindepth 1 -maxdepth 1 | head -n 1)" ]; then
-    STAGE=$(mktemp -d "$(dirname "$WT")/.gascity-worktree-stage.XXXXXX")
-    find "$WT" -mindepth 1 -maxdepth 1 -exec mv {} "$STAGE"/ \;
-    trap 'restore_stage' EXIT HUP INT TERM
-fi
-
-restore_stage() {
-    [ -n "$STAGE" ] || return 0
-    mkdir -p "$WT"
-    find "$STAGE" -mindepth 1 -maxdepth 1 -exec mv {} "$WT"/ \;
-    rmdir "$STAGE" 2>/dev/null || true
-    STAGE=""
-}
 
 merge_stage_entry() {
     SRC="$1"
@@ -79,8 +68,26 @@ merge_stage_entry() {
     mv "$SRC" "$DST"
 }
 
+restore_stage() {
+    [ -n "$STAGE" ] || return 0
+    mkdir -p "$WT"
+    for ENTRY in "$STAGE"/.[!.]* "$STAGE"/..?* "$STAGE"/*; do
+        [ -e "$ENTRY" ] || continue
+        merge_stage_entry "$ENTRY" "$WT/$(basename "$ENTRY")"
+    done
+    rmdir "$STAGE" 2>/dev/null || true
+    STAGE=""
+}
+
+if [ -d "$WT" ] && [ "$(find "$WT" -mindepth 1 -maxdepth 1 | head -n 1)" ]; then
+    STAGE=$(mktemp -d "$(dirname "$WT")/.gascity-worktree-stage.XXXXXX")
+    find "$WT" -mindepth 1 -maxdepth 1 -exec mv {} "$STAGE"/ \;
+    trap 'restore_stage' EXIT HUP INT TERM
+fi
+
 rmdir "$WT" 2>/dev/null || true
 if ! GIT_LFS_SKIP_SMUDGE=1 git -C "$RIG_ROOT" worktree add "$WT" -b "gc-$AGENT"; then
+    echo "worktree-setup: failed to create worktree at $WT from $RIG_ROOT (branch gc-$AGENT)" >&2
     restore_stage
     exit 1
 fi

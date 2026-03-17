@@ -116,9 +116,3 @@ func ResolveWorkDirPath(cityPath, cityName, qualifiedName string, a config.Agent
 	ctx := PathContextForQualifiedName(cityPath, cityName, qualifiedName, a, rigs)
 	return ResolveDirPath(cityPath, ExpandTemplate(a.WorkDir, ctx))
 }
-
-// TemplateUsesAgentIdentity reports whether a work_dir template varies by
-// agent identity or pool slot.
-func TemplateUsesAgentIdentity(spec string) bool {
-	return strings.Contains(spec, ".AgentBase") || strings.Contains(spec, ".Agent")
-}
