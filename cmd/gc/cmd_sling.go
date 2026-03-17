@@ -361,7 +361,8 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 	// If --formula, instantiate wisp and use the root bead ID.
 	if opts.IsFormula {
 		method = "formula"
-		rootID, err := deps.Store.MolCook(opts.BeadOrFormula, opts.Title, opts.Vars)
+		formulaVars := buildSlingFormulaVars(opts.BeadOrFormula, "", opts.Vars, a, deps)
+		rootID, err := deps.Store.MolCook(opts.BeadOrFormula, opts.Title, formulaVars)
 		if err != nil {
 			fmt.Fprintf(deps.Stderr, "gc sling: instantiating formula %q: %v\n", opts.BeadOrFormula, err) //nolint:errcheck // best-effort
 			return 1
@@ -376,7 +377,8 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 			fmt.Fprintf(deps.Stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort
 			return 1
 		}
-		wispRootID, err := deps.Store.MolCookOn(opts.OnFormula, beadID, opts.Title, opts.Vars)
+		formulaVars := buildSlingFormulaVars(opts.OnFormula, beadID, opts.Vars, a, deps)
+		wispRootID, err := deps.Store.MolCookOn(opts.OnFormula, beadID, opts.Title, formulaVars)
 		if err != nil {
 			fmt.Fprintf(deps.Stderr, "gc sling: instantiating formula %q on %s: %v\n", opts.OnFormula, beadID, err) //nolint:errcheck // best-effort
 			return 1
@@ -398,9 +400,7 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 			fmt.Fprintf(deps.Stderr, "gc sling: %v\n", err) //nolint:errcheck // best-effort
 			return 1
 		}
-		// Auto-inject issue=beadID so mol-do-work (and similar formulas)
-		// can reference the work bead without the caller passing --var.
-		defaultVars := append([]string{"issue=" + beadID}, opts.Vars...)
+		defaultVars := buildSlingFormulaVars(a.DefaultSlingFormula, beadID, opts.Vars, a, deps)
 		wispRootID, err := deps.Store.MolCookOn(a.DefaultSlingFormula, beadID, opts.Title, defaultVars)
 		if err != nil {
 			fmt.Fprintf(deps.Stderr, "gc sling: instantiating default formula %q on %s: %v\n", //nolint:errcheck // best-effort
@@ -592,7 +592,7 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 
 		// Attach wisp if --on.
 		if opts.OnFormula != "" {
-			childVars := append([]string{"issue=" + child.ID}, opts.Vars...)
+			childVars := buildSlingFormulaVars(opts.OnFormula, child.ID, opts.Vars, a, deps)
 			wispRootID, err := deps.Store.MolCookOn(opts.OnFormula, child.ID, opts.Title, childVars)
 			if err != nil {
 				fmt.Fprintf(deps.Stderr, "  Failed %s: instantiating formula %q: %v\n", child.ID, opts.OnFormula, err) //nolint:errcheck // best-effort
@@ -604,7 +604,7 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 			fmt.Fprintf(deps.Stdout, "  Attached wisp %s → %s\n", wispRootID, child.ID) //nolint:errcheck // best-effort
 		} else if !opts.NoFormula && a.DefaultSlingFormula != "" {
 			// Apply default formula per-child.
-			childVars := append([]string{"issue=" + child.ID}, opts.Vars...)
+			childVars := buildSlingFormulaVars(a.DefaultSlingFormula, child.ID, opts.Vars, a, deps)
 			wispRootID, err := deps.Store.MolCookOn(a.DefaultSlingFormula, child.ID, opts.Title, childVars)
 			if err != nil {
 				fmt.Fprintf(deps.Stderr, "  Failed %s: instantiating default formula %q: %v\n", child.ID, a.DefaultSlingFormula, err) //nolint:errcheck // best-effort
@@ -652,6 +652,79 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 		return 1
 	}
 	return 0
+}
+
+// buildSlingFormulaVars merges caller-provided vars with the runtime context
+// needed by common work formulas. Explicit --var entries always win.
+func buildSlingFormulaVars(formula, beadID string, userVars []string, a config.Agent, deps slingDeps) []string {
+	vars := append([]string(nil), userVars...)
+	explicit := make(map[string]bool, len(userVars))
+	for _, v := range userVars {
+		key, _, ok := strings.Cut(v, "=")
+		if ok && key != "" {
+			explicit[key] = true
+		}
+	}
+	addVar := func(key, value string) {
+		if value == "" || explicit[key] {
+			return
+		}
+		vars = append(vars, key+"="+value)
+		explicit[key] = true
+	}
+
+	if beadID != "" {
+		// Attached work formulas conventionally expect issue=<bead-id>.
+		addVar("issue", beadID)
+	}
+
+	autoBranch := slingFormulaTargetBranch(beadID, deps, a)
+	if slingFormulaUsesBaseBranch(formula) {
+		addVar("base_branch", autoBranch)
+	}
+	if slingFormulaUsesTargetBranch(formula) {
+		addVar("target_branch", autoBranch)
+	}
+
+	return vars
+}
+
+func slingFormulaTargetBranch(beadID string, deps slingDeps, a config.Agent) string {
+	if target := beadMetadataTarget(deps.Store, beadID); target != "" {
+		return target
+	}
+	return defaultBranchFor(slingFormulaRepoDir(beadID, deps, a))
+}
+
+func beadMetadataTarget(store beads.Store, beadID string) string {
+	if store == nil || beadID == "" {
+		return ""
+	}
+	b, err := store.Get(beadID)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(b.Metadata["target"])
+}
+
+func slingFormulaRepoDir(beadID string, deps slingDeps, a config.Agent) string {
+	if deps.Cfg != nil {
+		if dir := rigDirForBead(deps.Cfg, beadID); dir != "" {
+			return dir
+		}
+		if dir := rigDirForAgent(deps.Cfg, a); dir != "" {
+			return dir
+		}
+	}
+	return deps.CityPath
+}
+
+func slingFormulaUsesBaseBranch(formula string) bool {
+	return strings.HasPrefix(formula, "mol-polecat-")
+}
+
+func slingFormulaUsesTargetBranch(formula string) bool {
+	return formula == "mol-refinery-patrol"
 }
 
 // resolveSlingEnv returns extra env vars for the sling command.

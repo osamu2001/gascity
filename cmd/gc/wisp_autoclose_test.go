@@ -10,7 +10,7 @@ import (
 
 func TestWispAutocloseClosesOpenMolecule(t *testing.T) {
 	store := beads.NewMemStore()
-	_, _ = store.Create(beads.Bead{Title: "work item"})                              // gc-1
+	_, _ = store.Create(beads.Bead{Title: "work item"})                                // gc-1
 	_, _ = store.Create(beads.Bead{Title: "wisp", Type: "molecule", ParentID: "gc-1"}) // gc-2
 	_ = store.Close("gc-1")
 
@@ -32,7 +32,7 @@ func TestWispAutocloseClosesOpenMolecule(t *testing.T) {
 
 func TestWispAutocloseSkipsAlreadyClosed(t *testing.T) {
 	store := beads.NewMemStore()
-	_, _ = store.Create(beads.Bead{Title: "work item"})                              // gc-1
+	_, _ = store.Create(beads.Bead{Title: "work item"})                                // gc-1
 	_, _ = store.Create(beads.Bead{Title: "wisp", Type: "molecule", ParentID: "gc-1"}) // gc-2
 	_ = store.Close("gc-2")
 	_ = store.Close("gc-1")
@@ -47,7 +47,7 @@ func TestWispAutocloseSkipsAlreadyClosed(t *testing.T) {
 
 func TestWispAutocloseSkipsNonMoleculeChildren(t *testing.T) {
 	store := beads.NewMemStore()
-	_, _ = store.Create(beads.Bead{Title: "convoy", Type: "convoy"})         // gc-1
+	_, _ = store.Create(beads.Bead{Title: "convoy", Type: "convoy"})               // gc-1
 	_, _ = store.Create(beads.Bead{Title: "task", Type: "task", ParentID: "gc-1"}) // gc-2
 	_ = store.Close("gc-1")
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,48 @@ func (s *selectiveErrStore) MolCookOn(formula, beadID, title string, vars []stri
 	if err, ok := s.failOnBeadIDs[beadID]; ok {
 		return "", err
 	}
+	return s.Store.MolCookOn(formula, beadID, title, vars)
+}
+
+type cookCall struct {
+	formula string
+	beadID  string
+	title   string
+	vars    []string
+}
+
+// recordingStore wraps a store and records MolCook/MolCookOn calls for
+// assertions about formula var injection.
+type recordingStore struct {
+	beads.Store
+	beadsByID map[string]beads.Bead
+	cookCalls []cookCall
+	onCalls   []cookCall
+}
+
+func (s *recordingStore) Get(id string) (beads.Bead, error) {
+	if b, ok := s.beadsByID[id]; ok {
+		return b, nil
+	}
+	return s.Store.Get(id)
+}
+
+func (s *recordingStore) MolCook(formula, title string, vars []string) (string, error) {
+	s.cookCalls = append(s.cookCalls, cookCall{
+		formula: formula,
+		title:   title,
+		vars:    append([]string(nil), vars...),
+	})
+	return s.Store.MolCook(formula, title, vars)
+}
+
+func (s *recordingStore) MolCookOn(formula, beadID, title string, vars []string) (string, error) {
+	s.onCalls = append(s.onCalls, cookCall{
+		formula: formula,
+		beadID:  beadID,
+		title:   title,
+		vars:    append([]string(nil), vars...),
+	})
 	return s.Store.MolCookOn(formula, beadID, title, vars)
 }
 
@@ -91,6 +134,7 @@ func testDeps(cfg *config.City, sp runtime.Provider, runner SlingRunner) (slingD
 	var stdout, stderr bytes.Buffer
 	return slingDeps{
 		CityName: "test-city",
+		CityPath: "/city",
 		Cfg:      cfg,
 		SP:       sp,
 		Runner:   runner,
@@ -98,6 +142,32 @@ func testDeps(cfg *config.City, sp runtime.Provider, runner SlingRunner) (slingD
 		Stdout:   &stdout,
 		Stderr:   &stderr,
 	}, &stdout, &stderr
+}
+
+func gitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func newRepoWithOriginHead(t *testing.T, branch string) string {
+	t.Helper()
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/"+branch)
+	return dir
+}
+
+func findVarValue(vars []string, key string) (string, bool) {
+	for _, v := range vars {
+		k, value, ok := strings.Cut(v, "=")
+		if ok && k == key {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 func TestBuildSlingCommand(t *testing.T) {
@@ -3059,6 +3129,134 @@ func TestDefaultFormulaDryRun(t *testing.T) {
 	// No runner calls in dry-run.
 	if len(runner.calls) != 0 {
 		t.Errorf("dry-run should not execute commands; got %v", runner.calls)
+	}
+}
+
+func TestBuildSlingFormulaVarsUsesBeadTargetForPolecatFormula(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	store := &recordingStore{
+		Store: beads.NewMemStore(),
+		beadsByID: map[string]beads.Bead{
+			"HW-42": {
+				ID:       "HW-42",
+				Metadata: map[string]string{"target": "integration/epic-7"},
+			},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{Name: "polecat", Dir: "hw"}, deps)
+
+	if got, ok := findVarValue(vars, "issue"); !ok || got != "HW-42" {
+		t.Fatalf("issue var = %q, %v; want HW-42, true", got, ok)
+	}
+	if got, ok := findVarValue(vars, "base_branch"); !ok || got != "integration/epic-7" {
+		t.Fatalf("base_branch var = %q, %v; want integration/epic-7, true", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsUsesRigDefaultBranchWhenTargetMissing(t *testing.T) {
+	repoDir := newRepoWithOriginHead(t, "develop")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "hw", Path: repoDir},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = &recordingStore{Store: beads.NewMemStore()}
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42", nil, config.Agent{Name: "polecat", Dir: "hw"}, deps)
+
+	if got, ok := findVarValue(vars, "base_branch"); !ok || got != "develop" {
+		t.Fatalf("base_branch var = %q, %v; want develop, true", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsPreservesExplicitValues(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	store := &recordingStore{
+		Store: beads.NewMemStore(),
+		beadsByID: map[string]beads.Bead{
+			"HW-42": {
+				ID:       "HW-42",
+				Metadata: map[string]string{"target": "integration/epic-7"},
+			},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Store = store
+
+	vars := buildSlingFormulaVars("mol-polecat-work", "HW-42",
+		[]string{"issue=custom-1", "base_branch=release/1.2"}, config.Agent{Name: "polecat", Dir: "hw"}, deps)
+
+	if got, ok := findVarValue(vars, "issue"); !ok || got != "custom-1" {
+		t.Fatalf("issue var = %q, %v; want custom-1, true", got, ok)
+	}
+	if got, ok := findVarValue(vars, "base_branch"); !ok || got != "release/1.2" {
+		t.Fatalf("base_branch var = %q, %v; want release/1.2, true", got, ok)
+	}
+}
+
+func TestBuildSlingFormulaVarsSeedsRefineryTargetBranch(t *testing.T) {
+	repoDir := newRepoWithOriginHead(t, "trunk")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "hw", Path: repoDir},
+		},
+	}
+	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+
+	vars := buildSlingFormulaVars("mol-refinery-patrol", "", nil, config.Agent{Name: "refinery", Dir: "hw"}, deps)
+
+	if got, ok := findVarValue(vars, "target_branch"); !ok || got != "trunk" {
+		t.Fatalf("target_branch var = %q, %v; want trunk, true", got, ok)
+	}
+}
+
+func TestDoSlingExplicitOnInjectsIssueAndBaseBranch(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "hw", Path: newRepoWithOriginHead(t, "develop")},
+		},
+	}
+	a := config.Agent{
+		Name: "polecat",
+		Dir:  "hw",
+		Pool: &config.PoolConfig{Min: 0, Max: 5},
+	}
+
+	deps, _, stderr := testDeps(cfg, sp, runner.run)
+	store := &recordingStore{
+		Store: beads.NewMemStore(),
+		beadsByID: map[string]beads.Bead{
+			"HW-42": {
+				ID:       "HW-42",
+				Metadata: map[string]string{"target": "integration/epic-7"},
+			},
+		},
+	}
+	deps.Store = store
+	opts := testOpts(a, "HW-42")
+	opts.OnFormula = "mol-polecat-work"
+
+	code := doSling(opts, deps, nil)
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if len(store.onCalls) != 1 {
+		t.Fatalf("got %d MolCookOn calls, want 1", len(store.onCalls))
+	}
+	if got, ok := findVarValue(store.onCalls[0].vars, "issue"); !ok || got != "HW-42" {
+		t.Fatalf("issue var = %q, %v; want HW-42, true", got, ok)
+	}
+	if got, ok := findVarValue(store.onCalls[0].vars, "base_branch"); !ok || got != "integration/epic-7" {
+		t.Fatalf("base_branch var = %q, %v; want integration/epic-7, true", got, ok)
 	}
 }
 

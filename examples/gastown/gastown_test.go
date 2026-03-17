@@ -68,6 +68,18 @@ func TestPromptFilesExist(t *testing.T) {
 	}
 }
 
+func TestRefineryPromptSeedsTargetBranchVar(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "prompts", "refinery.md.tmpl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	if !strings.Contains(string(data), "--var target_branch={{ .DefaultBranch }}") {
+		t.Errorf("refinery prompt missing target_branch var injection:\n%s", data)
+	}
+}
+
 func TestAllFormulasExist(t *testing.T) {
 	dir := exampleDir()
 	formulaDir := filepath.Join(dir, "packs", "gastown", "formulas")

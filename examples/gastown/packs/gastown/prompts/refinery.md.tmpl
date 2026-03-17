@@ -52,7 +52,7 @@ Your formula: `mol-refinery-patrol`
 bd list --assignee=$GC_AGENT --status=in_progress
 
 # If none found, pour one (root-only — no child step beads) and assign it
-WISP=$(bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')
+WISP=$(bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --json | jq -r '.new_epic_id')
 bd update "$WISP" --assignee=$GC_AGENT
 ```
 
