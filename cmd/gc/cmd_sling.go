@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
 )
@@ -748,7 +749,7 @@ func buildSlingCommand(template, beadID string) string {
 // shellQuote quotes a string for safe use in shell commands.
 // Uses single quotes with embedded single-quote escaping.
 func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	return shellquote.Quote(s)
 }
 
 // formatBeadLabel formats a bead ID with optional title for display.

@@ -1,6 +1,6 @@
 package config
 
-import "strings"
+import "github.com/gastownhall/gascity/internal/shellquote"
 
 // ProviderOption declares a single configurable option for a provider.
 // Options are rendered as UI controls in Mission Control's session creation form.
@@ -120,7 +120,7 @@ func (rp *ResolvedProvider) CommandString() string {
 	if len(rp.Args) == 0 {
 		return rp.Command
 	}
-	return rp.Command + " " + strings.Join(rp.Args, " ")
+	return rp.Command + " " + shellquote.Join(rp.Args)
 }
 
 // pathCheckBinary returns the binary name to use for PATH detection.

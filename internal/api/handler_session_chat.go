@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 var errSessionTemplateNotFound = errors.New("session template not found")
@@ -272,7 +273,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// Merge extra args from options into the command string.
 	command := resolved.CommandString()
 	if len(extraArgs) > 0 {
-		command = command + " " + shellJoinArgs(extraArgs)
+		command = command + " " + shellquote.Join(extraArgs)
 	}
 
 	mgr := s.sessionManager(store)
@@ -385,7 +386,7 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	command := resolved.CommandString()
 	if len(extraArgs) > 0 {
-		command = command + " " + shellJoinArgs(extraArgs)
+		command = command + " " + shellquote.Join(extraArgs)
 	}
 
 	mgr := s.sessionManager(store)
@@ -1185,21 +1186,4 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 			writeSSEComment(w)
 		}
 	}
-}
-
-// shellJoinArgs quotes arguments that contain shell metacharacters.
-// This prevents injection when extra args are appended to a command string.
-func shellJoinArgs(args []string) string {
-	var parts []string
-	for _, a := range args {
-		if a == "" {
-			parts = append(parts, "''")
-			continue
-		}
-		if strings.ContainsAny(a, " \t\n\"'\\|&;$!(){}[]<>?*~#`") {
-			a = "'" + strings.ReplaceAll(a, "'", "'\"'\"'") + "'"
-		}
-		parts = append(parts, a)
-	}
-	return strings.Join(parts, " ")
 }

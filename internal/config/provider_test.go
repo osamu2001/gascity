@@ -152,3 +152,14 @@ func TestCommandStringMultipleArgs(t *testing.T) {
 		t.Errorf("CommandString() = %q, want %q", got, want)
 	}
 }
+
+func TestCommandStringQuotesShellMetacharacters(t *testing.T) {
+	rp := &ResolvedProvider{
+		Command: "codex",
+		Args:    []string{"--model", "sonnet[1m]", "--message", "it's ready"},
+	}
+	want := "codex --model 'sonnet[1m]' --message 'it'\\''s ready'"
+	if got := rp.CommandString(); got != want {
+		t.Errorf("CommandString() = %q, want %q", got, want)
+	}
+}

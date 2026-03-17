@@ -183,6 +183,25 @@ func TestResolveProviderUserDefinedProvider(t *testing.T) {
 	}
 }
 
+func TestResolveProviderQuotesMetacharacterArgs(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "codex"}
+	cityProviders := map[string]ProviderSpec{
+		"codex": {
+			Command:    "codex",
+			Args:       []string{"--model", "sonnet[1m]", "--message", "it's ready"},
+			PromptMode: "none",
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	want := "codex --model 'sonnet[1m]' --message 'it'\\''s ready'"
+	if got := rp.CommandString(); got != want {
+		t.Errorf("CommandString() = %q, want %q", got, want)
+	}
+}
+
 func TestResolveProviderUnknown(t *testing.T) {
 	agent := &Agent{Name: "mayor", Provider: "vim"}
 	_, err := ResolveProvider(agent, nil, nil, lookPathAll)
