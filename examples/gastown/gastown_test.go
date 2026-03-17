@@ -340,6 +340,30 @@ func TestWorktreeSetupReusesExistingAgentBranch(t *testing.T) {
 	}
 }
 
+func TestWorktreeSetupSyncSkipsMissingOrigin(t *testing.T) {
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	city := filepath.Join(tmp, "city")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+
+	runCmd(t, tmp, "git", "init", repo)
+	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
+	runCmd(t, repo, "git", "config", "user.name", "Gastown Test")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("writing repo README: %v", err)
+	}
+	runCmd(t, repo, "git", "add", ".")
+	runCmd(t, repo, "git", "commit", "-m", "init")
+
+	worktree := filepath.Join(city, ".gc", "worktrees", filepath.Base(repo), "polecat-a")
+	runCmd(t, tmp, "sh", script, repo, worktree, "polecat-a", "--sync")
+	runCmd(t, tmp, "sh", script, repo, worktree, "polecat-a", "--sync")
+
+	if got := runCmd(t, tmp, "git", "-C", worktree, "rev-parse", "--is-inside-work-tree"); got != "true" {
+		t.Fatalf("worktree sync did not preserve git worktree, got %q", got)
+	}
+}
+
 func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T) {
 	dir := exampleDir()
 

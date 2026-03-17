@@ -38,9 +38,18 @@ else
     SYNC="${4:-}"
 fi
 
+sync_worktree() {
+    [ "$SYNC" = "--sync" ] || return 0
+    if ! git -C "$WT" remote get-url origin >/dev/null 2>&1; then
+        return 0
+    fi
+    git -C "$WT" fetch origin 2>/dev/null || true
+    git -C "$WT" pull --rebase 2>/dev/null || true
+}
+
 # Idempotent: skip if worktree already exists.
 if [ -d "$WT/.git" ] || [ -f "$WT/.git" ]; then
-    [ "$SYNC" = "--sync" ] && { git -C "$WT" fetch origin 2>/dev/null; git -C "$WT" pull --rebase 2>/dev/null || true; }
+    sync_worktree
     exit 0
 fi
 
@@ -158,6 +167,6 @@ append_exclude ".github/copilot-instructions.md"
 append_exclude "state.json"
 
 # Optional sync.
-[ "$SYNC" = "--sync" ] && { git -C "$WT" fetch origin 2>/dev/null; git -C "$WT" pull --rebase 2>/dev/null || true; }
+sync_worktree
 
 exit 0
