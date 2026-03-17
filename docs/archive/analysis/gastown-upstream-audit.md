@@ -1236,19 +1236,19 @@ the Delta 4 landing work; already-landed Delta 4 parity items are not repeated.
 
 ## 39. SDK Gaps (Delta 5)
 
-- [~] **1d4ba3f8 + b91fdace + f3183e6a** — Gemini hook compatibility and stale-template auto-upgrade.
-  Upstream replaced Gemini's `export PATH=... && gt ...` hook commands with an install-time absolute binary path and taught the hook installer to overwrite known-stale templates. Gas City's [internal/hooks/config/gemini.json](../../../internal/hooks/config/gemini.json) still uses the PATH-export pattern, and [internal/hooks/hooks.go](../../../internal/hooks/hooks.go) still skips existing files unconditionally. This means broken or stale Gemini hook installs can persist indefinitely.
+- [x] **1d4ba3f8 + b91fdace + f3183e6a** — Gemini hook compatibility and stale-template auto-upgrade.
+  Landed in Gas City via [0b7e7ec2](../../../internal/hooks/hooks.go): Gemini hooks now render an install-time absolute `gc` path, and the installer upgrades known-stale generated Gemini settings instead of preserving broken `export PATH=... && gc ...` templates indefinitely.
 
-- [~] **305f9ee0** — Codex workspace trust dialog handling on startup.
-  Upstream expanded startup dialog detection to match Codex's "Do you trust the contents of this directory?" prompt. Gas City's [internal/runtime/dialog.go](../../../internal/runtime/dialog.go) still only recognizes Claude's trust dialog and bypass-permissions warning, so first-run Codex sessions can block at startup.
+- [x] **305f9ee0** — Codex workspace trust dialog handling on startup.
+  Landed in Gas City via [2fcb0952](../../../internal/runtime/dialog.go): startup dialog acceptance now recognizes Codex's "Do you trust the contents of this directory?" prompt alongside the existing Claude trust/bypass dialogs, so first-run Codex sessions no longer wedge at trust confirmation.
 
-- [~] **894049af + 829c1510** — Shell-quote provider args when building runtime commands.
-  The role-specific `role_agents` half of the upstream fix does not map cleanly to Gas City, but the quoting half does. Gas City's [internal/config/provider.go](../../../internal/config/provider.go) still builds `CommandString()` by raw string-joining provider args, and session creation paths persist and execute that raw command string. Custom providers or future model flags with shell metacharacters can therefore be glob-expanded or misparsed by tmux shell startup.
+- [x] **894049af + 829c1510** — Shell-quote provider args when building runtime commands.
+  Landed in Gas City via [bdbbf43c](../../../internal/config/provider.go): provider args now use shared shell-quoting before command-string assembly, and the session/dashboard parsing path was updated to round-trip those quoted commands correctly instead of misparsing metacharacters or spaced args.
 
 ## 40. Gastown Example Gaps (Delta 5)
 
-- [~] **aecdc21c + e6516e5c** — Keep worktree ignores local and cover modern runtime files.
-  Upstream stopped mutating tracked `.gitignore` inside polecat worktrees and moved runtime ignore patterns into worktree-local git excludes, explicitly covering `.claude/` and `state.json`. Gas City's [examples/gastown/packs/gastown/scripts/worktree-setup.sh](../../../examples/gastown/packs/gastown/scripts/worktree-setup.sh) still appends tracked `.gitignore` entries and still misses several modern provider/runtime paths. This is now more than the older "ignore state.json" cleanup item; it can dirty user repos directly.
+- [x] **aecdc21c + e6516e5c** — Keep worktree ignores local and cover modern runtime files.
+  Landed in Gas City via [f9e7205f](../../../examples/gastown/packs/gastown/scripts/worktree-setup.sh): polecat worktree bootstrap now writes runtime ignore patterns to the git exclude file resolved by `git rev-parse --git-path info/exclude` instead of mutating tracked `.gitignore`, and the local ignore block now covers modern runtime paths including `.claude/`, `.codex/`, `.gemini/`, `.opencode/`, `.runtime/`, `.logs/`, and `state.json`.
 
 - [~] **1916b730** — Polecats should consult repo `CLAUDE.md` / `AGENTS.md` when gate vars are unset.
   Upstream stopped treating empty `setup_command` / `typecheck_command` / `lint_command` / `build_command` / `test_command` vars as a silent skip and explicitly told polecats to read project `CLAUDE.md` / `AGENTS.md` for the real Definition of Done. Gas City's [cmd/gc/formulas/mol-polecat-base.formula.toml](../../../cmd/gc/formulas/mol-polecat-base.formula.toml) still tells polecats to skip empty commands silently, which can bypass project-specific gates in Gastown rigs that rely on repo instructions instead of pack config.
@@ -1285,13 +1285,13 @@ the Delta 4 landing work; already-landed Delta 4 parity items are not repeated.
 
 | # | Item | Section | Status |
 |---|------|---------|--------|
-| 1 | Gemini absolute-path hooks + stale hook auto-upgrade | S39 | [~] Needed |
-| 2 | Codex trust-dialog startup handling | S39 | [~] Needed |
-| 3 | Shell-quote provider args in runtime commands | S39 | [~] Needed |
+| 1 | Gemini absolute-path hooks + stale hook auto-upgrade | S39 | [x] Done |
+| 2 | Codex trust-dialog startup handling | S39 | [x] Done |
+| 3 | Shell-quote provider args in runtime commands | S39 | [x] Done |
 
 **Gastown example items to take forward:**
 
 | # | Item | Section | Status |
 |---|------|---------|--------|
-| 1 | Move worktree runtime ignores to local excludes and expand coverage | S40 | [~] Needed |
+| 1 | Move worktree runtime ignores to local excludes and expand coverage | S40 | [x] Done |
 | 2 | Read repo `CLAUDE.md` / `AGENTS.md` when pack gate vars are unset | S40 | [~] Needed |
