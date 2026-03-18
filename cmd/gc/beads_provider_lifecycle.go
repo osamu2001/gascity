@@ -469,6 +469,10 @@ func runProviderOp(script, cityPath string, args ...string) error {
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
 			return nil // Not needed
 		}
+		// Detect missing script or missing dolt binary.
+		if errors.Is(err, exec.ErrNotFound) {
+			return fmt.Errorf("exec beads %s: provider script not found (%s); run \"gc doctor\" for diagnostics", args[0], script)
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()

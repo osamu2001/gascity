@@ -21,18 +21,15 @@ func TestMaterializeEmpty(t *testing.T) {
 	if dir != "" {
 		t.Errorf("expected empty dir, got %q", dir)
 	}
-	// .gc/system/formulas/ should not exist.
-	sysDir := filepath.Join(cityPath, ".gc", "system", "formulas")
-	if _, err := os.Stat(sysDir); !os.IsNotExist(err) {
-		t.Errorf("system formulas dir should not exist for empty FS")
+	// formulas/ should not exist.
+	formulasDir := filepath.Join(cityPath, "formulas")
+	if _, err := os.Stat(formulasDir); !os.IsNotExist(err) {
+		t.Errorf("formulas dir should not exist for empty FS")
 	}
 }
 
 func TestMaterializeWritesFiles(t *testing.T) {
 	cityPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	fs := fstest.MapFS{
 		"sysformulas/hello.formula.toml": &fstest.MapFile{Data: []byte("[formula]\nname = \"hello\"\n")},
@@ -42,7 +39,7 @@ func TestMaterializeWritesFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	expected := filepath.Join(cityPath, ".gc", "system", "formulas")
+	expected := filepath.Join(cityPath, "formulas")
 	if dir != expected {
 		t.Errorf("dir = %q, want %q", dir, expected)
 	}
@@ -58,11 +55,11 @@ func TestMaterializeWritesFiles(t *testing.T) {
 
 func TestMaterializeOverwrites(t *testing.T) {
 	cityPath := t.TempDir()
-	sysDir := filepath.Join(cityPath, ".gc", "system", "formulas")
-	if err := os.MkdirAll(sysDir, 0o755); err != nil {
+	formulasDir := filepath.Join(cityPath, "formulas")
+	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sysDir, "hello.formula.toml"), []byte("old content"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(formulasDir, "hello.formula.toml"), []byte("old content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -84,18 +81,14 @@ func TestMaterializeOverwrites(t *testing.T) {
 	}
 }
 
-func TestMaterializeCleansRemoved(t *testing.T) {
+func TestMaterializeDoesNotRemoveUserFiles(t *testing.T) {
 	cityPath := t.TempDir()
-	sysDir := filepath.Join(cityPath, ".gc", "system", "formulas")
-	if err := os.MkdirAll(sysDir, 0o755); err != nil {
+	formulasDir := filepath.Join(cityPath, "formulas")
+	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Pre-existing file that is NOT in the new embedded FS.
-	if err := os.WriteFile(filepath.Join(sysDir, "stale.formula.toml"), []byte("stale"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Also a non-formula file that should be left alone.
-	if err := os.WriteFile(filepath.Join(sysDir, "readme.txt"), []byte("keep me"), 0o644); err != nil {
+	// Pre-existing user formula not in the embedded FS — should be left alone.
+	if err := os.WriteFile(filepath.Join(formulasDir, "user.formula.toml"), []byte("user"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -108,17 +101,13 @@ func TestMaterializeCleansRemoved(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// stale.formula.toml should be removed.
-	if _, err := os.Stat(filepath.Join(sysDir, "stale.formula.toml")); !os.IsNotExist(err) {
-		t.Error("stale formula file was not removed")
+	// user.formula.toml should still exist (not removed).
+	if _, err := os.Stat(filepath.Join(formulasDir, "user.formula.toml")); err != nil {
+		t.Error("user formula file was removed")
 	}
 	// fresh.formula.toml should exist.
-	if _, err := os.Stat(filepath.Join(sysDir, "fresh.formula.toml")); err != nil {
+	if _, err := os.Stat(filepath.Join(formulasDir, "fresh.formula.toml")); err != nil {
 		t.Error("fresh formula file missing")
-	}
-	// readme.txt should still exist.
-	if _, err := os.Stat(filepath.Join(sysDir, "readme.txt")); err != nil {
-		t.Error("non-formula file was removed")
 	}
 }
 
@@ -163,7 +152,7 @@ func TestMaterializeWithOrders(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Check basic formula.
+	// Check basic formula goes to formulas/.
 	data, err := os.ReadFile(filepath.Join(dir, "basic.formula.toml"))
 	if err != nil {
 		t.Fatalf("reading basic: %v", err)
@@ -172,8 +161,9 @@ func TestMaterializeWithOrders(t *testing.T) {
 		t.Errorf("basic content = %q", string(data))
 	}
 
-	// Check order files.
-	data, err = os.ReadFile(filepath.Join(dir, "orders", "foo", "order.toml"))
+	// Check order files go to orders/ (peer of formulas/).
+	ordersDir := filepath.Join(cityPath, "orders")
+	data, err = os.ReadFile(filepath.Join(ordersDir, "orders", "foo", "order.toml"))
 	if err != nil {
 		t.Fatalf("reading foo order: %v", err)
 	}
@@ -181,7 +171,7 @@ func TestMaterializeWithOrders(t *testing.T) {
 		t.Errorf("foo order content = %q", string(data))
 	}
 
-	data, err = os.ReadFile(filepath.Join(dir, "orders", "bar", "order.toml"))
+	data, err = os.ReadFile(filepath.Join(ordersDir, "orders", "bar", "order.toml"))
 	if err != nil {
 		t.Fatalf("reading bar order: %v", err)
 	}

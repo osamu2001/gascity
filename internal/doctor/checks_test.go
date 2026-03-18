@@ -870,11 +870,11 @@ func TestPackCacheCheck_WithPath(t *testing.T) {
 
 func TestSystemFormulasCheckOK(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
-	sysDir := filepath.Join(dir, ".gc", "system", "formulas")
-	if err := os.MkdirAll(sysDir, 0o755); err != nil {
+	formulasDir := filepath.Join(dir, "formulas")
+	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sysDir, "hello.formula.toml"), []byte("hello"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(formulasDir, "hello.formula.toml"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -889,30 +889,30 @@ func TestSystemFormulasCheckOK(t *testing.T) {
 	}
 }
 
-func TestSystemFormulasCheckMissing(t *testing.T) {
+func TestSystemFormulasCheckOrdersOK(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
-	// No .gc/system/formulas/ directory.
+	ordersDir := filepath.Join(dir, "orders", "orders", "health")
+	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ordersDir, "order.toml"), []byte("health"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	c := &SystemFormulasCheck{
-		CityPath: dir,
-		Expected: []string{"hello.formula.toml"},
+		CityPath:        dir,
+		Expected:        []string{"orders/health/order.toml"},
+		ExpectedContent: map[string][]byte{"orders/health/order.toml": []byte("health")},
 	}
 	r := c.Run(&CheckContext{CityPath: dir})
-	if r.Status != StatusError {
-		t.Errorf("status = %d, want Error; msg = %s", r.Status, r.Message)
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
 }
 
-func TestSystemFormulasCheckMissingCanonicalPath(t *testing.T) {
+func TestSystemFormulasCheckMissing(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
-	// Only legacy path exists — canonical .gc/system/formulas/ does not.
-	legacyDir := filepath.Join(dir, ".gc", "system-formulas")
-	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(legacyDir, "hello.formula.toml"), []byte("hello"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// No formulas/ directory, no files.
 
 	c := &SystemFormulasCheck{
 		CityPath: dir,
@@ -926,11 +926,11 @@ func TestSystemFormulasCheckMissingCanonicalPath(t *testing.T) {
 
 func TestSystemFormulasCheckStale(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
-	sysDir := filepath.Join(dir, ".gc", "system", "formulas")
-	if err := os.MkdirAll(sysDir, 0o755); err != nil {
+	formulasDir := filepath.Join(dir, "formulas")
+	if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sysDir, "hello.formula.toml"), []byte("old"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(formulasDir, "hello.formula.toml"), []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -947,18 +947,17 @@ func TestSystemFormulasCheckStale(t *testing.T) {
 
 func TestSystemFormulasCheckFix(t *testing.T) {
 	dir := setupCity(t, "[workspace]\nname = \"test\"\n")
-	// No system-formulas dir yet.
 
 	fixed := false
 	c := &SystemFormulasCheck{
 		CityPath: dir,
 		Expected: []string{"hello.formula.toml"},
 		FixFn: func() error {
-			sysDir := filepath.Join(dir, ".gc", "system", "formulas")
-			if err := os.MkdirAll(sysDir, 0o755); err != nil {
+			formulasDir := filepath.Join(dir, "formulas")
+			if err := os.MkdirAll(formulasDir, 0o755); err != nil {
 				return err
 			}
-			if err := os.WriteFile(filepath.Join(sysDir, "hello.formula.toml"), []byte("hello"), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(formulasDir, "hello.formula.toml"), []byte("hello"), 0o644); err != nil {
 				return err
 			}
 			fixed = true

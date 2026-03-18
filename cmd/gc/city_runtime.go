@@ -422,14 +422,8 @@ func (cr *CityRuntime) reloadConfig(
 		}
 	}
 
-	// Re-materialize and prepend system formulas.
-	sysDir, _ := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityRoot)
-	if sysDir != "" {
-		nextCfg.FormulaLayers.City = append([]string{sysDir}, nextCfg.FormulaLayers.City...)
-		for rigName, layers := range nextCfg.FormulaLayers.Rigs {
-			nextCfg.FormulaLayers.Rigs[rigName] = append([]string{sysDir}, layers...)
-		}
-	}
+	// Re-materialize system formulas into the city formulas/ directory.
+	MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityRoot) //nolint:errcheck // best-effort
 	if err := config.ValidateRigs(nextCfg.Rigs, cr.cityName); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: config reload: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}

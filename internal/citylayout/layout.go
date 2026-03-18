@@ -23,11 +23,9 @@ const (
 
 	ScriptsRoot = "scripts"
 
-	SystemRoot         = ".gc/system"
-	SystemPromptsRoot  = ".gc/system/prompts"
-	SystemFormulasRoot = ".gc/system/formulas"
-	SystemPacksRoot    = ".gc/system/packs"
-	SystemBinRoot      = ".gc/system/bin"
+	SystemRoot      = ".gc/system"
+	SystemPacksRoot = ".gc/system/packs"
+	SystemBinRoot   = ".gc/system/bin"
 
 	CacheRoot         = ".gc/cache"
 	CachePacksRoot    = ".gc/cache/packs"

@@ -951,16 +951,9 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		// Non-fatal.
 	}
 
-	// Materialize system formulas and prepend as Layer 0.
-	sysDir, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
-	if sysErr != nil {
+	// Materialize system formulas into the city formulas/ directory.
+	if _, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath); sysErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': system formulas: %v\n", cityName, sysErr) //nolint:errcheck
-	}
-	if sysDir != "" {
-		cfg.FormulaLayers.City = append([]string{sysDir}, cfg.FormulaLayers.City...)
-		for rigName, layers := range cfg.FormulaLayers.Rigs {
-			cfg.FormulaLayers.Rigs[rigName] = append([]string{sysDir}, layers...)
-		}
 	}
 
 	// Resolve formula symlinks.

@@ -2512,7 +2512,7 @@ max = 3
 
 func TestDoPrimePoolAgentFallback(t *testing.T) {
 	// An explicit pool agent with no prompt_template reads the materialized
-	// pool-worker.md from .gc/system/prompts/ on disk.
+	// pool-worker.md from prompts/ on disk.
 	dir := t.TempDir()
 	if err := materializeBuiltinPrompts(dir); err != nil {
 		t.Fatalf("materializeBuiltinPrompts: %v", err)

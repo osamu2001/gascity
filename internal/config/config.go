@@ -1310,7 +1310,7 @@ func InjectImplicitAgents(cfg *City) {
 	// then any custom providers in sorted order.
 	providers := configuredProviderOrder(configured)
 
-	promptTemplate := citylayout.SystemPromptsRoot + "/pool-worker.md"
+	promptTemplate := citylayout.PromptsRoot + "/pool-worker.md"
 
 	// City-scoped implicit agents.
 	for _, name := range providers {

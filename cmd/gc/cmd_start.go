@@ -317,7 +317,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extraConfigFiles...)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	// Strict mode (default) promotes composition warnings to errors.
@@ -376,7 +377,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if err := startBeadsLifecycle(cityPath, cityName, cfg, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -388,17 +390,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		// Non-fatal warning — server may recover by the time agents need it.
 	}
 
-	// Materialize system formulas from binary.
-	sysDir, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
-	if sysErr != nil {
+	// Materialize system formulas into the city formulas/ directory.
+	if _, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath); sysErr != nil {
 		fmt.Fprintf(stderr, "gc start: system formulas: %v\n", sysErr) //nolint:errcheck // best-effort stderr
-	}
-	if sysDir != "" {
-		// Prepend as Layer 0 (lowest priority).
-		cfg.FormulaLayers.City = append([]string{sysDir}, cfg.FormulaLayers.City...)
-		for rigName, layers := range cfg.FormulaLayers.Rigs {
-			cfg.FormulaLayers.Rigs[rigName] = append([]string{sysDir}, layers...)
-		}
 	}
 
 	// Materialize formula symlinks before agent startup.

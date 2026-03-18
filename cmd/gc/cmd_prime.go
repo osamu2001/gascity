@@ -157,11 +157,11 @@ func doPrimeWithMode(args []string, stdout, _ io.Writer, hookMode bool) int { //
 			}
 		}
 		// Pool agents without a prompt_template: read the materialized
-		// pool-worker.md from .gc/system/prompts/ on disk.
+		// pool-worker.md from prompts/ on disk.
 		// Pool instances have Pool=nil after resolution, so also check the
 		// template agent via findAgentByName.
 		if ok && a.PromptTemplate == "" && (a.IsPool() || isPoolInstance(cfg, a)) {
-			if content, fErr := os.ReadFile(filepath.Join(cityPath, ".gc/system/prompts/pool-worker.md")); fErr == nil {
+			if content, fErr := os.ReadFile(filepath.Join(cityPath, "prompts/pool-worker.md")); fErr == nil {
 				fmt.Fprint(stdout, string(content)) //nolint:errcheck // best-effort stdout
 				return 0
 			}

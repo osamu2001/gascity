@@ -277,7 +277,8 @@ func cmdInit(args []string, providerFlag, bootstrapProfileFlag string, stdout, s
 	}
 	prefix := config.DeriveBeadsPrefix(cityName)
 	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc init: %v\n", err)                       //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	logInitProgress(stdout, 6, "Registering city with supervisor")
@@ -398,15 +399,10 @@ func cmdInitFromTOMLFile(fs fsys.FS, tomlSrc, cityPath string, stdout, stderr io
 		return code
 	}
 
-	// Materialize system formulas and resolve formula symlinks so bd finds them immediately after init.
-	sysDir, _ := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
+	// Materialize system formulas into formulas/ and resolve symlinks so bd finds them immediately after init.
+	MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath) //nolint:errcheck // best-effort
 	formulasInitDir := filepath.Join(cityPath, citylayout.FormulasRoot)
-	initLayers := []string{}
-	if sysDir != "" {
-		initLayers = append(initLayers, sysDir)
-	}
-	initLayers = append(initLayers, formulasInitDir)
-	if rfErr := ResolveFormulas(cityPath, initLayers); rfErr != nil {
+	if rfErr := ResolveFormulas(cityPath, []string{formulasInitDir}); rfErr != nil {
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
 	}
 
@@ -422,7 +418,8 @@ func cmdInitFromTOMLFile(fs fsys.FS, tomlSrc, cityPath string, stdout, stderr io
 	MaterializeBuiltinPacks(cityPath)                                                       //nolint:errcheck // best-effort; only needed for bd provider
 	prefix := config.DeriveBeadsPrefix(cityName)
 	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc init: %v\n", err)                       //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	code := registerCityWithSupervisor(cityPath, stdout, stderr, "gc init")
@@ -482,15 +479,10 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, stdout, stderr io.Wri
 		return code
 	}
 
-	// Materialize system formulas and resolve formula symlinks so bd finds them immediately after init.
-	sysDir, _ := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
+	// Materialize system formulas into formulas/ and resolve symlinks so bd finds them immediately after init.
+	MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath) //nolint:errcheck // best-effort
 	formulasDir := filepath.Join(cityPath, citylayout.FormulasRoot)
-	initLayers := []string{}
-	if sysDir != "" {
-		initLayers = append(initLayers, sysDir)
-	}
-	initLayers = append(initLayers, formulasDir)
-	if err := ResolveFormulas(cityPath, initLayers); err != nil {
+	if err := ResolveFormulas(cityPath, []string{formulasDir}); err != nil {
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 
@@ -737,7 +729,8 @@ func doInitFromDir(srcDir, cityPath string, stdout, stderr io.Writer) int {
 	MaterializeBuiltinPacks(cityPath)  //nolint:errcheck // best-effort; only needed for bd provider
 	prefix := config.DeriveBeadsPrefix(cityName)
 	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
-		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc init: %v\n", err)                       //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	code := registerCityWithSupervisor(cityPath, stdout, stderr, "gc init")

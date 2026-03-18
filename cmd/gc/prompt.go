@@ -10,7 +10,6 @@ import (
 	"text/template"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
@@ -48,12 +47,6 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 	}
 	sourcePath := filepath.Join(cityPath, templatePath)
 	data, err := fs.ReadFile(sourcePath)
-	if err != nil && strings.HasPrefix(templatePath, citylayout.PromptsRoot+"/") {
-		rel := strings.TrimPrefix(templatePath, citylayout.PromptsRoot+"/")
-		fallback := filepath.Join(cityPath, citylayout.SystemPromptsRoot, rel)
-		data, err = fs.ReadFile(fallback)
-		sourcePath = fallback
-	}
 	if err != nil {
 		return ""
 	}

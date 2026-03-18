@@ -1026,11 +1026,12 @@ func isWorktreeValid(wtPath string) bool {
 
 // --- System formulas check ---
 
-// SystemFormulasCheck verifies .gc/system/formulas/ exists and all expected
-// files are present with correct content.
+// SystemFormulasCheck verifies formulas/ and orders/ contain all expected
+// system files with correct content.
 type SystemFormulasCheck struct {
 	CityPath string
 	// Expected is the list of relative paths from ListEmbeddedSystemFormulas.
+	// Order files (orders/*) are checked under orders/; formula files under formulas/.
 	Expected []string
 	// ExpectedContent maps relative path → file content for staleness detection.
 	// If nil, only presence is checked (not content).
@@ -1042,7 +1043,17 @@ type SystemFormulasCheck struct {
 // Name returns the check identifier.
 func (c *SystemFormulasCheck) Name() string { return "system-formulas" }
 
-// Run checks that the system formulas directory has all expected files.
+// systemFileAbsPath returns the absolute path for a system formula/order
+// file. Orders (orders/*) resolve under the city orders/ directory;
+// formulas resolve under formulas/.
+func (c *SystemFormulasCheck) systemFileAbsPath(rel string) string {
+	if strings.HasPrefix(rel, "orders/") {
+		return filepath.Join(c.CityPath, citylayout.OrdersRoot, rel)
+	}
+	return filepath.Join(c.CityPath, citylayout.FormulasRoot, rel)
+}
+
+// Run checks that the formulas/ and orders/ directories have all expected system files.
 func (c *SystemFormulasCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
@@ -1052,17 +1063,9 @@ func (c *SystemFormulasCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	sysDir := filepath.Join(c.CityPath, citylayout.SystemFormulasRoot)
-	if _, err := os.Stat(sysDir); err != nil {
-		r.Status = StatusError
-		r.Message = ".gc/system/formulas/ directory missing"
-		r.FixHint = "run gc doctor --fix to re-materialize"
-		return r
-	}
-
 	var stale []string
 	for _, rel := range c.Expected {
-		path := filepath.Join(sysDir, rel)
+		path := c.systemFileAbsPath(rel)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			stale = append(stale, rel+" (missing)")

@@ -6,12 +6,12 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
-// materializeBuiltinPrompts writes embedded prompt files to .gc/system/prompts/.
+// materializeBuiltinPrompts writes embedded prompt files to prompts/.
 // Files are always overwritten to stay in sync with the gc binary version.
 // Uses materializeFS to walk the embed.FS — no hardcoded filename list.
 func materializeBuiltinPrompts(cityPath string) error {
 	return materializeFS(defaultPrompts, "prompts",
-		filepath.Join(cityPath, citylayout.SystemPromptsRoot))
+		filepath.Join(cityPath, citylayout.PromptsRoot))
 }
 
 // materializeBuiltinFormulas is retained for callers that still expect the helper,
