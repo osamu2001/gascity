@@ -244,6 +244,52 @@ func TestAllDependenciesAlive_DepDead(t *testing.T) {
 	}
 }
 
+func TestAllDependenciesAlive_UsesLegacyAgentLabelTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	_, err := store.Create(beads.Bead{
+		Title:  "db",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/db"},
+		Metadata: map[string]string{
+			"template":     "frontend/db",
+			"session_name": "custom-db",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session := beads.Bead{
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"pool_slot":    "1",
+			"session_name": "custom-worker-1",
+		},
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{SessionTemplate: "{{.Agent}}"},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", DependsOn: []string{"frontend/db"}, Pool: &config.PoolConfig{Min: 1, Max: 2}},
+			{Name: "db", Dir: "frontend"},
+		},
+	}
+	sp := runtime.NewFake()
+	desired := map[string]TemplateParams{
+		"custom-db":       {TemplateName: "frontend/db"},
+		"custom-worker-1": {TemplateName: "frontend/worker"},
+	}
+	if allDependenciesAlive(session, cfg, desired, sp, "test", store) {
+		t.Error("legacy labeled worker should still see db as a missing dependency")
+	}
+	if err := sp.Start(context.Background(), "custom-db", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if !allDependenciesAlive(session, cfg, desired, sp, "test", store) {
+		t.Error("legacy labeled worker should see db as alive once the dependency starts")
+	}
+}
+
 // --- reconcileSessionBeads tests ---
 
 func TestReconcileSessionBeads_WakesDeadSession(t *testing.T) {

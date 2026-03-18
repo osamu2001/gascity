@@ -13,6 +13,7 @@ package runtimetest
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -73,6 +74,37 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 		}
 	})
 
+	t.Run("Start_ConcurrentDistinctSessions", func(t *testing.T) {
+		sp, cfg1, name1 := newSession(t)
+		_, cfg2, name2 := newSession(t)
+		_, cfg3, name3 := newSession(t)
+		names := []string{name1, name2, name3}
+		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
+		for _, name := range names {
+			t.Cleanup(func(n string) func() {
+				return func() { _ = sp.Stop(n) }
+			}(name))
+		}
+		errs := make([]error, len(names))
+		var wg sync.WaitGroup
+		for i := range names {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				errs[i] = sp.Start(context.Background(), names[i], cfgs[i])
+			}(i)
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("concurrent Start(%s): %v", names[i], err)
+			}
+			if !sp.IsRunning(names[i]) {
+				t.Fatalf("IsRunning(%s) = false after concurrent Start", names[i])
+			}
+		}
+	})
+
 	t.Run("Stop_MakesSessionNotRunning", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		if err := sp.Start(context.Background(), name, cfg); err != nil {
@@ -107,10 +139,103 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 		}
 	})
 
+	t.Run("Stop_ConcurrentDistinctSessions", func(t *testing.T) {
+		sp, cfg1, name1 := newSession(t)
+		_, cfg2, name2 := newSession(t)
+		_, cfg3, name3 := newSession(t)
+		names := []string{name1, name2, name3}
+		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
+		for i := range names {
+			if err := sp.Start(context.Background(), names[i], cfgs[i]); err != nil {
+				t.Fatalf("Start(%s): %v", names[i], err)
+			}
+		}
+		errs := make([]error, len(names))
+		var wg sync.WaitGroup
+		for i := range names {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				errs[i] = sp.Stop(names[i])
+			}(i)
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("concurrent Stop(%s): %v", names[i], err)
+			}
+			if sp.IsRunning(names[i]) {
+				t.Fatalf("IsRunning(%s) = true after concurrent Stop", names[i])
+			}
+		}
+	})
+
+	t.Run("Interrupt_ConcurrentDistinctSessions", func(t *testing.T) {
+		sp, cfg1, name1 := newSession(t)
+		_, cfg2, name2 := newSession(t)
+		_, cfg3, name3 := newSession(t)
+		names := []string{name1, name2, name3}
+		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
+		for i := range names {
+			if err := sp.Start(context.Background(), names[i], cfgs[i]); err != nil {
+				t.Fatalf("Start(%s): %v", names[i], err)
+			}
+			t.Cleanup(func(n string) func() {
+				return func() { _ = sp.Stop(n) }
+			}(names[i]))
+		}
+		errs := make([]error, len(names))
+		var wg sync.WaitGroup
+		for i := range names {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				errs[i] = sp.Interrupt(names[i])
+			}(i)
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("concurrent Interrupt(%s): %v", names[i], err)
+			}
+		}
+	})
+
 	t.Run("IsRunning_UnknownSession", func(t *testing.T) {
 		sp, _, _ := newSession(t)
 		if sp.IsRunning("unknown-conformance-session-never-existed") {
 			t.Error("IsRunning = true for unknown session, want false")
+		}
+	})
+
+	t.Run("IsRunning_ConcurrentDistinctSessions", func(t *testing.T) {
+		sp, cfg1, name1 := newSession(t)
+		_, cfg2, name2 := newSession(t)
+		_, cfg3, name3 := newSession(t)
+		names := []string{name1, name2, name3}
+		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
+		for i := range names {
+			if err := sp.Start(context.Background(), names[i], cfgs[i]); err != nil {
+				t.Fatalf("Start(%s): %v", names[i], err)
+			}
+			t.Cleanup(func(n string) func() {
+				return func() { _ = sp.Stop(n) }
+			}(names[i]))
+		}
+		got := make([]bool, len(names))
+		var wg sync.WaitGroup
+		for i := range names {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				got[i] = sp.IsRunning(names[i])
+			}(i)
+		}
+		wg.Wait()
+		for i := range got {
+			if !got[i] {
+				t.Fatalf("IsRunning(%s) = false after concurrent query", names[i])
+			}
 		}
 	})
 
@@ -201,6 +326,42 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 		}
 	})
 
+	t.Run("ListRunning_ConcurrentDistinctPrefixes", func(t *testing.T) {
+		sp, cfg1, name1 := newSession(t)
+		_, cfg2, name2 := newSession(t)
+		_, cfg3, name3 := newSession(t)
+		names := []string{name1, name2, name3}
+		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
+		for i := range names {
+			if err := sp.Start(context.Background(), names[i], cfgs[i]); err != nil {
+				t.Fatalf("Start(%s): %v", names[i], err)
+			}
+			t.Cleanup(func(n string) func() {
+				return func() { _ = sp.Stop(n) }
+			}(names[i]))
+		}
+		results := make([][]string, len(names))
+		var wg sync.WaitGroup
+		for i := range names {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				list, err := sp.ListRunning(names[i])
+				if err != nil {
+					t.Errorf("ListRunning(%s): %v", names[i], err)
+					return
+				}
+				results[i] = list
+			}(i)
+		}
+		wg.Wait()
+		for i := range names {
+			if !contains(results[i], names[i]) {
+				t.Fatalf("ListRunning(%s) missing session in %v", names[i], results[i])
+			}
+		}
+	})
+
 	// --- Group 6: ProcessAlive ---
 
 	t.Run("ProcessAlive_EmptyNamesReturnsTrue", func(t *testing.T) {
@@ -226,6 +387,37 @@ func RunLifecycleTests(t *testing.T, newSession Factory) {
 
 		if sp.ProcessAlive(name, []string{"some-process"}) {
 			t.Error("ProcessAlive after Stop = true, want false")
+		}
+	})
+
+	t.Run("ProcessAlive_ConcurrentDistinctSessions", func(t *testing.T) {
+		sp, cfg1, name1 := newSession(t)
+		_, cfg2, name2 := newSession(t)
+		_, cfg3, name3 := newSession(t)
+		names := []string{name1, name2, name3}
+		cfgs := []runtime.Config{cfg1, cfg2, cfg3}
+		for i := range names {
+			if err := sp.Start(context.Background(), names[i], cfgs[i]); err != nil {
+				t.Fatalf("Start(%s): %v", names[i], err)
+			}
+			t.Cleanup(func(n string) func() {
+				return func() { _ = sp.Stop(n) }
+			}(names[i]))
+		}
+		got := make([]bool, len(names))
+		var wg sync.WaitGroup
+		for i := range names {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				got[i] = sp.ProcessAlive(names[i], nil)
+			}(i)
+		}
+		wg.Wait()
+		for i := range got {
+			if !got[i] {
+				t.Fatalf("ProcessAlive(%s) = false after concurrent query", names[i])
+			}
 		}
 	})
 }

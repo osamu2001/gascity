@@ -56,6 +56,12 @@ func FlattenText(content []ContentBlock) string {
 
 // Provider manages agent sessions. Implementations handle the details
 // of creating, destroying, and connecting to running agent processes.
+//
+// Implementations must be safe for concurrent use. Callers may invoke
+// Start, Stop, Interrupt, IsRunning, ProcessAlive, and ListRunning from
+// multiple goroutines at once for distinct session names. Same-name
+// races must still preserve the documented semantics (for example,
+// duplicate Start calls must reject consistently).
 type Provider interface {
 	// Start creates a new session with the given name and configuration.
 	// The context controls the overall startup deadline — providers should

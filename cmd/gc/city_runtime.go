@@ -412,7 +412,7 @@ func (cr *CityRuntime) reloadConfig(
 		if running, lErr := cr.sp.ListRunning(""); lErr == nil && len(running) > 0 {
 			fmt.Fprintf(cr.stdout, "Provider changed (%s → %s), stopping %d agent(s)...\n", //nolint:errcheck
 				displayProviderName(*lastProviderName), displayProviderName(newProviderName), len(running))
-			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.stdout, cr.stderr)
+			gracefulStopAll(running, cr.sp, nextCfg.Daemon.ShutdownTimeoutDuration(), cr.rec, cr.cfg, cr.cityBeadStore(), cr.stdout, cr.stderr)
 		}
 		newSp, spErr := newSessionProviderByName(newProviderName, nextCfg.Session, cr.cityName)
 		if spErr != nil {
@@ -607,6 +607,6 @@ func (cr *CityRuntime) shutdown() {
 		}
 		timeout := cr.cfg.Daemon.ShutdownTimeoutDuration()
 		running, _ := cr.sp.ListRunning("")
-		gracefulStopAll(running, cr.sp, timeout, cr.rec, cr.stdout, cr.stderr)
+		gracefulStopAll(running, cr.sp, timeout, cr.rec, cr.cfg, cr.cityBeadStore(), cr.stdout, cr.stderr)
 	})
 }

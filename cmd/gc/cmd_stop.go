@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
@@ -100,11 +102,10 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 			sessionNames = append(sessionNames, sn)
 			desired[sn] = true
 		} else {
-			// Pool agent: discover instances (static for bounded, live for unlimited).
-			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, pool, cityName, st, sp) {
-				sn := lookupSessionNameOrLegacy(store, cityName, qualifiedInstance, st)
-				sessionNames = append(sessionNames, sn)
-				desired[sn] = true
+			// Pool agent: resolve runtime session names from beads first, then legacy discovery.
+			for _, ref := range resolvePoolSessionRefs(store, a.Name, a.Dir, pool, cityName, st, sp, stderr) {
+				sessionNames = append(sessionNames, ref.sessionName)
+				desired[ref.sessionName] = true
 			}
 		}
 	}
@@ -114,11 +115,11 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 		recorder = fr
 	}
 
-	code := doStop(sessionNames, sp, cfg.Daemon.ShutdownTimeoutDuration(), recorder, stdout, stderr)
+	code := doStop(sessionNames, sp, cfg, store, cfg.Daemon.ShutdownTimeoutDuration(), recorder, stdout, stderr)
 
 	// Clean up orphan sessions (sessions with the city prefix that are
 	// not in the current config).
-	stopOrphans(sp, desired, cfg.Daemon.ShutdownTimeoutDuration(), recorder, stdout, stderr)
+	stopOrphans(sp, desired, cfg, store, cfg.Daemon.ShutdownTimeoutDuration(), recorder, stdout, stderr)
 
 	// Stop bead store's backing service after agents.
 	if err := shutdownBeadsProvider(cityPath); err != nil {
@@ -132,7 +133,7 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 // stopOrphans stops sessions that are not in the desired set. Used by gc stop
 // to clean up orphans after stopping config agents. With per-city socket
 // isolation, all sessions on the socket belong to this city.
-func stopOrphans(sp runtime.Provider, desired map[string]bool,
+func stopOrphans(sp runtime.Provider, desired map[string]bool, cfg *config.City, store beads.Store,
 	timeout time.Duration, rec events.Recorder, stdout, stderr io.Writer,
 ) {
 	running, err := sp.ListRunning("")
@@ -147,7 +148,7 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool,
 		}
 		orphans = append(orphans, name)
 	}
-	gracefulStopAll(orphans, sp, timeout, rec, stdout, stderr)
+	gracefulStopAll(orphans, sp, timeout, rec, cfg, store, stdout, stderr)
 }
 
 // tryStopController connects to .gc/controller.sock and sends "stop".
@@ -174,7 +175,7 @@ func tryStopController(cityPath string, stdout io.Writer) bool {
 // doStop is the pure logic for "gc stop". Filters to running sessions and
 // performs graceful shutdown (interrupt → wait → kill). Accepts session names,
 // provider, timeout, and recorder for testability.
-func doStop(sessionNames []string, sp runtime.Provider, timeout time.Duration,
+func doStop(sessionNames []string, sp runtime.Provider, cfg *config.City, store beads.Store, timeout time.Duration,
 	rec events.Recorder, stdout, stderr io.Writer,
 ) int {
 	var running []string
@@ -183,7 +184,7 @@ func doStop(sessionNames []string, sp runtime.Provider, timeout time.Duration,
 			running = append(running, sn)
 		}
 	}
-	gracefulStopAll(running, sp, timeout, rec, stdout, stderr)
+	gracefulStopAll(running, sp, timeout, rec, cfg, store, stdout, stderr)
 	fmt.Fprintln(stdout, "City stopped.") //nolint:errcheck // best-effort stdout
 	return 0
 }

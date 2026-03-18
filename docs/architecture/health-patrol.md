@@ -8,7 +8,7 @@ Audience: Gas City contributors (human and LLM agent).
 Update this document when the implementation changes.
 */}
 
-> Last verified against code: 2026-03-01
+> Last verified against code: 2026-03-18
 
 ## Summary
 
@@ -160,9 +160,15 @@ are not in the desired set:
 - Suspended agents are stopped with an `agent.suspended` event.
 - True orphans are killed immediately.
 
-**Parallel starts** (Phase 1b): All agents needing start are launched
-concurrently via goroutines, then results are processed sequentially for
-crash tracking, event recording, and config hash storage.
+**Dependency-aware bounded parallel starts** (Phase 1b): The bead-driven
+session reconciler plans starts serially, groups them into dependency
+waves, runs each wave with bounded parallelism, then applies
+success/failure side effects serially in stable plan order.
+
+**Dependency-aware bounded force-stops**: Bulk stop paths (`gc stop`,
+controller shutdown, provider swap, `gc rig restart`) send interrupts to
+all sessions first, then force-stop any survivors in reverse dependency
+waves with bounded parallelism.
 
 ### Key Types
 

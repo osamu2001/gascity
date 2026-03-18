@@ -18,3 +18,4 @@ lives in the [Architecture](../architecture/README) section.
 | `machine-wide-supervisor-v0` | Accepted | Current supervisor direction |
 | `api-ops-design` | Implemented | State-mutation API surface |
 | `agent-pools` | Implemented | Feature shipped before the current template existed |
+| `dependency-aware-bounded-parallel-lifecycle` | Implemented | Bounded parallel start/stop waves for session lifecycle |

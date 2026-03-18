@@ -838,6 +838,70 @@ func TestFindSessionNameByTemplate_TemplateMismatchNotFound(t *testing.T) {
 	}
 }
 
+func TestFindSessionNameByTemplate_UsesLegacyAgentLabelForPoolInstance(t *testing.T) {
+	store := beads.NewMemStore()
+
+	_, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   "session",
+		Labels: []string{sessionBeadLabel, "agent:myrig/worker-1"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"pool_slot":    "1",
+			"session_name": "s-legacy-worker-1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := findSessionNameByTemplate(store, "myrig/worker-1")
+	if got != "s-legacy-worker-1" {
+		t.Errorf("findSessionNameByTemplate(myrig/worker-1) = %q, want s-legacy-worker-1", got)
+	}
+}
+
+func TestLookupPoolSessionNames_RejectsSharedPrefixSiblingTemplates(t *testing.T) {
+	store := beads.NewMemStore()
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"pool_slot":    "1",
+				"session_name": "s-worker-1",
+			},
+		},
+		{
+			Title:  "worker-supervisor",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "agent:frontend/worker-supervisor-1"},
+			Metadata: map[string]string{
+				"template":     "worker-supervisor",
+				"pool_slot":    "1",
+				"session_name": "s-worker-supervisor-1",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := lookupPoolSessionNames(store, "frontend/worker")
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if got["frontend/worker-1"] != "s-worker-1" {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) missing worker-1: %#v", got)
+	}
+	if _, ok := got["frontend/worker-supervisor-1"]; ok {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) wrongly matched sibling template: %#v", got)
+	}
+}
+
 func TestDiscoverSessionBeads_RigQualifiedTemplate(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -2071,7 +2135,7 @@ func TestDoStopOneAgentRunning(t *testing.T) {
 	_ = sp.Start(context.Background(), "mayor", runtime.Config{})
 
 	var stdout, stderr bytes.Buffer
-	code := doStop([]string{"mayor"}, sp, 0, events.Discard, &stdout, &stderr)
+	code := doStop([]string{"mayor"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doStop = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2090,7 +2154,7 @@ func TestDoStopOneAgentRunning(t *testing.T) {
 func TestDoStopNoAgents(t *testing.T) {
 	sp := runtime.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := doStop(nil, sp, 0, events.Discard, &stdout, &stderr)
+	code := doStop(nil, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doStop = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2109,7 +2173,7 @@ func TestDoStopAgentNotRunning(t *testing.T) {
 	// "mayor" not started in provider — IsRunning returns false.
 
 	var stdout, stderr bytes.Buffer
-	code := doStop([]string{"mayor"}, sp, 0, events.Discard, &stdout, &stderr)
+	code := doStop([]string{"mayor"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doStop = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2129,7 +2193,7 @@ func TestDoStopMultipleAgents(t *testing.T) {
 	_ = sp.Start(context.Background(), "worker", runtime.Config{})
 
 	var stdout, stderr bytes.Buffer
-	code := doStop([]string{"mayor", "worker"}, sp, 0, events.Discard, &stdout, &stderr)
+	code := doStop([]string{"mayor", "worker"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doStop = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2145,11 +2209,61 @@ func TestDoStopMultipleAgents(t *testing.T) {
 	}
 }
 
+func TestDoStop_UsesDependencyAwareOrdering(t *testing.T) {
+	sp := newGatedStopProvider()
+	for _, name := range []string{"db", "api", "worker"} {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", DependsOn: []string{"api"}},
+			{Name: "api", DependsOn: []string{"db"}},
+			{Name: "db"},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- doStop([]string{"db", "api", "worker"}, sp, cfg, nil, 0, events.Discard, &stdout, &stderr)
+	}()
+
+	firstWave := sp.waitForStops(t, 1)
+	if !containsAll(firstWave, "worker") {
+		t.Fatalf("first stop wave = %v, want worker", firstWave)
+	}
+	sp.ensureNoFurtherStop(t, 150*time.Millisecond)
+	sp.release("worker")
+
+	secondWave := sp.waitForStops(t, 1)
+	if !containsAll(secondWave, "api") {
+		t.Fatalf("second stop wave = %v, want api", secondWave)
+	}
+	sp.release("api")
+
+	thirdWave := sp.waitForStops(t, 1)
+	if !containsAll(thirdWave, "db") {
+		t.Fatalf("third stop wave = %v, want db", thirdWave)
+	}
+	sp.release("db")
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("doStop = %d, want 0; stderr: %s", code, stderr.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("doStop did not finish")
+	}
+}
+
 func TestDoStopStopError(t *testing.T) {
 	sp := runtime.NewFailFake() // Stop will fail
 
 	var stdout, stderr bytes.Buffer
-	code := doStop([]string{"mayor"}, sp, 0, events.Discard, &stdout, &stderr)
+	code := doStop([]string{"mayor"}, sp, nil, nil, 0, events.Discard, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doStop = %d, want 0 (errors are non-fatal); stderr: %s", code, stderr.String())
 	}

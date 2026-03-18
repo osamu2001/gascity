@@ -107,7 +107,7 @@ func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 	sp := newSessionProvider()
 	rec := openCityRecorder(stderr)
 	store, _ := openCityStoreAt(cityPath)
-	return doRigRestart(sp, rec, store, rigAgents, rigName, cityName, cfg.Workspace.SessionTemplate, stdout, stderr)
+	return doRigRestart(sp, rec, store, cfg, rigAgents, rigName, cityName, cfg.Workspace.SessionTemplate, stdout, stderr)
 }
 
 // doRigRestart kills sessions for all agents in a rig. The reconciler will
@@ -116,47 +116,47 @@ func doRigRestart(
 	sp runtime.Provider,
 	rec events.Recorder,
 	store beads.Store,
+	cfg *config.City,
 	agents []config.Agent,
 	rigName, cityName, sessionTemplate string,
 	stdout, stderr io.Writer,
 ) int {
-	killed := 0
+	var targets []stopTarget
 	for _, a := range agents {
 		pool := a.EffectivePool()
 		if !pool.IsMultiInstance() {
 			// Single agent.
 			sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
 			if sp.IsRunning(sn) {
-				if err := sp.Stop(sn); err != nil {
-					fmt.Fprintf(stderr, "gc rig restart: stopping %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
-					continue
-				}
-				rec.Record(events.Event{
-					Type:    events.SessionStopped,
-					Actor:   eventActor(),
-					Subject: a.QualifiedName(),
+				targets = append(targets, stopTarget{
+					name:     sn,
+					template: a.QualifiedName(),
+					subject:  a.QualifiedName(),
+					order:    len(targets),
+					resolved: true,
 				})
-				killed++
 			}
 		} else {
-			// Pool agent: discover instances (static for bounded, live for unlimited).
-			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, pool, cityName, sessionTemplate, sp) {
-				sn := lookupSessionNameOrLegacy(store, cityName, qualifiedInstance, sessionTemplate)
-				if sp.IsRunning(sn) {
-					if err := sp.Stop(sn); err != nil {
-						fmt.Fprintf(stderr, "gc rig restart: stopping %s: %v\n", sn, err) //nolint:errcheck // best-effort stderr
-						continue
-					}
-					rec.Record(events.Event{
-						Type:    events.SessionStopped,
-						Actor:   eventActor(),
-						Subject: qualifiedInstance,
-					})
-					killed++
+			// Pool agent: resolve live instances from beads first, then legacy discovery.
+			for _, ref := range resolvePoolSessionRefs(store, a.Name, a.Dir, pool, cityName, sessionTemplate, sp, stderr) {
+				if !sp.IsRunning(ref.sessionName) {
+					continue
 				}
+				targets = append(targets, stopTarget{
+					name:     ref.sessionName,
+					template: a.QualifiedName(),
+					subject:  ref.qualifiedInstance,
+					order:    len(targets),
+					resolved: true,
+				})
 			}
 		}
 	}
+	dependencyCfg := cfg
+	if dependencyCfg == nil {
+		dependencyCfg = &config.City{Agents: agents}
+	}
+	killed := stopTargetsBounded(targets, dependencyCfg, sp, rec, eventActor(), io.Discard, stderr)
 
 	fmt.Fprintf(stdout, "Restarted %d agent(s) in rig '%s' (killed sessions; reconciler will restart)\n", killed, rigName) //nolint:errcheck // best-effort stdout
 	return 0

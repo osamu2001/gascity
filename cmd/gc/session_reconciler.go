@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -22,7 +21,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -58,6 +56,33 @@ func derivePoolDesired(desiredState map[string]TemplateParams, cfg *config.City)
 	return counts
 }
 
+// allDependenciesAliveForTemplate checks that all template dependencies of a
+// resolved logical template have at least one alive instance. Uses the
+// runtime.Provider directly instead of agent types for liveness checks.
+func allDependenciesAliveForTemplate(
+	template string,
+	cfg *config.City,
+	desiredState map[string]TemplateParams,
+	sp runtime.Provider,
+	cityName string,
+	store beads.Store,
+) bool {
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil || len(cfgAgent.DependsOn) == 0 {
+		return true
+	}
+	for _, dep := range cfgAgent.DependsOn {
+		depCfg := findAgentByTemplate(cfg, dep)
+		if depCfg == nil {
+			continue // dependency not in config — skip
+		}
+		if !dependencyTemplateAlive(dep, cfg, desiredState, sp, cityName, store) {
+			return false
+		}
+	}
+	return true
+}
+
 // allDependenciesAlive checks that all template dependencies of a session
 // have at least one alive instance. Uses the runtime.Provider directly
 // instead of agent types for liveness checks.
@@ -69,43 +94,7 @@ func allDependenciesAlive(
 	cityName string,
 	store beads.Store,
 ) bool {
-	template := session.Metadata["template"]
-	cfgAgent := findAgentByTemplate(cfg, template)
-	if cfgAgent == nil || len(cfgAgent.DependsOn) == 0 {
-		return true
-	}
-	st := cfg.Workspace.SessionTemplate
-	for _, dep := range cfgAgent.DependsOn {
-		depCfg := findAgentByTemplate(cfg, dep)
-		if depCfg == nil {
-			continue // dependency not in config — skip
-		}
-		if depCfg.Pool != nil {
-			// Pool: check if any instance is alive via Provider (includes zombie detection).
-			anyAlive := false
-			for sn, tp := range desiredState {
-				if tp.TemplateName == dep && sp.IsRunning(sn) && sp.ProcessAlive(sn, tp.Hints.ProcessNames) {
-					anyAlive = true
-					break
-				}
-			}
-			if !anyAlive {
-				return false
-			}
-		} else {
-			// Fixed agent: check single instance via Provider.
-			sn := lookupSessionNameOrLegacy(store, cityName, dep, st)
-			depTP, hasDep := desiredState[sn]
-			var depProcessNames []string
-			if hasDep {
-				depProcessNames = depTP.Hints.ProcessNames
-			}
-			if !sp.IsRunning(sn) || !sp.ProcessAlive(sn, depProcessNames) {
-				return false
-			}
-		}
-	}
-	return true
+	return allDependenciesAliveForTemplate(normalizedSessionTemplate(session, cfg), cfg, desiredState, sp, cityName, store)
 }
 
 // reconcileSessionBeads performs bead-driven reconciliation using wake/sleep
@@ -168,7 +157,7 @@ func reconcileSessionBeads(
 	}
 
 	// Phase 1: Forward pass (topo order) — wake sessions, handle alive state.
-	wakeCount := 0
+	var startCandidates []startCandidate
 	for i := range ordered {
 		session := &ordered[i]
 
@@ -278,7 +267,10 @@ func reconcileSessionBeads(
 		// Config drift: if alive and config changed, drain for restart.
 		// Live-only drift: re-apply session_live without restart.
 		if alive {
-			template := session.Metadata["template"]
+			template := tp.TemplateName
+			if template == "" {
+				template = normalizedSessionTemplate(*session, cfg)
+			}
 			storedHash := session.Metadata["config_hash"]
 			if sh := session.Metadata["started_config_hash"]; sh != "" {
 				storedHash = sh
@@ -375,100 +367,11 @@ func reconcileSessionBeads(
 			if sessionIsQuarantined(*session, clk) {
 				continue // crash-loop protection
 			}
-			if wakeCount >= defaultMaxWakesPerTick {
-				continue // budget exceeded, defer to next tick
-			}
-			if !allDependenciesAlive(*session, cfg, desiredState, sp, cityName, store) {
-				continue // dependencies not ready
-			}
-
-			// Two-phase wake: persist metadata BEFORE starting process.
-			if _, _, err := preWakeCommit(session, store, clk); err != nil {
-				fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %v\n", name, err) //nolint:errcheck
-				continue
-			}
-
-			// Start via Provider directly with startup timeout.
-			startCtx := ctx
-			var startCancel context.CancelFunc
-			if startupTimeout > 0 {
-				startCtx, startCancel = context.WithTimeout(ctx, startupTimeout)
-			}
-			agentCfg := templateParamsToConfig(tp)
-
-			// Compute config fingerprint BEFORE applying session-specific
-			// command modifications (session key, resume flag). The stored
-			// hash must match the drift-detection hash, which uses the
-			// unmodified templateParamsToConfig output.
-			coreHash := runtime.CoreFingerprint(agentCfg)
-			liveHash := runtime.LiveFingerprint(agentCfg)
-
-			// Bead work_dir overrides config-derived WorkDir (agent may
-			// have updated it, e.g. after creating a git worktree).
-			// Priority: task bead work_dir > session bead work_dir > config.
-			if wd := resolveTaskWorkDir(store, session.Metadata["template"]); wd != "" {
-				agentCfg.WorkDir = wd
-			} else if wd := session.Metadata["work_dir"]; wd != "" {
-				agentCfg.WorkDir = wd
-			}
-			if sk := session.Metadata["session_key"]; sk != "" && tp.ResolvedProvider != nil {
-				firstStart := session.Metadata["started_config_hash"] == ""
-				agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, tp.ResolvedProvider, firstStart)
-			}
-			generation, _ := strconv.Atoi(session.Metadata["generation"])
-			if generation <= 0 {
-				generation = sessionpkg.DefaultGeneration
-			}
-			continuationEpoch, _ := strconv.Atoi(session.Metadata["continuation_epoch"])
-			if continuationEpoch <= 0 {
-				continuationEpoch = sessionpkg.DefaultContinuationEpoch
-			}
-			instanceToken := session.Metadata["instance_token"]
-			if instanceToken == "" {
-				instanceToken = sessionpkg.NewInstanceToken()
-				_ = store.SetMetadata(session.ID, "instance_token", instanceToken)
-				session.Metadata["instance_token"] = instanceToken
-			}
-			agentCfg.Env = mergeEnv(agentCfg.Env, sessionpkg.RuntimeEnv(
-				session.ID,
-				name,
-				generation,
-				continuationEpoch,
-				instanceToken,
-			))
-			agentCfg = runtime.SyncWorkDirEnv(agentCfg)
-			err := sp.Start(startCtx, name, agentCfg)
-			if startCancel != nil {
-				startCancel()
-			}
-			if err != nil {
-				fmt.Fprintf(stderr, "session reconciler: starting %s: %v\n", name, err) //nolint:errcheck
-				// Clear last_woke_at so checkStability on the next tick
-				// doesn't see a recent wake and double-count this failure.
-				_ = store.SetMetadata(session.ID, "last_woke_at", "")
-				session.Metadata["last_woke_at"] = ""
-				recordWakeFailure(session, store, clk)
-				continue
-			}
-
-			wakeCount++
-			fmt.Fprintf(stdout, "Woke session '%s'\n", tp.DisplayName()) //nolint:errcheck
-			rec.Record(events.Event{
-				Type:    events.SessionWoke,
-				Actor:   "gc",
-				Subject: tp.DisplayName(),
+			startCandidates = append(startCandidates, startCandidate{
+				session: session,
+				tp:      tp,
+				order:   len(startCandidates),
 			})
-
-			// Store config fingerprint using the pre-computed hashes
-			// (from unmodified agentCfg above).
-			if err := store.SetMetadataBatch(session.ID, map[string]string{
-				"config_hash":         coreHash,
-				"started_config_hash": coreHash,
-				"live_hash":           liveHash,
-				"started_live_hash":   liveHash,
-			}); err != nil {
-				fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
-			}
 		}
 
 		if shouldWake && alive {
@@ -488,13 +391,18 @@ func reconcileSessionBeads(
 		}
 	}
 
+	plannedWakes := executePlannedStarts(
+		ctx, startCandidates, cfg, desiredState, sp, store, cityName,
+		clk, rec, startupTimeout, stdout, stderr,
+	)
+
 	// Phase 2: Advance all in-flight drains.
 	sessionLookup := func(id string) *beads.Bead {
 		return beadByID[id]
 	}
 	advanceSessionDrains(dt, sp, store, sessionLookup, cfg, poolDesired, workSet, readyWaitSet, clk)
 
-	return wakeCount
+	return plannedWakes
 }
 
 // resolveTaskWorkDir checks the agent's assigned task beads for a work_dir

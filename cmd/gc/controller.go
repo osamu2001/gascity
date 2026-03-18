@@ -298,29 +298,30 @@ func gracefulStopAll(
 	sp runtime.Provider,
 	timeout time.Duration,
 	rec events.Recorder,
+	cfg *config.City,
+	store beads.Store,
 	stdout, stderr io.Writer,
 ) {
 	if timeout <= 0 || len(names) == 0 {
 		// Immediate kill (no grace period).
-		for _, name := range names {
-			if err := sp.Stop(name); err != nil {
-				fmt.Fprintf(stderr, "gc stop: stopping %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
-			} else {
-				fmt.Fprintf(stdout, "Stopped agent '%s'\n", name) //nolint:errcheck // best-effort stdout
-				rec.Record(events.Event{
-					Type: events.SessionStopped, Actor: "gc", Subject: name,
-				})
-			}
-		}
+		stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, sp, rec, "gc", stdout, stderr)
 		return
 	}
-
-	// Pass 1: interrupt all.
-	for _, name := range names {
-		_ = sp.Interrupt(name) // best-effort
+	targets := stopTargetsForNames(names, cfg, store, stderr)
+	targetByName := make(map[string]stopTarget, len(targets))
+	for _, target := range targets {
+		targetByName[target.name] = target
 	}
-	fmt.Fprintf(stdout, "Sent interrupt to %d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
-		len(names), timeout)
+
+	// Pass 1: interrupt all in a single bounded broadcast wave.
+	// This is intentionally flat: interrupts are a best-effort graceful hint,
+	// while pass 2 keeps reverse dependency ordering for any survivors.
+	// The configured timeout is the post-dispatch grace window; dispatch
+	// latency is intentionally outside that budget so every interrupted
+	// session still gets the full graceful-exit wait once nudged.
+	sent := interruptTargetsBounded(targets, sp, stderr)
+	fmt.Fprintf(stdout, "Sent interrupt to %d/%d agent(s), waiting %s...\n", //nolint:errcheck // best-effort stdout
+		sent, len(names), timeout)
 
 	// Poll until all agents exit or timeout expires (avoid sleeping full duration).
 	pollInterval := 500 * time.Millisecond
@@ -345,23 +346,22 @@ func gracefulStopAll(
 	}
 
 	// Pass 2: kill survivors.
+	var survivors []string
 	for _, name := range names {
 		if !sp.IsRunning(name) {
 			fmt.Fprintf(stdout, "Agent '%s' exited gracefully\n", name) //nolint:errcheck // best-effort stdout
+			subject := name
+			if target, ok := targetByName[name]; ok && target.subject != "" {
+				subject = target.subject
+			}
 			rec.Record(events.Event{
-				Type: events.SessionStopped, Actor: "gc", Subject: name,
+				Type: events.SessionStopped, Actor: "gc", Subject: subject,
 			})
 			continue
 		}
-		if err := sp.Stop(name); err != nil {
-			fmt.Fprintf(stderr, "gc stop: stopping %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
-		} else {
-			fmt.Fprintf(stdout, "Stopped agent '%s'\n", name) //nolint:errcheck // best-effort stdout
-			rec.Record(events.Event{
-				Type: events.SessionStopped, Actor: "gc", Subject: name,
-			})
-		}
+		survivors = append(survivors, name)
 	}
+	stopTargetsBounded(filterStopTargets(targets, survivors), cfg, sp, rec, "gc", stdout, stderr)
 }
 
 // controllerLoop is a compatibility shim that wraps CityRuntime.run().

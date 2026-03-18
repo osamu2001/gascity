@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // resolveSessionName returns the session name for a qualified agent name.
@@ -49,6 +50,35 @@ func sessionNameFromBeadID(beadID string) string {
 	return "s-" + strings.ReplaceAll(beadID, "/", "--")
 }
 
+func sessionBeadAgentName(bead beads.Bead) string {
+	if bead.Metadata["agent_name"] != "" {
+		return bead.Metadata["agent_name"]
+	}
+	for _, label := range bead.Labels {
+		if strings.HasPrefix(label, "agent:") {
+			return strings.TrimPrefix(label, "agent:")
+		}
+	}
+	return ""
+}
+
+func normalizedSessionTemplate(bead beads.Bead, cfg *config.City) string {
+	template := bead.Metadata["template"]
+	if cfg == nil {
+		return template
+	}
+	if template != "" && findAgentByTemplate(cfg, template) != nil {
+		return template
+	}
+	agentName := sessionBeadAgentName(bead)
+	if agentName != "" {
+		if resolved := resolveAgentTemplate(agentName, cfg); resolved != "" && findAgentByTemplate(cfg, resolved) != nil {
+			return resolved
+		}
+	}
+	return template
+}
+
 // findSessionNameByTemplate searches for an open session bead with the given
 // template and returns its session_name metadata. Returns "" if not found.
 // Pool instance beads (those with pool_slot metadata) are skipped to prevent
@@ -69,16 +99,18 @@ func findSessionNameByTemplate(store beads.Store, template string) string {
 		if b.Status == "closed" {
 			continue
 		}
-		// Skip pool instance beads — they should only be matched
-		// by their specific instance name, not the base template.
-		if b.Metadata["pool_slot"] != "" {
-			continue
-		}
-		// Prefer agent_name match (managed agent bead from syncSessionBeads).
-		if b.Metadata["agent_name"] == template {
+		// Exact agent_name matches are authoritative, including pool
+		// instances such as "worker-1" that carry pool_slot metadata.
+		if sessionBeadAgentName(b) == template {
 			if sn := b.Metadata["session_name"]; sn != "" {
 				return sn
 			}
+		}
+		// Skip pool instance beads — they should only be matched
+		// by their specific instance name, not the base template/common_name
+		// fallback used for singleton lookups.
+		if b.Metadata["pool_slot"] != "" {
+			continue
 		}
 		// Record first template/common_name match as fallback.
 		if fallback == "" {
@@ -117,4 +149,39 @@ func lookupSessionNameOrLegacy(store beads.Store, cityName, qualifiedName, sessi
 		return sn
 	}
 	return agent.SessionNameFor(cityName, qualifiedName, sessionTemplate)
+}
+
+// lookupPoolSessionNames returns bead-backed session names for pool instances
+// under the given template-qualified agent. The result maps the logical
+// instance qualified name (for example "frontend/worker-1") to the actual
+// runtime session name.
+func lookupPoolSessionNames(store beads.Store, template string) (map[string]string, error) {
+	result := make(map[string]string)
+	if store == nil {
+		return result, nil
+	}
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		return result, err
+	}
+	for _, b := range all {
+		if b.Status == "closed" || b.Metadata["pool_slot"] == "" {
+			continue
+		}
+		agentName := sessionBeadAgentName(b)
+		if b.Metadata["template"] != template && resolvePoolSlot(agentName, template) == 0 {
+			continue
+		}
+		sessionName := b.Metadata["session_name"]
+		if sessionName == "" {
+			continue
+		}
+		if agentName == "" {
+			agentName = template + "-" + b.Metadata["pool_slot"]
+		}
+		if agentName != "" {
+			result[agentName] = sessionName
+		}
+	}
+	return result, nil
 }
