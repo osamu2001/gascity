@@ -19,10 +19,6 @@
 
 set -e
 
-# Trap unexpected exits from set -e to give a useful error instead of
-# a bare "exit status 1" that leaves the user with no clue.
-trap 'echo "gc-beads-bd: unexpected error at line $LINENO (exit $?)" >&2' ERR
-
 # --- Configuration ---
 
 # DOLT_PORT is set after derived paths are resolved (see allocate_port below).
