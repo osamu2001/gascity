@@ -97,20 +97,18 @@ func doSupervisorStart(stdout, stderr io.Writer) int {
 }
 
 func ensureSupervisorRunning(stdout, stderr io.Writer) int {
+	// Always regenerate the service file so upgrades pick up template
+	// changes (e.g. PATH captured from the user's shell).
+	if doSupervisorInstall(stdout, stderr) != 0 {
+		if supervisorAlive() != 0 {
+			return 0
+		}
+		// Fall back to bare start if install fails (e.g., unsupported OS).
+		return doSupervisorStart(stdout, stderr)
+	}
 	if supervisorAlive() != 0 {
 		return 0
 	}
-	// Auto-install platform service if not yet registered.
-	if !isSupervisorServiceInstalled() {
-		if doSupervisorInstall(stdout, stderr) != 0 {
-			// Fall back to bare start if install fails (e.g., unsupported OS).
-			return doSupervisorStart(stdout, stderr)
-		}
-		// doSupervisorInstall already loads/starts the service.
-		return waitForSupervisorReady(stderr)
-	}
-	// Service is installed but not running — kick it.
-	startInstalledService(stderr)
 	return waitForSupervisorReady(stderr)
 }
 
