@@ -1,6 +1,4 @@
----
-title: "CLI Reference"
----
+# CLI Reference
 
 > **Auto-generated** — do not edit. Run `go run ./cmd/genschema` to regenerate.
 
@@ -33,7 +31,7 @@ gc [flags]
 | [gc events](#gc-events) | Show the event log |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
-| [gc handoff](#gc-handoff) | Send handoff mail and restart agent session |
+| [gc handoff](#gc-handoff) | Send handoff mail and restart this session |
 | [gc help](#gc-help) | Help about any command |
 | [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
 | [gc init](#gc-init) | Initialize a new city |
@@ -42,7 +40,6 @@ gc [flags]
 | [gc order](#gc-order) | Manage orders (periodic formula dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
-| [gc ralph](#gc-ralph) | Drive inline Ralph run/check loops |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
@@ -60,6 +57,7 @@ gc [flags]
 | [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
+| [gc workflow](#gc-workflow) | Run explicit graph-first workflow control beads |
 
 ## gc agent
 
@@ -632,7 +630,7 @@ gc event emit <type> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--actor` | string |  | Actor name (default: GC_AGENT or "human") |
+| `--actor` | string |  | Actor name (default: $GC_ALIAS, else $GC_AGENT, else $GC_SESSION_ID, else "human") |
 | `--message` | string |  | Event message |
 | `--payload` | string |  | JSON payload to attach to the event |
 | `--subject` | string |  | Event subject (e.g. bead ID) |
@@ -772,15 +770,15 @@ restarts the session. Equivalent to:
   gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
-Remote handoff (--target): sends mail to the target session alias and kills its
+Remote handoff (--target): sends mail to a target session and kills its
 session. The reconciler restarts it with the handoff mail waiting.
 Returns immediately. Equivalent to:
 
   gc mail send &lt;target&gt; &lt;subject&gt; [message]
   gc session kill &lt;target&gt;
 
-Self-handoff requires session context (GC_ALIAS/GC_CITY env vars).
-Remote handoff can be run from any context with access to the city.
+Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
+GC_SESSION_NAME and GC_CITY). Remote handoff accepts a session alias or ID.
 
 ```
 gc handoff <subject> [message] [flags]
@@ -788,7 +786,7 @@ gc handoff <subject> [message] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--target` | string |  | Remote agent to handoff (sends mail + kills session) |
+| `--target` | string |  | Remote session alias or ID to handoff (sends mail + kills session) |
 
 ## gc help
 
@@ -850,7 +848,7 @@ gc init
 
 ## gc mail
 
-Send and receive messages between sessions and humans.
+Send and receive messages between agents and humans.
 
 Mail is implemented as beads with type="message". Messages have a
 sender, recipient, subject, and body. Use "gc mail check --inject" in agent
@@ -888,7 +886,7 @@ gc mail archive <id>
 
 ## gc mail check
 
-Check for unread mail addressed to a session alias.
+Check for unread mail addressed to a session alias or mailbox.
 
 Without --inject: prints the count and exits 0 if mail exists, 1 if
 empty. With --inject: outputs a &lt;system-reminder&gt; block suitable for
@@ -1012,7 +1010,7 @@ gc mail send [<to>] [<body>] [flags]
 **Example:**
 
 ```
-  gc mail send mayor "Build is green"
+gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
   gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
   gc mail send --to mayor "Build is green"
@@ -1042,7 +1040,7 @@ gc mail thread <thread-id>
 
 Inspect and deliver deferred nudges.
 
-Deferred nudges are reminders that were queued because the target session
+Deferred nudges are reminders that were queued because the target agent
 was asleep or was not at a safe interactive boundary yet.
 
 ```
@@ -1215,30 +1213,6 @@ gc prime [agent-name] [flags]
 |------|------|---------|-------------|
 | `--hook` | bool |  | compatibility mode for runtime hook invocations |
 
-## gc ralph
-
-Drive inline Ralph run/check loops
-
-```
-gc ralph
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| [gc ralph tick](#gc-ralph-tick) | Process ready Ralph run/check beads in the current store |
-
-## gc ralph tick
-
-Process ready Ralph run/check beads in the current store
-
-```
-gc ralph tick [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--run-target` | string |  | fallback run target when gc.run_target metadata is absent |
-
 ## gc register
 
 Register a city directory with the machine-wide supervisor.
@@ -1391,19 +1365,20 @@ gc runtime
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc runtime drain](#gc-runtime-drain) | Signal an agent to drain (wind down gracefully) |
+| [gc runtime drain](#gc-runtime-drain) | Signal a session to drain (wind down gracefully) |
 | [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
-| [gc runtime drain-check](#gc-runtime-drain-check) | Check if this agent is draining (exit 0 = draining) |
+| [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
 | [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (blocks until killed) |
-| [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on an agent |
+| [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
 
 ## gc runtime drain
 
-Signal an agent to drain — wind down its current work gracefully.
+Signal a session to drain — wind down its current work gracefully.
 
 Sets a GC_DRAIN metadata flag on the session. The agent should check
 for drain status periodically (via "gc runtime drain-check") and finish
-its current task before exiting. Use "gc runtime undrain" to cancel.
+its current task before exiting. Pass a session alias or ID. Use
+"gc runtime undrain" to cancel.
 
 ```
 gc runtime drain <name>
@@ -1414,7 +1389,7 @@ gc runtime drain <name>
 Acknowledge a drain signal — tell the controller to stop this session.
 
 Sets GC_DRAIN_ACK metadata on the session. The controller will stop
-the session on its next reconcile tick. Call this after the agent has
+the session on its next reconcile tick. Call this after the session has
 finished its current work in response to a drain signal.
 
 ```
@@ -1423,11 +1398,11 @@ gc runtime drain-ack [name]
 
 ## gc runtime drain-check
 
-Check if this agent is currently draining.
+Check if a session is currently draining.
 
 Returns exit code 0 if draining, 1 if not. Designed for use in
-conditionals: "if gc runtime drain-check; then finish-up; fi".
-Uses $GC_AGENT and $GC_CITY env vars when called without arguments.
+conditionals: "if gc runtime drain-check; then finish-up; fi". Without
+arguments, uses the current session context.
 
 ```
 gc runtime drain-check [name]
@@ -1435,16 +1410,15 @@ gc runtime drain-check [name]
 
 ## gc runtime request-restart
 
-Signal the controller to stop and restart this agent session.
+Signal the controller to stop and restart this session.
 
 Sets GC_RESTART_REQUESTED metadata on the session, then blocks forever.
 The controller will stop the session on its next reconcile tick and
 restart it fresh. The blocking prevents the agent from consuming more
 context while waiting.
 
-This command is designed to be called from within an agent session
-(uses GC_AGENT and GC_CITY env vars). It emits an agent.draining event
-before blocking.
+This command is designed to be called from within a session context.
+It emits a session.draining event before blocking.
 
 ```
 gc runtime request-restart
@@ -1452,10 +1426,10 @@ gc runtime request-restart
 
 ## gc runtime undrain
 
-Cancel a pending drain signal on an agent.
+Cancel a pending drain signal on a session.
 
 Clears the GC_DRAIN and GC_DRAIN_ACK metadata flags, allowing the
-agent to continue normal operation.
+session to continue normal operation. Pass a session alias or ID.
 
 ```
 gc runtime undrain <name>
@@ -1520,9 +1494,9 @@ gc session
 | [gc session close](#gc-session-close) | Close a session permanently |
 | [gc session kill](#gc-session-kill) | Force-kill session runtime (reconciler restarts) |
 | [gc session list](#gc-session-list) | List chat sessions |
-| [gc session logs](#gc-session-logs) | Show session logs for an agent |
+| [gc session logs](#gc-session-logs) | Show session logs for a session |
 | [gc session new](#gc-session-new) | Create a new chat session from an agent template |
-| [gc session nudge](#gc-session-nudge) | Send a text message to a running agent session |
+| [gc session nudge](#gc-session-nudge) | Send a text message to a running session |
 | [gc session peek](#gc-session-peek) | View session output without attaching |
 | [gc session prune](#gc-session-prune) | Close old suspended sessions |
 | [gc session rename](#gc-session-rename) | Rename a session |
@@ -1538,20 +1512,20 @@ If the session is active with a live tmux session, reattaches.
 If the session is suspended or the tmux session died, resumes
 using the provider's resume mechanism (if supported) or restarts.
 
-Accepts a session ID (e.g., gc-42) or template name (e.g., overseer).
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
-gc session attach <session-id-or-name>
+gc session attach <session-id-or-alias>
 ```
 
 ## gc session close
 
 End a conversation. Stops the runtime if active and closes the bead.
 
-Accepts a session ID (e.g., gc-42) or template name (e.g., overseer).
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
-gc session close <session-id-or-name>
+gc session close <session-id-or-alias>
 ```
 
 ## gc session kill
@@ -1562,10 +1536,10 @@ The session remains marked as active, so the reconciler will detect the dead
 process and restart it according to the session's lifecycle rules. This is
 useful for unsticking a session without losing its conversation history.
 
-Accepts a session ID (e.g., gc-42) or template name (e.g., overseer).
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
-gc session kill <session-id-or-name>
+gc session kill <session-id-or-alias>
 ```
 
 ## gc session list
@@ -1584,9 +1558,9 @@ gc session list [flags]
 
 ## gc session logs
 
-Show structured session log messages from an agent's JSONL session file.
+Show structured session log messages from a session's JSONL file.
 
-Reads the agent's session log, resolves the conversation DAG, and prints
+Reads the session log, resolves the conversation DAG, and prints
 messages in chronological order. Searches default paths (~/.claude/projects/)
 and any extra paths from [daemon] observe_paths in city.toml.
 
@@ -1594,15 +1568,15 @@ Use --tail to control how many compaction segments to show (0 = all).
 Use -f to follow new messages as they arrive.
 
 ```
-gc session logs <agent-name> [flags]
+gc session logs <session> [flags]
 ```
 
 **Example:**
 
 ```
 gc session logs mayor
-  gc session logs mayor --tail 0
-  gc session logs myrig/polecat-1 -f
+  gc session logs gc-123 --tail 0
+  gc session logs s-gc-123 -f
 ```
 
 | Flag | Type | Default | Description |
@@ -1630,22 +1604,22 @@ gc session new helper
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--alias` | string |  | stable session alias used for human-readable targeting |
+| `--alias` | string |  | human-friendly session identifier for commands and mail |
 | `--no-attach` | bool |  | create session without attaching |
 | `--title` | string |  | human-readable session title |
 
 ## gc session nudge
 
-Send text input to a running agent session via the runtime provider.
+Send text input to a running session via the runtime provider.
 
 The message is delivered as text content to the session's input. This is
 equivalent to typing the message into the session's terminal.
 
-Accepts a session ID, session name, or agent name. Multi-word messages are
+Accepts a session ID or session alias. Multi-word messages are
 joined automatically.
 
 ```
-gc session nudge <id-or-name> <message...> [flags]
+gc session nudge <id-or-alias> <message...> [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -1657,7 +1631,7 @@ gc session nudge <id-or-name> <message...> [flags]
 View session output without attaching
 
 ```
-gc session peek <session-id-or-name> [flags]
+gc session peek <session-id-or-alias> [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -1689,7 +1663,7 @@ gc session prune --before 7d
 Rename a session
 
 ```
-gc session rename <session-id-or-name> <title>
+gc session rename <session-id-or-alias> <title>
 ```
 
 ## gc session suspend
@@ -1697,10 +1671,10 @@ gc session rename <session-id-or-name> <title>
 Suspend an active session by stopping its runtime process.
 The session bead persists and can be resumed later.
 
-Accepts a session ID (e.g., gc-42) or template name (e.g., overseer).
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
-gc session suspend <session-id-or-name>
+gc session suspend <session-id-or-alias>
 ```
 
 ## gc session wait
@@ -1708,7 +1682,7 @@ gc session suspend <session-id-or-name>
 Register a dependency wait for a session
 
 ```
-gc session wait [session-id-or-name] [flags]
+gc session wait [session-id-or-alias] [flags]
 ```
 
 | Flag | Type | Default | Description |
@@ -1726,17 +1700,17 @@ After waking, the reconciler will start the session on its next tick
 if it has wake reasons (e.g., a matching config agent). If the session
 has no wake reasons, it remains asleep.
 
-Accepts a session ID (e.g., gc-42) or template name (e.g., overseer).
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
-gc session wake <session-id-or-name>
+gc session wake <session-id-or-alias>
 ```
 
 **Example:**
 
 ```
 gc session wake gc-42
-  gc session wake overseer
+  gc session wake mayor
 ```
 
 ## gc skill
@@ -2044,3 +2018,24 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
+
+## gc workflow
+
+Run explicit graph-first workflow control beads
+
+```
+gc workflow
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc workflow control](#gc-workflow-control) | Execute a graph.v2 control bead in the current city |
+
+## gc workflow control
+
+Execute a graph.v2 control bead in the current city
+
+```
+gc workflow control <bead-id>
+```
+

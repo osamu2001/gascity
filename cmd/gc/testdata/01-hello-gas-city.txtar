@@ -67,8 +67,8 @@ stdout 'Create a script that prints hello world'
 
 cd $WORK/bright-lights
 
-# Attach to an agent
-# exec gc session attach mayor
+# Sling work to a provider (requires real Claude, stubbed here)
+# exec gc sling claude
 
 # Start the city (already initialized)
 exec gc start
