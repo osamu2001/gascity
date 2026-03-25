@@ -898,6 +898,11 @@ func (c ConvergenceConfig) MaxTotalOrDefault() int {
 
 // DaemonConfig holds controller daemon settings.
 type DaemonConfig struct {
+	// GraphWorkflows enables formula v2 graph workflow infrastructure:
+	// the workflow-control implicit agent, graph.v2 formula compilation,
+	// and batch graph-apply bead creation. Requires bd with --graph support.
+	// Default: false (opt-in while the feature stabilizes).
+	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
 	// PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s".
 	PatrolInterval string `toml:"patrol_interval,omitempty" jsonschema:"default=30s"`
 	// MaxRestarts is the maximum number of agent restarts within RestartWindow before
@@ -1440,7 +1445,7 @@ func InjectImplicitAgents(cfg *City) {
 
 	configured := configuredProviders(cfg)
 	if len(configured) == 0 {
-		if !existing[agentKey{"", WorkflowControlAgentName}] {
+		if cfg.Daemon.GraphWorkflows && !existing[agentKey{"", WorkflowControlAgentName}] {
 			cfg.Agents = append(cfg.Agents, Agent{
 				Name:         WorkflowControlAgentName,
 				Description:  "Built-in deterministic graph.v2 workflow control worker",
@@ -1492,7 +1497,7 @@ func InjectImplicitAgents(cfg *City) {
 			})
 		}
 	}
-	if !existing[agentKey{"", WorkflowControlAgentName}] {
+	if cfg.Daemon.GraphWorkflows && !existing[agentKey{"", WorkflowControlAgentName}] {
 		cfg.Agents = append(cfg.Agents, Agent{
 			Name:         WorkflowControlAgentName,
 			Description:  "Built-in deterministic graph.v2 workflow control worker",

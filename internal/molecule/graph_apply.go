@@ -12,6 +12,11 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
+// GraphApplyEnabled controls whether Instantiate uses the GraphApplyStore
+// batch path. When false, falls back to sequential bead creation.
+// Set by the daemon config loader from [daemon] graph_workflows.
+var GraphApplyEnabled bool
+
 func graphApplyTracef(format string, args ...any) {
 	path := os.Getenv("GC_SLING_TRACE")
 	if path == "" {

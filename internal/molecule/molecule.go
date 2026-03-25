@@ -116,10 +116,12 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
-	if applier, ok := store.(beads.GraphApplyStore); ok {
-		return instantiateViaGraphApply(ctx, applier, recipe, opts)
+	if GraphApplyEnabled {
+		if applier, ok := store.(beads.GraphApplyStore); ok {
+			return instantiateViaGraphApply(ctx, applier, recipe, opts)
+		}
+		graphApplyTracef("graph-apply unavailable recipe=%s store=%T", recipe.Name, store)
 	}
-	graphApplyTracef("graph-apply unavailable recipe=%s store=%T", recipe.Name, store)
 
 	// Merge variable defaults from recipe with caller-provided vars.
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
@@ -295,10 +297,12 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	if len(recipe.Steps) == 0 {
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
 	}
-	if applier, ok := store.(beads.GraphApplyStore); ok {
-		return instantiateFragmentViaGraphApply(ctx, store, applier, recipe, opts)
+	if GraphApplyEnabled {
+		if applier, ok := store.(beads.GraphApplyStore); ok {
+			return instantiateFragmentViaGraphApply(ctx, store, applier, recipe, opts)
+		}
+		graphApplyTracef("graph-apply fragment-unavailable root=%s store=%T", opts.RootID, store)
 	}
-	graphApplyTracef("graph-apply fragment-unavailable root=%s store=%T", opts.RootID, store)
 
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
 	idMapping := make(map[string]string, len(recipe.Steps))

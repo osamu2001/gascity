@@ -377,8 +377,17 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 	}
 }
 
+// GraphWorkflowsEnabled controls whether graph.v2 formula compilation is
+// allowed. When false, isGraphWorkflow always returns false regardless of
+// the formula's Version field, causing v2 formulas to compile as v1.
+// Set by the daemon config loader from [daemon] graph_workflows.
+var GraphWorkflowsEnabled bool
+
 func isGraphWorkflow(f *Formula) bool {
 	if f == nil {
+		return false
+	}
+	if !GraphWorkflowsEnabled {
 		return false
 	}
 	if f.Version >= 2 {
