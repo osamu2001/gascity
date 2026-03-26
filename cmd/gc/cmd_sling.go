@@ -1141,7 +1141,7 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, sourceBeadID, scopeKind
 			continue
 		}
 		switch step.Metadata["gc.kind"] {
-		case "workflow", "scope", "ralph", "retry":
+		case "workflow", "scope":
 			continue
 		}
 		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cfg)
