@@ -306,9 +306,36 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	}
 
 	// For steps with children (scoped ralph), add children as sub-steps.
+	// Children may have retry/ralph config — propagate their metadata
+	// so the beads get the correct gc.kind for logical grouping.
 	if len(step.Children) > 0 {
 		for _, child := range step.Children {
 			childID := attemptPrefix + "." + child.ID
+			childMeta := map[string]string{
+				"gc.attempt":  strconv.Itoa(attemptNum),
+				"gc.step_ref": childID,
+				"gc.step_id":  child.ID,
+			}
+			// Copy formula-defined metadata from the child step.
+			for k, v := range child.Metadata {
+				if _, exists := childMeta[k]; !exists {
+					childMeta[k] = v
+				}
+			}
+			// Derive gc.kind from the child's retry/ralph config.
+			if child.Retry != nil {
+				childMeta["gc.kind"] = "retry"
+				childMeta["gc.max_attempts"] = strconv.Itoa(child.Retry.MaxAttempts)
+				if child.Retry.OnExhausted != "" {
+					childMeta["gc.on_exhausted"] = child.Retry.OnExhausted
+				} else {
+					childMeta["gc.on_exhausted"] = "hard_fail"
+				}
+			}
+			if child.Ralph != nil {
+				childMeta["gc.kind"] = "ralph"
+				childMeta["gc.max_attempts"] = strconv.Itoa(child.Ralph.MaxAttempts)
+			}
 			childStep := formula.RecipeStep{
 				ID:          childID,
 				Title:       child.Title,
@@ -316,10 +343,7 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 				Type:        child.Type,
 				Labels:      append([]string{}, child.Labels...),
 				Assignee:    child.Assignee,
-				Metadata: map[string]string{
-					"gc.attempt":  strconv.Itoa(attemptNum),
-					"gc.step_ref": childID,
-				},
+				Metadata:    childMeta,
 			}
 			if childStep.Type == "" {
 				childStep.Type = "task"
