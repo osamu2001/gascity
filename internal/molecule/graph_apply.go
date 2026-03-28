@@ -91,6 +91,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 	}
 
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
+	priorityOverride := clonePriority(opts.PriorityOverride)
 	graphWorkflow := len(recipe.Steps) > 0 && recipe.Steps[0].Metadata["gc.kind"] == "workflow"
 	rootKey := recipe.Steps[0].ID
 	rootIncluded := false
@@ -105,7 +106,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 		if recipe.RootOnly && i > 0 {
 			break
 		}
-		node, err := recipeStepToGraphNode(step, vars)
+		node, err := recipeStepToGraphNode(step, vars, priorityOverride)
 		if err != nil {
 			return nil, false, "", err
 		}
@@ -193,6 +194,14 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 	if err != nil {
 		return nil, fmt.Errorf("indexing existing logical beads: %w", err)
 	}
+	priorityOverride := clonePriority(opts.PriorityOverride)
+	if priorityOverride == nil {
+		root, err := store.Get(opts.RootID)
+		if err != nil {
+			return nil, fmt.Errorf("loading root bead %s: %w", opts.RootID, err)
+		}
+		priorityOverride = clonePriority(root.Priority)
+	}
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
 	externalDepsByStep := make(map[string][]ExternalDep)
 	for _, dep := range opts.ExternalDeps {
@@ -212,7 +221,7 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 	}
 
 	for _, step := range recipe.Steps {
-		node, err := recipeStepToGraphNode(step, vars)
+		node, err := recipeStepToGraphNode(step, vars, priorityOverride)
 		if err != nil {
 			return nil, err
 		}
@@ -264,12 +273,13 @@ func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, o
 	return plan, nil
 }
 
-func recipeStepToGraphNode(step formula.RecipeStep, vars map[string]string) (beads.GraphApplyNode, error) {
-	b := stepToBead(step, vars)
+func recipeStepToGraphNode(step formula.RecipeStep, vars map[string]string, priorityOverride *int) (beads.GraphApplyNode, error) {
+	b := stepToBead(step, vars, priorityOverride)
 	return beads.GraphApplyNode{
 		Key:         step.ID,
 		Title:       b.Title,
 		Type:        b.Type,
+		Priority:    clonePriority(b.Priority),
 		Description: b.Description,
 		Assignee:    b.Assignee,
 		From:        b.From,

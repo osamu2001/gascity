@@ -36,6 +36,10 @@ type Options struct {
 	// creation. Used by the convergence loop to prevent duplicate wisps
 	// on crash-retry.
 	IdempotencyKey string
+
+	// PriorityOverride forces every created bead to use the given priority.
+	// When nil, each step's compiled priority is used.
+	PriorityOverride *int
 }
 
 // FragmentOptions configures instantiation of a rootless recipe fragment into
@@ -52,6 +56,10 @@ type FragmentOptions struct {
 	// These deps are embedded at create time so readiness and assignment are
 	// correct before the fragment becomes visible to workers.
 	ExternalDeps []ExternalDep
+
+	// PriorityOverride forces every created bead to use the given priority.
+	// When nil, the existing workflow root's priority is inherited.
+	PriorityOverride *int
 }
 
 // ExternalDep binds a fragment step to an already-existing bead.
@@ -231,8 +239,9 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	}
 
 	result, err := Instantiate(ctx, store, recipe, Options{
-		Title: opts.Title,
-		Vars:  opts.Vars,
+		Title:            opts.Title,
+		Vars:             opts.Vars,
+		PriorityOverride: clonePriority(parentBead.Priority),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("instantiate: %w", err)
@@ -324,6 +333,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 
 	// Merge variable defaults from recipe with caller-provided vars.
 	vars := applyVarDefaults(opts.Vars, recipe.Vars)
+	priorityOverride := clonePriority(opts.PriorityOverride)
 
 	// Build the list of beads to create.
 	idMapping := make(map[string]string, len(recipe.Steps))
@@ -338,7 +348,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			break
 		}
 
-		b := stepToBead(step, vars)
+		b := stepToBead(step, vars, priorityOverride)
 		hasFutureBlocker := false
 		for _, dep := range recipe.Deps {
 			if dep.StepID != step.ID || dep.Type == "parent-child" {
@@ -498,8 +508,17 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	if len(recipe.Steps) == 0 {
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
 	}
+	priorityOverride := clonePriority(opts.PriorityOverride)
+	if priorityOverride == nil {
+		root, err := store.Get(opts.RootID)
+		if err != nil {
+			return nil, fmt.Errorf("loading root bead %s: %w", opts.RootID, err)
+		}
+		priorityOverride = clonePriority(root.Priority)
+	}
 	if GraphApplyEnabled {
 		if applier, ok := store.(beads.GraphApplyStore); ok {
+			opts.PriorityOverride = priorityOverride
 			return instantiateFragmentViaGraphApply(ctx, store, applier, recipe, opts)
 		}
 		graphApplyTracef("graph-apply fragment-unavailable root=%s store=%T", opts.RootID, store)
@@ -526,7 +545,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	}
 
 	for _, step := range recipe.Steps {
-		b := stepToBead(step, vars)
+		b := stepToBead(step, vars, priorityOverride)
 		hasFutureBlocker := false
 		for _, dep := range recipe.Deps {
 			if dep.StepID != step.ID || dep.Type == "parent-child" {
@@ -619,7 +638,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 }
 
 // stepToBead converts a RecipeStep to a Bead with variable substitution.
-func stepToBead(step formula.RecipeStep, vars map[string]string) beads.Bead {
+func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverride *int) beads.Bead {
 	stepType := step.Type
 	if stepType == "" {
 		stepType = "task"
@@ -629,6 +648,7 @@ func stepToBead(step formula.RecipeStep, vars map[string]string) beads.Bead {
 		Title:       formula.Substitute(step.Title, vars),
 		Description: formula.Substitute(step.Description, vars),
 		Type:        stepType,
+		Priority:    resolveStepPriority(step, priorityOverride),
 		Labels:      step.Labels,
 		Assignee:    step.Assignee,
 	}
@@ -645,6 +665,21 @@ func stepToBead(step formula.RecipeStep, vars map[string]string) beads.Bead {
 	}
 
 	return b
+}
+
+func resolveStepPriority(step formula.RecipeStep, priorityOverride *int) *int {
+	if priorityOverride != nil {
+		return clonePriority(priorityOverride)
+	}
+	return clonePriority(step.Priority)
+}
+
+func clonePriority(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
 }
 
 // applyVarDefaults merges formula variable defaults with caller-provided

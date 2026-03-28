@@ -18,6 +18,10 @@ type graphApplySpyStore struct {
 	result *beads.GraphApplyResult
 }
 
+func priorityPtr(v int) *int {
+	return &v
+}
+
 func (s *graphApplySpyStore) ApplyGraphPlan(_ context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
 	s.plan = plan
 	if s.result != nil {
@@ -97,6 +101,8 @@ func TestInstantiateSimple(t *testing.T) {
 
 func TestInstantiateUsesGraphApplyStoreWhenAvailable(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+	GraphApplyEnabled = true
+	t.Cleanup(func() { GraphApplyEnabled = false })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -135,6 +141,8 @@ func TestInstantiateUsesGraphApplyStoreWhenAvailable(t *testing.T) {
 
 func TestInstantiateUsesGraphApplyStoreForRetryLogicalRefs(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+	GraphApplyEnabled = true
+	t.Cleanup(func() { GraphApplyEnabled = false })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -170,6 +178,69 @@ func TestInstantiateUsesGraphApplyStoreForRetryLogicalRefs(t *testing.T) {
 	eval := nodesByKey["wf.review.eval.1"]
 	if got := eval.MetadataRefs["gc.logical_bead_id"]; got != "wf.review" {
 		t.Fatalf("eval gc.logical_bead_id ref = %q, want wf.review", got)
+	}
+}
+
+func TestInstantiatePriorityOverrideCopiesToAllBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "priority-copy",
+		Steps: []formula.RecipeStep{
+			{ID: "priority-copy", Title: "Root", Type: "epic", IsRoot: true, Priority: priorityPtr(4)},
+			{ID: "priority-copy.step-a", Title: "Step A", Type: "task"},
+			{ID: "priority-copy.step-b", Title: "Step B", Type: "task", Priority: priorityPtr(0)},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "priority-copy.step-a", DependsOnID: "priority-copy", Type: "parent-child"},
+			{StepID: "priority-copy.step-b", DependsOnID: "priority-copy", Type: "parent-child"},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{PriorityOverride: priorityPtr(3)})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	all, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(all) != result.Created {
+		t.Fatalf("created %d beads, store has %d", result.Created, len(all))
+	}
+	for _, bead := range all {
+		if bead.Priority == nil || *bead.Priority != 3 {
+			t.Fatalf("bead %s priority = %v, want 3", bead.ID, bead.Priority)
+		}
+	}
+}
+
+func TestInstantiateUsesGraphApplyPriorityOverride(t *testing.T) {
+	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+	GraphApplyEnabled = true
+	t.Cleanup(func() { GraphApplyEnabled = false })
+
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+			{ID: "wf.step", Title: "Work", Type: "task", Priority: priorityPtr(0)},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+		},
+	}
+
+	if _, err := Instantiate(context.Background(), store, recipe, Options{PriorityOverride: priorityPtr(2)}); err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	if store.plan == nil {
+		t.Fatal("ApplyGraphPlan was not called")
+	}
+	for _, node := range store.plan.Nodes {
+		if node.Priority == nil || *node.Priority != 2 {
+			t.Fatalf("node %s priority = %v, want 2", node.Key, node.Priority)
+		}
 	}
 }
 
@@ -250,6 +321,8 @@ func TestInstantiateRejectsPartialGraphApplyResult(t *testing.T) {
 			},
 		},
 	}
+	GraphApplyEnabled = true
+	t.Cleanup(func() { GraphApplyEnabled = false })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -453,6 +526,46 @@ func TestInstantiateWithIdempotencyKey(t *testing.T) {
 	root, _ := store.Get(result.RootID)
 	if root.Metadata["idempotency_key"] != "converge:abc:iter:1" {
 		t.Errorf("idempotency_key = %q, want %q", root.Metadata["idempotency_key"], "converge:abc:iter:1")
+	}
+}
+
+func TestInstantiateFragmentInheritsRootPriority(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:    "Workflow root",
+		Type:     "task",
+		Priority: priorityPtr(1),
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+
+	recipe := &formula.FragmentRecipe{
+		Steps: []formula.RecipeStep{
+			{ID: "frag.scope", Title: "Scope", Type: "task"},
+			{ID: "frag.work", Title: "Work", Type: "task", Priority: priorityPtr(4)},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "frag.work", DependsOnID: "frag.scope", Type: "blocks"},
+		},
+	}
+
+	result, err := InstantiateFragment(context.Background(), store, recipe, FragmentOptions{RootID: root.ID})
+	if err != nil {
+		t.Fatalf("InstantiateFragment: %v", err)
+	}
+	if result.Created != 2 {
+		t.Fatalf("Created = %d, want 2", result.Created)
+	}
+	for _, id := range result.IDMapping {
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get fragment bead %s: %v", id, err)
+		}
+		if bead.Priority == nil || *bead.Priority != 1 {
+			t.Fatalf("fragment bead %s priority = %v, want 1", bead.ID, bead.Priority)
+		}
 	}
 }
 

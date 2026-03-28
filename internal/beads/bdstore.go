@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -293,6 +294,7 @@ type bdIssue struct {
 	Title        string    `json:"title"`
 	Status       string    `json:"status"`
 	IssueType    string    `json:"issue_type"`
+	Priority     *int      `json:"priority,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	Assignee     string    `json:"assignee"`
 	From         string    `json:"from"`
@@ -343,6 +345,7 @@ func (b *bdIssue) toBead() Bead {
 		Title:        b.Title,
 		Status:       mapBdStatus(b.Status),
 		Type:         b.IssueType,
+		Priority:     cloneIntPtr(b.Priority),
 		CreatedAt:    b.CreatedAt.Truncate(time.Second),
 		Assignee:     b.Assignee,
 		From:         from,
@@ -387,6 +390,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 		typ = "task"
 	}
 	args := []string{"create", "--json", b.Title, "-t", typ}
+	if b.Priority != nil {
+		args = append(args, "--priority", strconv.Itoa(*b.Priority))
+	}
 	if b.Description != "" {
 		args = append(args, "--description", b.Description)
 	}
@@ -432,6 +438,9 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	}
 	if created.From == "" {
 		created.From = b.From
+	}
+	if created.Priority == nil && b.Priority != nil {
+		created.Priority = cloneIntPtr(b.Priority)
 	}
 	if created.Metadata == nil && len(metadata) > 0 {
 		created.Metadata = metadata

@@ -113,6 +113,27 @@ func TestBdStoreCreatePassesDeps(t *testing.T) {
 	}
 }
 
+func TestBdStoreCreatePassesPriority(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","priority":1}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	priority := 1
+	created, err := s.Create(beads.Bead{Title: "test", Priority: &priority})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(gotArgs, " ")
+	if !strings.Contains(args, "--priority 1") {
+		t.Fatalf("args = %q, want priority flag", args)
+	}
+	if created.Priority == nil || *created.Priority != 1 {
+		t.Fatalf("created.Priority = %v, want 1", created.Priority)
+	}
+}
+
 func TestBdStoreCreateError(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return nil, fmt.Errorf("exit status 1")

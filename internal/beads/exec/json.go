@@ -16,6 +16,7 @@ import (
 type createRequest struct {
 	Title       string   `json:"title"`
 	Type        string   `json:"type,omitempty"`
+	Priority    *int     `json:"priority,omitempty"`
 	Labels      []string `json:"labels,omitempty"`
 	ParentID    string   `json:"parent_id,omitempty"`
 	Ref         string   `json:"ref,omitempty"`
@@ -45,6 +46,7 @@ type beadWire struct {
 	Title       string            `json:"title"`
 	Status      string            `json:"status"`
 	Type        string            `json:"type"`
+	Priority    *int              `json:"priority,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	Assignee    string            `json:"assignee"`
 	From        string            `json:"from"`
@@ -61,6 +63,7 @@ func marshalCreate(b beads.Bead) ([]byte, error) {
 	r := createRequest{
 		Title:       b.Title,
 		Type:        b.Type,
+		Priority:    b.Priority,
 		Labels:      b.Labels,
 		ParentID:    b.ParentID,
 		Ref:         b.Ref,

@@ -17,6 +17,7 @@ type Bead struct {
 	Title        string            `json:"title"`
 	Status       string            `json:"status"` // "open", "in_progress", "closed"
 	Type         string            `json:"type"`   // "task" default
+	Priority     *int              `json:"priority,omitempty"`
 	CreatedAt    time.Time         `json:"created_at"`
 	Assignee     string            `json:"assignee,omitempty"`
 	From         string            `json:"from,omitempty"`
@@ -40,6 +41,14 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+}
+
+func cloneIntPtr(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
 }
 
 // containerTypes enumerates bead types that group child beads for

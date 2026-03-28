@@ -123,11 +123,17 @@ func parseBeadList(data string) ([]beads.Bead, error) {
 
 // toBead converts the wire format to a Gas City Bead.
 func (w *beadWire) toBead() beads.Bead {
+	var priority *int
+	if w.Priority != nil {
+		cloned := *w.Priority
+		priority = &cloned
+	}
 	return beads.Bead{
 		ID:          w.ID,
 		Title:       w.Title,
 		Status:      w.Status,
 		Type:        w.Type,
+		Priority:    priority,
 		CreatedAt:   w.CreatedAt,
 		Assignee:    w.Assignee,
 		From:        w.From,

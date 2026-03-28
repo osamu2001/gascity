@@ -156,6 +156,10 @@ func findVarValue(vars map[string]string, key string) (string, bool) {
 	return v, ok
 }
 
+func priorityPtr(v int) *int {
+	return &v
+}
+
 func TestBuildSlingCommand(t *testing.T) {
 	tests := []struct {
 		template string
@@ -1291,6 +1295,38 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	}
 }
 
+func TestOnFormulaCopiesSourcePriorityToCreatedBeads(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor"}
+
+	deps, _, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "BL-42", Title: "Source", Type: "task", Status: "open", Priority: priorityPtr(4)},
+	}, nil)
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "code-review"
+	code := doSling(opts, deps, nil)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	all, err := deps.Store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, bead := range all {
+		if bead.ID == "BL-42" {
+			continue
+		}
+		if bead.Priority == nil || *bead.Priority != 4 {
+			t.Fatalf("created bead %s priority = %v, want 4", bead.ID, bead.Priority)
+		}
+	}
+}
+
 func TestOnFormulaGraphWorkflowPreassignsNonLatchBeadsForFixedAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -1892,6 +1928,38 @@ func TestBatchOnConvoy(t *testing.T) {
 	}
 	if !strings.Contains(out, "Slung 3/3 children") {
 		t.Errorf("stdout = %q, want summary", out)
+	}
+}
+
+func TestBatchOnConvoyCopiesChildPriorityToCreatedBeads(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor"}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+	q.childrenOf["CVY-1"] = []beads.Bead{
+		{ID: "BL-1", Status: "open", Priority: priorityPtr(3)},
+	}
+
+	deps, _, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "CVY-1")
+	opts.OnFormula = "code-review"
+	code := doSlingBatch(opts, deps, q)
+
+	if code != 0 {
+		t.Fatalf("doSlingBatch returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	all, err := deps.Store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, bead := range all {
+		if bead.Priority == nil || *bead.Priority != 3 {
+			t.Fatalf("created bead %s priority = %v, want 3", bead.ID, bead.Priority)
+		}
 	}
 }
 

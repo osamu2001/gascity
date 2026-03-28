@@ -60,6 +60,7 @@ func (m *MemStore) snapshot() (int, []Bead, []Dep) {
 // (Metadata, Labels, Needs) to prevent shared-state races between callers
 // and the store.
 func cloneBead(b Bead) Bead {
+	b.Priority = cloneIntPtr(b.Priority)
 	b.Metadata = maps.Clone(b.Metadata)
 	b.Labels = slices.Clone(b.Labels)
 	b.Needs = slices.Clone(b.Needs)

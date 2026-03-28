@@ -502,9 +502,10 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 		}
 		formulaVars := buildSlingFormulaVars(opts.OnFormula, beadID, opts.Vars, a, deps)
 		result, err := instantiateSlingFormula(context.Background(), opts.OnFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
-			Title:    opts.Title,
-			Vars:     formulaVars,
-			ParentID: beadID,
+			Title:            opts.Title,
+			Vars:             formulaVars,
+			ParentID:         beadID,
+			PriorityOverride: beadPriorityOverride(querier, beadID),
 		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			fmt.Fprintf(deps.Stderr, "gc sling: instantiating formula %q on %s: %v\n", opts.OnFormula, beadID, err) //nolint:errcheck // best-effort
@@ -537,9 +538,10 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier) int {
 		}
 		defaultVars := buildSlingFormulaVars(a.DefaultSlingFormula, beadID, opts.Vars, a, deps)
 		result, err := instantiateSlingFormula(context.Background(), a.DefaultSlingFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
-			Title:    opts.Title,
-			Vars:     defaultVars,
-			ParentID: beadID,
+			Title:            opts.Title,
+			Vars:             defaultVars,
+			ParentID:         beadID,
+			PriorityOverride: beadPriorityOverride(querier, beadID),
 		}, beadID, opts.ScopeKind, opts.ScopeRef, a, deps)
 		if err != nil {
 			fmt.Fprintf(deps.Stderr, "gc sling: instantiating default formula %q on %s: %v\n", //nolint:errcheck // best-effort
@@ -747,9 +749,10 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 		if opts.OnFormula != "" {
 			childVars := buildSlingFormulaVars(opts.OnFormula, child.ID, opts.Vars, a, deps)
 			cookResult, err := molecule.Cook(context.Background(), deps.Store, opts.OnFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
-				Title:    opts.Title,
-				Vars:     childVars,
-				ParentID: child.ID,
+				Title:            opts.Title,
+				Vars:             childVars,
+				ParentID:         child.ID,
+				PriorityOverride: clonePriorityPtr(child.Priority),
 			})
 			if err != nil {
 				fmt.Fprintf(deps.Stderr, "  Failed %s: instantiating formula %q: %v\n", child.ID, opts.OnFormula, err) //nolint:errcheck // best-effort
@@ -763,9 +766,10 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 			// Apply default formula per-child.
 			childVars := buildSlingFormulaVars(a.DefaultSlingFormula, child.ID, opts.Vars, a, deps)
 			cookResult, err := molecule.Cook(context.Background(), deps.Store, a.DefaultSlingFormula, slingFormulaSearchPaths(deps, a), molecule.Options{
-				Title:    opts.Title,
-				Vars:     childVars,
-				ParentID: child.ID,
+				Title:            opts.Title,
+				Vars:             childVars,
+				ParentID:         child.ID,
+				PriorityOverride: clonePriorityPtr(child.Priority),
 			})
 			if err != nil {
 				fmt.Fprintf(deps.Stderr, "  Failed %s: instantiating default formula %q: %v\n", child.ID, a.DefaultSlingFormula, err) //nolint:errcheck // best-effort
@@ -893,6 +897,25 @@ func beadMetadataTarget(store beads.Store, beadID string) string {
 		beadID = strings.TrimSpace(b.ParentID)
 	}
 	return ""
+}
+
+func beadPriorityOverride(store BeadQuerier, beadID string) *int {
+	if store == nil || beadID == "" {
+		return nil
+	}
+	bead, err := store.Get(beadID)
+	if err != nil {
+		return nil
+	}
+	return clonePriorityPtr(bead.Priority)
+}
+
+func clonePriorityPtr(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
 }
 
 func slingFormulaRepoDir(beadID string, deps slingDeps, a config.Agent) string {
@@ -1047,6 +1070,9 @@ func isGraphWorkflowAttachment(store beads.Store, rootID string) bool {
 
 func instantiateSlingFormula(ctx context.Context, formulaName string, searchPaths []string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, a config.Agent, deps slingDeps) (*molecule.Result, error) {
 	slingTracef("instantiate start formula=%s source=%s agent=%s parent=%s", formulaName, sourceBeadID, a.QualifiedName(), opts.ParentID)
+	if opts.PriorityOverride == nil && sourceBeadID != "" {
+		opts.PriorityOverride = beadPriorityOverride(deps.Store, sourceBeadID)
+	}
 	compileStart := time.Now()
 	recipe, err := formula.Compile(ctx, formulaName, searchPaths, opts.Vars)
 	if err != nil {

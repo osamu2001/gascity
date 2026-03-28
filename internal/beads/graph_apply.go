@@ -25,6 +25,7 @@ type GraphApplyNode struct {
 	Key               string            `json:"key"`
 	Title             string            `json:"title"`
 	Type              string            `json:"type,omitempty"`
+	Priority          *int              `json:"priority,omitempty"`
 	Description       string            `json:"description,omitempty"`
 	Assignee          string            `json:"assignee,omitempty"`
 	AssignAfterCreate bool              `json:"assign_after_create,omitempty"`
