@@ -107,7 +107,10 @@ func (s *Server) storeResponse(key string, index uint64, v any) ([]byte, error) 
 	return body, nil
 }
 
-func writeCachedJSON(w http.ResponseWriter, index uint64, body []byte) {
+func writeCachedJSON(w http.ResponseWriter, r *http.Request, index uint64, body []byte) {
+	if r != nil {
+		setDataSource(r, "cache")
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-GC-Index", strconv.FormatUint(index, 10))
 	w.WriteHeader(http.StatusOK)
