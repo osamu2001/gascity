@@ -279,6 +279,16 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
 	}
+
+	// Optional: permanently delete the bead after closing.
+	if r.URL.Query().Get("delete") == "true" {
+		if err := store.Delete(id); err != nil {
+			log.Printf("gc api: deleting bead after close %s: %v", id, err)
+			writeError(w, http.StatusInternalServerError, "internal", "closed but delete failed: "+err.Error())
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

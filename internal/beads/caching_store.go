@@ -902,3 +902,15 @@ func beadChanged(old, fresh Bead) bool {
 	}
 	return len(old.Labels) != len(fresh.Labels)
 }
+
+// Delete passes through to the backing store and removes from cache.
+func (c *CachingStore) Delete(id string) error {
+	if err := c.backing.Delete(id); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	delete(c.beads, id)
+	delete(c.deps, id)
+	c.mu.Unlock()
+	return nil
+}

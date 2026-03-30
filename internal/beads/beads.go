@@ -148,6 +148,10 @@ type Store interface {
 	// Returns ErrNotFound if the bead does not exist.
 	SetMetadataBatch(id string, kvs map[string]string) error
 
+	// Delete permanently removes a bead from the store. The bead should be
+	// closed first. Returns ErrNotFound if the bead does not exist.
+	Delete(id string) error
+
 	// Ping verifies that the store is operational. Returns nil on success,
 	// or an error describing why the store is unavailable.
 	Ping() error

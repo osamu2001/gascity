@@ -356,6 +356,19 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return fmt.Errorf("setting metadata batch on %q: %w", id, ErrNotFound)
 }
 
+// Delete removes a bead from the in-memory store.
+func (m *MemStore) Delete(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, b := range m.beads {
+		if b.ID == id {
+			m.beads = append(m.beads[:i], m.beads[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
+}
+
 // Ping always succeeds for MemStore (in-memory, always available).
 func (m *MemStore) Ping() error {
 	return nil

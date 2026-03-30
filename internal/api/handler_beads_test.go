@@ -217,6 +217,10 @@ func (s *prefixedAliasStore) DepList(id, direction string) ([]beads.Dep, error) 
 	return out, nil
 }
 
+func (s *prefixedAliasStore) Delete(id string) error {
+	return s.base.Delete(s.aliasToBase(id))
+}
+
 func configureBeadRouteState(t *testing.T) (*fakeState, *prefixedAliasStore, *prefixedAliasStore) {
 	t.Helper()
 

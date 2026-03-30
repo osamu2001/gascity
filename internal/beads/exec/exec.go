@@ -305,6 +305,12 @@ func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// Delete permanently removes a bead by calling the "delete" subcommand.
+func (s *Store) Delete(id string) error {
+	_, err := s.run(nil, "delete", "--force", id)
+	return err
+}
+
 // Ping verifies the store script is accessible by running a list operation.
 func (s *Store) Ping() error {
 	_, err := s.run(nil, "list")

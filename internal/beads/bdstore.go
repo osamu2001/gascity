@@ -612,6 +612,18 @@ func (s *BdStore) Close(id string) error {
 	return nil
 }
 
+// Delete permanently removes a bead from the store via bd delete.
+func (s *BdStore) Delete(id string) error {
+	_, err := s.runner(s.dir, "bd", "delete", "--force", "--json", id)
+	if err != nil {
+		if isBdNotFound(err) {
+			return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
+		}
+		return fmt.Errorf("deleting bead %q: %w", id, err)
+	}
+	return nil
+}
+
 // List returns all beads via bd list.
 func (s *BdStore) List(status ...string) ([]Bead, error) {
 	args := []string{"list", "--json", "--limit", "0", "--all", "--include-infra"}

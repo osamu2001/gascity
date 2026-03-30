@@ -582,9 +582,17 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if sessionBeads == nil {
 		sessionBeads = cr.loadSessionBeadSnapshot()
 	}
-	allBeads, err := store.List()
-	if err != nil {
-		fmt.Fprintf(cr.stderr, "%s: listing work beads: %v\n", cr.logPrefix, err) //nolint:errcheck
+	// Best-effort full bead list for sweep/pool demand. Non-blocking:
+	// if the CachingStore hasn't fully primed yet, List() returns what
+	// it has (or blocks briefly). On the first tick after startup, this
+	// may return empty while the async prime is still running — sweep
+	// and pool demand computation gracefully handle nil/empty lists.
+	var allBeads []beads.Bead
+	if cs, ok := store.(*beads.CachingStore); ok && cs.IsLive() {
+		allBeads, _ = store.List()
+	} else {
+		// Don't block startup waiting for full prime — skip sweep on this tick.
+		allBeads = nil
 	}
 	// poolDesired determines how many sessions should be AWAKE. Uses the
 	// same scale_check counts that buildDesiredState already computed (no
@@ -602,7 +610,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			fmt.Fprintf(cr.stderr, "scaleCheck: %s = %d\n", tmpl, count) //nolint:errcheck
 		}
 	}
-	if err == nil && sweepUndesiredPoolSessionBeads(store, sessionBeads, desiredState, allBeads, cr.cfg, cr.sp) > 0 {
+	if allBeads != nil && sweepUndesiredPoolSessionBeads(store, sessionBeads, desiredState, allBeads, cr.cfg, cr.sp) > 0 {
 		sessionBeads = cr.loadSessionBeadSnapshot()
 	}
 	open := sessionBeads.Open()
