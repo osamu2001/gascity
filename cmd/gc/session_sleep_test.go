@@ -794,6 +794,9 @@ func TestReconcileSessionBeads_WakesDependenciesForHardWakeRoots(t *testing.T) {
 
 	// With WakeWork removed, demand is expressed via poolDesired which
 	// makes the session config-eligible and overrides sleep suppression.
+	// Both api AND its dependency db need poolDesired entries — in
+	// production, buildDesiredState computes poolDesired for all agents
+	// that have sessions in the desired set.
 	got := reconcileSessionBeads(
 		context.Background(),
 		[]beads.Bead{dbSession, apiSession},
@@ -806,7 +809,7 @@ func TestReconcileSessionBeads_WakesDependenciesForHardWakeRoots(t *testing.T) {
 		nil,
 		nil,
 		env.dt,
-		map[string]int{"api": 1},
+		map[string]int{"api": 1, "db": 1},
 		"",
 		nil,
 		env.clk,

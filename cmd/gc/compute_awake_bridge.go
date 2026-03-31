@@ -86,6 +86,7 @@ func buildAwakeInputFromReconciler(
 			NamedIdentity:  namedSessionIdentity(*b),
 			Drained:        isDrainedSessionMetadata(b.Metadata),
 			WaitHold:       b.Metadata["wait_hold"] == "true",
+			IdleLatched:    b.Metadata["sleep_reason"] == "idle",
 		}
 		if t, err := time.Parse(time.RFC3339, b.Metadata["held_until"]); err == nil && !t.IsZero() {
 			bead.HeldUntil = t

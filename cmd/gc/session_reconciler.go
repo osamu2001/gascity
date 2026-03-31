@@ -427,6 +427,37 @@ func reconcileSessionBeads(
 	awakeDecisions := ComputeAwakeSet(awakeInput)
 	wakeEvals := awakeSetToWakeEvals(awakeDecisions, awakeInput.SessionBeads)
 
+	// Resolve full sleep policies before idle probe selection. ComputeAwakeSet
+	// handles agent-level SleepAfterIdle but the workspace-level session_sleep
+	// policies (InteractiveResume, NonInteractive, etc.) require cfg + provider.
+	// This pass updates wakeEvals so selectIdleProbeTargets sees the correct
+	// ConfigSuppressed and Policy fields.
+	for _, target := range wakeTargets {
+		eval := wakeEvals[target.session.ID]
+		policy := resolveSessionSleepPolicy(*target.session, cfg, sp)
+		eval.Policy = policy
+		name := target.session.Metadata["session_name"]
+		decision := awakeDecisions[name]
+		if decision.ShouldWake && configWakeSuppressed(*target.session, policy, sp, clk) {
+			// Active demand (poolDesired > 0) overrides sleep suppression
+			// for non-interactive sessions (matching the old
+			// evaluateWakeReasons behavior). Interactive sessions honor
+			// their idle window regardless of demand — an idle chat
+			// session should still sleep to release resources.
+			// Explicit sleep_intent always wins — if the session has
+			// signaled it wants to sleep, honor that regardless of demand.
+			template := normalizedSessionTemplate(*target.session, cfg)
+			hasDemand := poolDesired[template] > 0
+			hasExplicitSleepIntent := target.session.Metadata["sleep_intent"] != ""
+			demandOverrides := hasDemand && policy.Class == config.SessionSleepNonInteractive && !hasExplicitSleepIntent
+			if !demandOverrides {
+				eval.ConfigSuppressed = true
+				eval.Reasons = nil // Clear reasons so Phase 2 does not cancel the drain.
+			}
+		}
+		wakeEvals[target.session.ID] = eval
+	}
+
 	idleProbeTargets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt)
 	launchIdleProbes(ctx, idleProbeTargets, wakeTargets, dt, sp, clk)
 
@@ -436,14 +467,8 @@ func reconcileSessionBeads(
 		shouldWake := hasDec && decision.ShouldWake
 
 		eval := wakeEvals[target.session.ID]
-		// Resolve full sleep policy — ComputeAwakeSet handles agent-level
-		// SleepAfterIdle but the workspace-level session_sleep policies
-		// (InteractiveResume, NonInteractive, etc.) require cfg + provider.
-		policy := resolveSessionSleepPolicy(*target.session, cfg, sp)
-		eval.Policy = policy
-		if shouldWake && configWakeSuppressed(*target.session, policy, sp, clk) {
+		if shouldWake && eval.ConfigSuppressed {
 			shouldWake = false
-			eval.ConfigSuppressed = true
 		}
 		persistSleepPolicyMetadata(target.session, store, eval.Policy, eval.ConfigSuppressed)
 
@@ -480,6 +505,8 @@ func reconcileSessionBeads(
 			case intent != "":
 				reason = intent
 			case hasDec && decision.Reason == "idle-sleep":
+				reason = "idle"
+			case eval.ConfigSuppressed:
 				reason = "idle"
 			default:
 				reason = "no-wake-reason"

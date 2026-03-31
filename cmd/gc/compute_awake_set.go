@@ -51,6 +51,7 @@ type AwakeSessionBead struct {
 	HeldUntil        time.Time // zero = not held
 	QuarantinedUntil time.Time // zero = not quarantined
 	IdleSince        time.Time // zero = unknown/not idle
+	IdleLatched      bool      // asleep with sleep_reason="idle" — remains asleep until policy changes
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -139,6 +140,19 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			}
 			desired[bead.SessionName] = "scaled:creating"
 			filled++
+		}
+		// Asleep sessions fill remaining demand when active + creating
+		// are insufficient. This ensures sessions can be re-woken after
+		// idle sleep or crash recovery.
+		if filled < count {
+			asleep := collectAsleepBeads(input.SessionBeads, template)
+			for _, bead := range asleep {
+				if filled >= count {
+					break
+				}
+				desired[bead.SessionName] = "scaled:asleep"
+				filled++
+			}
 		}
 	}
 
@@ -323,6 +337,16 @@ func collectCreatingBeads(beads []AwakeSessionBead, template string) []AwakeSess
 	var result []AwakeSessionBead
 	for _, b := range beads {
 		if b.Template == template && b.State == "creating" && !b.ManualSession && !b.Drained && !b.DependencyOnly {
+			result = append(result, b)
+		}
+	}
+	return result
+}
+
+func collectAsleepBeads(beads []AwakeSessionBead, template string) []AwakeSessionBead {
+	var result []AwakeSessionBead
+	for _, b := range beads {
+		if b.Template == template && b.State == "asleep" && !b.ManualSession && !b.Drained && !b.DependencyOnly && !b.IdleLatched {
 			result = append(result, b)
 		}
 	}
