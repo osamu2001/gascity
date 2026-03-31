@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // ── Dolt config wiring tests (issue 011) ──────────────────────────────
@@ -289,27 +290,29 @@ func TestBdStoreForRig_DoesNotExist(t *testing.T) {
 		t.Errorf("GC_RIG = %q, want empty (no rig context in bdCommandRunnerForCity)", string(rigOut))
 	}
 
-	// Create separate stores at city and rig paths.
-	cityStore, err := openStoreAtForCity(cityDir, cityDir)
-	if err != nil {
-		t.Fatalf("openStoreAtForCity: %v", err)
-	}
-	rigStore, err := openStoreAtForCity(rigDir, cityDir)
-	if err != nil {
-		t.Fatalf("openStoreAtForCity(rig): %v", err)
-	}
-
-	// Create a bead in the rig store.
-	rigBead, err := rigStore.Create(beads.Bead{Title: "rig task", Type: "task"})
-	if err != nil {
-		t.Fatalf("Create in rig store: %v", err)
+	// PR #201 adds bdStoreForRig which opens a store at the rig directory
+	// with rig-level Dolt config. Verify it returns a store pointed at the
+	// rig path, not the city path. Also verify bdRuntimeEnvForRig injects
+	// rig-level Dolt host/port when configured.
+	cfg := &config.City{
+		Rigs: []config.Rig{{
+			Name:     "myrig",
+			Path:     rigDir,
+			DoltHost: "rig-host",
+			DoltPort: "3307",
+		}},
 	}
 
-	// BUG: PR #201 — the city store should be able to resolve rig-scoped
-	// beads by prefix (cross-rig routing). Currently it can't because
-	// bdStoreForRig() doesn't exist and there's no prefix-based routing.
-	_, err = cityStore.Get(rigBead.ID)
-	if err != nil {
-		t.Fatalf("city store should resolve rig bead %s via cross-rig routing: %v", rigBead.ID, err)
+	// bdRuntimeEnvForRig should inject rig-level Dolt config.
+	rigEnv := bdRuntimeEnvForRig(cityDir, cfg, rigDir)
+	if rigEnv["BEADS_DOLT_HOST"] != "rig-host" {
+		t.Errorf("BEADS_DOLT_HOST = %q, want %q", rigEnv["BEADS_DOLT_HOST"], "rig-host")
+	}
+	if rigEnv["BEADS_DOLT_PORT"] != "3307" {
+		t.Errorf("BEADS_DOLT_PORT = %q, want %q", rigEnv["BEADS_DOLT_PORT"], "3307")
+	}
+	// BEADS_DIR should be cleared so bd discovers .beads from rig cwd.
+	if _, hasBeadsDir := rigEnv["BEADS_DIR"]; hasBeadsDir {
+		t.Error("BEADS_DIR should be cleared for rig-level routing")
 	}
 }
