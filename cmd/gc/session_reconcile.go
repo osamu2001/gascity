@@ -209,6 +209,11 @@ func capWakeConfigByDemand(sessions []beads.Bead, cfg *config.City, evals map[st
 		if isNamedSessionBead(session) && namedSessionMode(session) == "always" {
 			continue
 		}
+		// Manual sessions (user-created via API/UI) bypass pool demand — they
+		// should stay alive until explicitly closed.
+		if session.Metadata["manual_session"] == "true" {
+			continue
+		}
 		template := normalizedSessionTemplate(session, cfg)
 		if template == "" {
 			continue
