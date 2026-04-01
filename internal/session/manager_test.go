@@ -27,6 +27,21 @@ func (p *startOverrideProvider) Start(ctx context.Context, name string, cfg runt
 	return p.Fake.Start(ctx, name, cfg)
 }
 
+// failOnceStartProvider fails the first Start call after arming, then
+// succeeds on subsequent calls. Used to simulate stale session key retry.
+type failOnceStartProvider struct {
+	*runtime.Fake
+	armed bool
+}
+
+func (p *failOnceStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.armed {
+		p.armed = false
+		return errors.New("session not found: stale key")
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
 type lateSuccessStartProvider struct {
 	*runtime.Fake
 	startErr error
@@ -2041,5 +2056,100 @@ func TestTranscriptPathSameWorkDirDifferentProvidersUsesProviderSpecificFallback
 	}
 	if path != codexPath {
 		t.Errorf("TranscriptPath = %q, want %q", path, codexPath)
+	}
+}
+
+// BUG: PR #206 — this test fails on current code because Kill() only
+// accepts StateActive, StateCreating, and StateDraining (manager.go:614).
+// Sessions with state=awake are rejected with "session is not active"
+// even though awake is a live state with a running runtime process.
+// The fix is to add "awake" to the accepted states in Kill().
+func TestKill_AcceptsAwakeState(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	// Create a session bead with state=awake and a matching runtime process.
+	b, err := store.Create(beads.Bead{
+		Title:  "awake worker",
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"state":        "awake",
+			"session_name": "s-awake-worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Start a runtime process so Kill() has something to stop.
+	if err := sp.Start(context.Background(), "s-awake-worker", runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Kill should succeed for awake sessions, but the bug causes it to
+	// return "session is not active" because "awake" is not in the
+	// accepted state list.
+	if err := mgr.Kill(b.ID); err != nil {
+		t.Fatalf("Kill(awake session) = %v, want nil", err)
+	}
+}
+
+// BUG: PR #203 — When ensureRunning resumes with --resume <key> and the
+// process dies immediately (stale session key), it should clear the key and
+// retry fresh without the --resume flag. Currently there is no retry logic:
+// the session stays dead after a stale key failure.
+func TestEnsureRunning_RetriesWithoutStaleSessionKey(t *testing.T) {
+	store := beads.NewMemStore()
+	base := runtime.NewFake()
+
+	// failOnceStartProvider fails the first Start after arming, then
+	// succeeds on retry. Simulates: stale key rejected, fresh start works.
+	sp := &failOnceStartProvider{Fake: base}
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "worker", "", "claude --dangerously", "/tmp", "claude", nil, ProviderResume{
+		ResumeFlag:    "--resume",
+		SessionIDFlag: "--session-id",
+	}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get bead: %v", err)
+	}
+	sessionKey := b.Metadata["session_key"]
+	if sessionKey == "" {
+		t.Fatal("expected session_key in bead metadata after Create with ResumeFlag")
+	}
+
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	// Arm: next Start fails (stale key), the one after succeeds.
+	sp.armed = true
+
+	resumeCmd := "claude --dangerously --resume " + sessionKey
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
+	// BUG: ensureRunning propagates the error without retrying fresh.
+	// When PR #203 is applied, Send should succeed because ensureRunning
+	// strips --resume, clears session_key, and retries.
+	if err != nil {
+		t.Fatalf("Send should retry without stale resume flag but failed: %v", err)
+	}
+
+	if !base.IsRunning(info.SessionName) {
+		t.Fatal("session should be running after fresh retry")
+	}
+
+	// The stale session_key should be cleared from bead metadata.
+	b, _ = store.Get(info.ID)
+	if b.Metadata["session_key"] != "" {
+		t.Errorf("session_key should be cleared after stale key retry, got %q", b.Metadata["session_key"])
 	}
 }

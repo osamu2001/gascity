@@ -1524,6 +1524,35 @@ func TestResolvePoolSlot_NonNumericSuffix(t *testing.T) {
 	}
 }
 
+// BUG: PR #208 — this test fails on current code because resolvePoolSlot()
+// only recognizes pool instances that use the "<template>-<N>" naming
+// convention. Namepool-themed names like "fenrir" for a "worker" pool
+// don't have the "worker-" prefix, so resolvePoolSlot returns 0.
+// This means namepool-themed pool instances never get pool_slot metadata.
+// The fix: pool_slot must be passed through TemplateParams at creation time
+// rather than reverse-engineered from the agent name.
+func TestResolvePoolSlot_NamepoolThemedName(t *testing.T) {
+	// A namepool-themed pool instance "fenrir" belonging to the "worker"
+	// template should have a meaningful slot, but resolvePoolSlot cannot
+	// derive it from the name alone.
+	if got := resolvePoolSlot("fenrir", "worker"); got != 0 {
+		// If this passes (got != 0), the bug is fixed. Currently it returns 0.
+		t.Errorf("resolvePoolSlot(fenrir, worker) = %d, want non-zero slot for namepool themes", got)
+	}
+
+	// Contrast: standard numbered naming works correctly.
+	if got := resolvePoolSlot("worker-1", "worker"); got != 1 {
+		t.Errorf("resolvePoolSlot(worker-1, worker) = %d, want 1", got)
+	}
+
+	// The core issue: resolvePoolSlot has no way to map "fenrir" -> slot N
+	// because the mapping lives in the namepool config, not in the name string.
+	// Until pool_slot is passed through TemplateParams at session creation,
+	// namepool-themed names will always get pool_slot=0.
+	t.Errorf("BUG: namepool-themed pool instances always get pool_slot=0; " +
+		"resolvePoolSlot cannot derive slot from themed names like \"fenrir\"")
+}
+
 func TestResolveResumeCommand(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1667,6 +1696,38 @@ func TestPoolDesiredLimitsWakeWork(t *testing.T) {
 	}
 	if wakeCount != 1 {
 		t.Errorf("wakeCount = %d, want 1 (only slot 1 within poolDesired=1)", wakeCount)
+	}
+}
+
+// BUG: PR #209 -- this test fails because reconcileSessionBeads has no branch
+// for !shouldWake && !alive when the bead is drained. The three existing
+// branches cover (shouldWake && !alive), (shouldWake && alive), and
+// (!shouldWake && alive), but drained dead sessions fall through all three
+// and their beads are never closed.
+func TestReconcileSessionBeads_DrainedDeadSessionBeadClosed(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	// The session is in the desired state (template still configured), but
+	// the awake-set should not wake it because it was already drained.
+	env.addDesired("worker", "worker", false) // not running
+
+	session := env.createSessionBead("worker", "worker")
+	// Simulate a drain-acked session: state=drained, session is dead.
+	env.setSessionMetadata(&session, map[string]string{
+		"state": "drained",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	// The drained dead bead should be closed so its slot can be recycled.
+	if got.Status != "closed" {
+		t.Errorf("drained dead session bead status = %q, want %q (bead sits in limbo forever, blocking slot recycling)", got.Status, "closed")
 	}
 }
 

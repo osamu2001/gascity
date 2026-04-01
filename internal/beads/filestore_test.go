@@ -301,3 +301,37 @@ func TestFileStoreCloseWriteFails(t *testing.T) {
 		t.Errorf("error = %q, want 'disk full'", err)
 	}
 }
+
+// BUG: PR #215 -- this test fails because FileStore has no cross-process
+// flock. Two FileStore instances opened on the same empty file get
+// independent seq counters (both starting at 0). Each produces "gc-1" for
+// its first bead, and the second writer silently overwrites the first.
+func TestFileStoreConcurrentInstances_DuplicateIDs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+
+	// Simulate two processes opening the same file before either writes.
+	s1, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both stores start with seq=0 and will independently assign gc-1.
+	b1, err := s1.Create(beads.Bead{Title: "from-process-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := s2.Create(beads.Bead{Title: "from-process-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// With a cross-process flock, the second store would reload the file
+	// after the first write and assign gc-2. Without the flock, both get gc-1.
+	if b1.ID == b2.ID {
+		t.Errorf("two concurrent FileStore instances produced the same bead ID %q; cross-process flock is missing", b1.ID)
+	}
+}

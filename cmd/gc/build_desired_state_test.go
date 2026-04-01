@@ -884,3 +884,61 @@ func TestSelectOrCreatePoolSessionBead_SkipsAsleepButReusesActive(t *testing.T) 
 		t.Fatalf("should reuse active bead, got %s want %s", result.ID, active.ID)
 	}
 }
+
+// BUG: PR #216 — crossRigDefaultPoolCheck() does not exist. The pool
+// reconciler's collectAssignedWorkBeads only queries per-rig stores when
+// rigStores are explicitly provided. For a rig-scoped pool agent, the
+// default pool check queries only the rig's store directory, missing
+// city-level work beads that were routed to that rig-scoped agent.
+//
+// This test demonstrates that collectAssignedWorkBeads with no rigStores
+// returns only city-store beads. Work routed to a rig-scoped agent but
+// stored in the city store IS visible, but work in a rig store that is
+// NOT passed via rigStores is invisible.
+func TestCollectAssignedWorkBeads_MissesCrossRigWork(t *testing.T) {
+	// Set up a city store with one work bead routed to a rig-scoped agent.
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	// Create a work bead in the CITY store routed to a rig-scoped agent.
+	cityWorkBead, err := cityStore.Create(beads.Bead{
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: "sess-1",
+		Metadata: map[string]string{"gc.routed_to": "myrig/worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create city work bead: %v", err)
+	}
+
+	// Create a work bead in the RIG store for the same agent.
+	rigWorkBead, err := rigStore.Create(beads.Bead{
+		Type:     "task",
+		Status:   "open",
+		Assignee: "sess-2",
+		Metadata: map[string]string{"gc.routed_to": "myrig/worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "myrig", Path: "/path/to/myrig"}},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+		},
+	}
+
+	// BUG: PR #216 — when rigStores is nil (the production path),
+	// collectAssignedWorkBeads should find beads from BOTH the city store
+	// AND rig stores. Currently it only finds city-store beads.
+	resultNoRigStores := collectAssignedWorkBeads(cfg, cityStore, nil, nil)
+
+	// With cross-rig routing (PR #216), we should find 2 beads (city + rig).
+	// Without it, we only find 1 (city only).
+	_ = cityWorkBead // city bead is always found
+	_ = rigWorkBead  // rig bead should be found via cross-rig routing
+	if len(resultNoRigStores) < 2 {
+		t.Fatalf("collectAssignedWorkBeads with nil rigStores found %d beads, want 2 (city + rig) — cross-rig routing missing (PR #216)", len(resultNoRigStores))
+	}
+}

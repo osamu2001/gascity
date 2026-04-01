@@ -354,6 +354,40 @@ func TestWithCitySessionNameLock_EmptyCityPathFallsBackWithoutLockFile(t *testin
 	}
 }
 
+// BUG: PR #204 — this test fails on current code because
+// ensureSessionNameAvailable() checks session_name match (line 279) BEFORE
+// the b.Status == "closed" skip (line 282). Closed session beads with an
+// explicit session_name permanently block that name from being reused.
+// The fix is to move the closed-status skip before the session_name check.
+func TestEnsureSessionNameAvailable_AllowsClosedExplicitNameReuse(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Step 1: Create a session bead with an explicit session_name.
+	b, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "my-worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Step 2: Close the bead.
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Step 3: Try to reserve the same explicit session_name again.
+	// This should succeed because the original bead is closed, but the bug
+	// causes it to fail with ErrSessionNameExists because the closed check
+	// comes after the session_name match.
+	if err := ensureSessionNameAvailable(store, "my-worker"); err != nil {
+		t.Fatalf("ensureSessionNameAvailable(closed explicit name) = %v, want nil", err)
+	}
+}
+
 func TestWithCitySessionLocks_EmptyCityPathSharesIdentifierNamespace(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

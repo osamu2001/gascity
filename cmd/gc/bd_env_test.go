@@ -223,3 +223,93 @@ func TestBdCommandRunnerForCityPinsCityStoreEnv(t *testing.T) {
 		t.Fatalf("GC_RIG_ROOT = %q, want empty", lines[3])
 	}
 }
+
+// BUG: PR #201 — bdStoreForRig() does not exist. All bd operations use
+// bdStoreForCity() which returns a store rooted at the city level, not the
+// rig level. For rig-scoped bead IDs, the city-level store cannot resolve
+// them because it looks in the city's .beads directory, not the rig's.
+//
+// This test demonstrates that:
+// 1. bdStoreForRig is needed but does not exist (only bdStoreForCity exists)
+// 2. bdRuntimeEnv sets BEADS_DIR to the city's .beads, not a rig's
+// 3. bdCommandRunnerForCity always pins BEADS_DIR to cityDir/.beads
+func TestBdStoreForRig_DoesNotExist(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a rig directory — a separate repository outside the city.
+	rigDir := filepath.Join(t.TempDir(), "my-rig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// bdRuntimeEnv always sets BEADS_DIR to cityDir/.beads.
+	// A rig-scoped agent needs BEADS_DIR=rigDir/.beads, but no
+	// bdStoreForRig() exists to produce that.
+	env := bdRuntimeEnv(cityDir)
+	beadsDir := env["BEADS_DIR"]
+	wantCityBeads := filepath.Join(cityDir, ".beads")
+	if beadsDir != wantCityBeads {
+		t.Errorf("BEADS_DIR = %q, want %q (city-level)", beadsDir, wantCityBeads)
+	}
+	rigBeadsDir := filepath.Join(rigDir, ".beads")
+	if beadsDir == rigBeadsDir {
+		t.Error("BEADS_DIR unexpectedly points to rig — bdStoreForRig may have been added")
+	}
+
+	// bdCommandRunnerForCity pins BEADS_DIR to the RUNNER's dir arg (not the
+	// rig). This is the command runner used by bdStoreForCity. It always
+	// constructs env with cityDir context, never rig-specific context.
+	runner := bdCommandRunnerForCity(cityDir)
+
+	// Run a command in the rig directory to see what BEADS_DIR is set to.
+	out, err := runner(rigDir, "sh", "-c", `printf '%s' "$BEADS_DIR"`)
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+
+	// BEADS_DIR is pinned to rigDir/.beads (the runner overrides per-call dir),
+	// but GC_RIG and GC_RIG_ROOT are always empty — no rig context is injected.
+	gotBeadsDir := string(out)
+	wantRunnerBeads := filepath.Join(rigDir, ".beads")
+	if gotBeadsDir != wantRunnerBeads {
+		t.Errorf("runner BEADS_DIR = %q, want %q", gotBeadsDir, wantRunnerBeads)
+	}
+
+	// Verify GC_RIG is empty — the runner does not know which rig it serves.
+	rigOut, err := runner(rigDir, "sh", "-c", `printf '%s' "$GC_RIG"`)
+	if err != nil {
+		t.Fatalf("runner: %v", err)
+	}
+	if string(rigOut) != "" {
+		t.Errorf("GC_RIG = %q, want empty (no rig context in bdCommandRunnerForCity)", string(rigOut))
+	}
+
+	// Create separate stores at city and rig paths.
+	cityStore, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+
+	// Create a bead in the rig store.
+	rigBead, err := rigStore.Create(beads.Bead{Title: "rig task", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create in rig store: %v", err)
+	}
+
+	// BUG: PR #201 — the city store should be able to resolve rig-scoped
+	// beads by prefix (cross-rig routing). Currently it can't because
+	// bdStoreForRig() doesn't exist and there's no prefix-based routing.
+	_, err = cityStore.Get(rigBead.ID)
+	if err != nil {
+		t.Fatalf("city store should resolve rig bead %s via cross-rig routing: %v", rigBead.ID, err)
+	}
+}
