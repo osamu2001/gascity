@@ -139,6 +139,84 @@ func TestWorkflowFormulaSearchPathsUsesRoutedRigLayers(t *testing.T) {
 	}
 }
 
+func TestFindWorkflowBeadsIncludesClosedDescendants(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "Workflow",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":        "workflow",
+			"gc.workflow_id": "wf-delete",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:  "Closed child",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	found := findWorkflowBeads(store, root.ID)
+	ids := make([]string, 0, len(found))
+	for _, bead := range found {
+		ids = append(ids, bead.ID)
+	}
+	if !slices.Contains(ids, root.ID) {
+		t.Fatalf("findWorkflowBeads(...) missing root %q: %#v", root.ID, ids)
+	}
+	if !slices.Contains(ids, child.ID) {
+		t.Fatalf("findWorkflowBeads(...) missing closed child %q: %#v", child.ID, ids)
+	}
+}
+
+func TestFindWorkflowBeadsResolvesLogicalWorkflowID(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:  "Workflow",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":        "workflow",
+			"gc.workflow_id": "wf-delete-logical",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:  "Closed child",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	found := findWorkflowBeads(store, "wf-delete-logical")
+	ids := make([]string, 0, len(found))
+	for _, bead := range found {
+		ids = append(ids, bead.ID)
+	}
+	if !slices.Contains(ids, root.ID) {
+		t.Fatalf("findWorkflowBeads(logical) missing root %q: %#v", root.ID, ids)
+	}
+	if !slices.Contains(ids, child.ID) {
+		t.Fatalf("findWorkflowBeads(logical) missing child %q: %#v", child.ID, ids)
+	}
+}
+
 func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{

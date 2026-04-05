@@ -31,11 +31,10 @@ type BeadQuerier interface {
 	Get(id string) (beads.Bead, error)
 }
 
-// BeadChildQuerier extends BeadQuerier with the ability to list children
-// of a convoy.
+// BeadChildQuerier extends BeadQuerier with the ability to query child beads.
 type BeadChildQuerier interface {
 	BeadQuerier
-	Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error)
+	List(query beads.ListQuery) ([]beads.Bead, error)
 }
 
 func newSlingCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -676,8 +675,13 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier) int 
 		return doSling(singleOpts, deps, querier)
 	}
 
-	// Container expansion.
-	children, err := querier.Children(b.ID)
+	// Container expansion keeps closed children in the preview so the skipped
+	// section and summary counts still reflect the full container state.
+	children, err := querier.List(beads.ListQuery{
+		ParentID:      b.ID,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedAsc,
+	})
 	if err != nil {
 		fmt.Fprintf(deps.Stderr, "gc sling: listing children of %s: %v\n", b.ID, err) //nolint:errcheck // best-effort
 		return 1

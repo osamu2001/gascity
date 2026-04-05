@@ -59,6 +59,26 @@ func ComputePoolDesiredStates(
 	sessionBeads []beads.Bead,
 	scaleCheckCounts map[string]int,
 ) []PoolDesiredState {
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads, scaleCheckCounts, nil)
+}
+
+func ComputePoolDesiredStatesTraced(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionBeads []beads.Bead,
+	scaleCheckCounts map[string]int,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionBeads, scaleCheckCounts, trace)
+}
+
+func computePoolDesiredStates(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionBeads []beads.Bead,
+	scaleCheckCounts map[string]int,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
 	// Build reverse lookup: any identifier → session bead ID.
 	// Assignee on work beads may be a bead ID, session name, or alias.
 	assigneeToSessionBeadID := make(map[string]string)
@@ -87,26 +107,38 @@ func ComputePoolDesiredStates(
 
 		// Resume tier: assigned work beads whose assignee resolves to a
 		// non-closed session bead. These sessions must stay alive.
+		// New tier (bead-driven): work beads routed to this template
+		// but with no assignee — on-demand work from gc sling that
+		// needs a new pool worker to be spawned.
 		for _, wb := range assignedWorkBeads {
 			routedTo := wb.Metadata["gc.routed_to"]
 			if routedTo != template {
 				continue
 			}
-			assignee := strings.TrimSpace(wb.Assignee)
-			sessionBeadID := assigneeToSessionBeadID[assignee]
-			if sessionBeadID == "" {
-				continue
-			}
 			if wb.Status != "in_progress" && wb.Status != "open" {
 				continue
 			}
-			allRequests = append(allRequests, SessionRequest{
-				Template:      template,
-				BeadPriority:  beadPriority(wb),
-				Tier:          "resume",
-				SessionBeadID: sessionBeadID,
-				WorkBeadID:    wb.ID,
-			})
+			assignee := strings.TrimSpace(wb.Assignee)
+			sessionBeadID := assigneeToSessionBeadID[assignee]
+			if sessionBeadID != "" {
+				allRequests = append(allRequests, SessionRequest{
+					Template:      template,
+					BeadPriority:  beadPriority(wb),
+					Tier:          "resume",
+					SessionBeadID: sessionBeadID,
+					WorkBeadID:    wb.ID,
+				})
+			} else if assignee == "" {
+				// Routed but unassigned — demand for a new worker.
+				allRequests = append(allRequests, SessionRequest{
+					Template:     template,
+					BeadPriority: beadPriority(wb),
+					Tier:         "new",
+					WorkBeadID:   wb.ID,
+				})
+			}
+			// Else: assignee set but session closed/unknown — orphaned
+			// work, not our job to respawn.
 		}
 	}
 
@@ -139,12 +171,12 @@ func ComputePoolDesiredStates(
 		}
 	}
 
-	return applyNestedCaps(cfg, allRequests)
+	return applyNestedCaps(cfg, allRequests, trace)
 }
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
 // Accepts requests in priority order, rejecting any that would exceed a cap.
-func applyNestedCaps(cfg *config.City, requests []SessionRequest) []PoolDesiredState {
+func applyNestedCaps(cfg *config.City, requests []SessionRequest, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
 	// Sort by priority DESC, resume tier first within same priority.
 	sort.SliceStable(requests, func(i, j int) bool {
 		if requests[i].BeadPriority != requests[j].BeadPriority {
@@ -208,6 +240,13 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest) []PoolDesiredS
 		// Check agent cap.
 		agentMax := agentMaxMap[template]
 		if agentMax >= 0 && agentCount[template] >= agentMax {
+			if trace != nil {
+				trace.recordDecision("reconciler.pool.agent_cap", template, "", "agent_cap", "rejected", traceRecordPayload{
+					"agent_max": agentMax,
+					"current":   agentCount[template],
+					"tier":      req.Tier,
+				}, nil, "")
+			}
 			continue
 		}
 		// Check rig cap.
@@ -217,16 +256,36 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest) []PoolDesiredS
 				rigMax = -1
 			}
 			if rigMax >= 0 && rigCount[rig] >= rigMax {
+				if trace != nil {
+					trace.recordDecision("reconciler.pool.rig_cap", template, "", "rig_cap", "rejected", traceRecordPayload{
+						"rig":     rig,
+						"rig_max": rigMax,
+						"current": rigCount[rig],
+						"tier":    req.Tier,
+					}, nil, "")
+				}
 				continue
 			}
 		}
 		// Check workspace cap.
 		if workspaceMax >= 0 && workspaceCount >= workspaceMax {
+			if trace != nil {
+				trace.recordDecision("reconciler.pool.workspace_cap", template, "", "workspace_cap", "rejected", traceRecordPayload{
+					"workspace_max": workspaceMax,
+					"current":       workspaceCount,
+					"tier":          req.Tier,
+				}, nil, "")
+			}
 			continue
 		}
 
 		// Accept.
 		accepted[template] = append(accepted[template], req)
+		if trace != nil {
+			trace.recordDecision("reconciler.pool.accept", template, "", "cap", "accepted", traceRecordPayload{
+				"tier": req.Tier,
+			}, nil, "")
+		}
 		agentCount[template]++
 		if rig != "" {
 			rigCount[rig]++
@@ -268,6 +327,13 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest) []PoolDesiredS
 				Template: template,
 				Tier:     "new",
 			})
+			if trace != nil {
+				trace.recordDecision("reconciler.pool.min_fill", template, "", "min_fill", "accepted", traceRecordPayload{
+					"min":     minSess,
+					"current": agentCount[template],
+					"tier":    "new",
+				}, nil, "")
+			}
 			agentCount[template]++
 			if rig != "" {
 				rigCount[rig]++

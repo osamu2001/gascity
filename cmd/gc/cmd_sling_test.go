@@ -723,6 +723,25 @@ func (q *fakeChildQuerier) Children(parentID string, _ ...beads.QueryOpt) ([]bea
 	return q.childrenOf[parentID], nil
 }
 
+func (q *fakeChildQuerier) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.ParentID == "" {
+		return nil, beads.ErrQueryRequiresScan
+	}
+	children, err := q.Children(query.ParentID)
+	if err != nil {
+		return nil, err
+	}
+	normalized := make([]beads.Bead, len(children))
+	copy(normalized, children)
+	for i := range normalized {
+		if normalized[i].ParentID == "" {
+			normalized[i].ParentID = query.ParentID
+		}
+	}
+	query.ParentID = ""
+	return beads.ApplyListQuery(normalized, query), nil
+}
+
 func TestCheckBeadStateAssigneeWarns(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

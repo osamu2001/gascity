@@ -24,6 +24,13 @@ func (s waitErrorStore) ListByLabel(label string, limit int, _ ...beads.QueryOpt
 	return s.MemStore.ListByLabel(label, limit)
 }
 
+func (s waitErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == waitBeadLabel {
+		return nil, errors.New("wait list failed")
+	}
+	return s.MemStore.List(query)
+}
+
 func TestPrepareWaitWakeState_MarksDepsReady(t *testing.T) {
 	store := beads.NewMemStore()
 	sessionBead, err := store.Create(beads.Bead{

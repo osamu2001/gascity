@@ -54,6 +54,10 @@ func (s failingListByLabelStore) ListByLabel(_ string, _ int, _ ...beads.QueryOp
 	return nil, s.err
 }
 
+func (s failingListByLabelStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
+
 // --- gc mail send ---
 
 func TestMailSendSuccess(t *testing.T) {

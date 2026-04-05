@@ -18,10 +18,12 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -159,7 +161,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		}
 	}
 	if sessionBeadID == "" && p.beadStore != nil {
-		if all, err := p.beadStore.ListByLabel("gc:session", 0); err == nil {
+		if all, err := p.beadStore.List(beads.ListQuery{Label: "gc:session", Type: session.BeadType}); err == nil {
 			for _, b := range all {
 				if b.Status != "closed" && b.Metadata["session_name"] == sessName {
 					sessionBeadID = b.ID
@@ -211,28 +213,26 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 9: Render prompt with beacon.
 	var prompt string
-	if resolved.PromptMode != "none" {
-		fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
-		prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
-			CityRoot:      p.cityPath,
-			AgentName:     qualifiedName,
-			TemplateName:  cfgAgent.Name,
-			RigName:       rigName,
-			RigRoot:       rigRoot,
-			WorkDir:       workDir,
-			IssuePrefix:   findRigPrefix(rigName, p.rigs),
-			DefaultBranch: defaultBranchFor(workDir),
-			WorkQuery:     cfgAgent.EffectiveWorkQuery(),
-			SlingQuery:    cfgAgent.EffectiveSlingQuery(),
-			Env:           cfgAgent.Env,
-		}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
-		hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)
-		beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
-		if prompt != "" {
-			prompt = beacon + "\n\n" + prompt
-		} else {
-			prompt = beacon
-		}
+	fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
+	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
+		CityRoot:      p.cityPath,
+		AgentName:     qualifiedName,
+		TemplateName:  cfgAgent.Name,
+		RigName:       rigName,
+		RigRoot:       rigRoot,
+		WorkDir:       workDir,
+		IssuePrefix:   findRigPrefix(rigName, p.rigs),
+		DefaultBranch: defaultBranchFor(workDir),
+		WorkQuery:     cfgAgent.EffectiveWorkQuery(),
+		SlingQuery:    cfgAgent.EffectiveSlingQuery(),
+		Env:           cfgAgent.Env,
+	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
+	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)
+	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
+	if prompt != "" {
+		prompt = beacon + "\n\n" + prompt
+	} else {
+		prompt = beacon
 	}
 
 	// Step 10: Merge environment layers.
@@ -363,10 +363,19 @@ func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]stri
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	var promptSuffix string
 	var promptFlag string
+	nudge := tp.Hints.Nudge
 	if tp.Prompt != "" {
-		promptSuffix = shellquote.Quote(tp.Prompt)
-		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" && tp.ResolvedProvider.PromptFlag != "" {
-			promptFlag = tp.ResolvedProvider.PromptFlag
+		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+			if nudge != "" {
+				nudge = tp.Prompt + "\n\n---\n\n" + nudge
+			} else {
+				nudge = tp.Prompt
+			}
+		} else {
+			promptSuffix = shellquote.Quote(tp.Prompt)
+			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" && tp.ResolvedProvider.PromptFlag != "" {
+				promptFlag = tp.ResolvedProvider.PromptFlag
+			}
 		}
 	}
 	return runtime.Config{
@@ -379,7 +388,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		ReadyDelayMs:           tp.Hints.ReadyDelayMs,
 		ProcessNames:           tp.Hints.ProcessNames,
 		EmitsPermissionWarning: tp.Hints.EmitsPermissionWarning,
-		Nudge:                  tp.Hints.Nudge,
+		Nudge:                  nudge,
 		PreStart:               tp.Hints.PreStart,
 		SessionSetup:           tp.Hints.SessionSetup,
 		SessionSetupScript:     tp.Hints.SessionSetupScript,
