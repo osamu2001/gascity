@@ -232,7 +232,7 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride string, start
 	}
 	if deferred {
 		// City is probably running — try direct init.
-		if err := initAndHookDir(cityPath, rigPath, prefix, ""); err != nil {
+		if err := initAndHookDir(cityPath, rigPath, prefix); err != nil {
 			w("  Beads init deferred to controller")
 		} else {
 			w("  Initialized beads database")

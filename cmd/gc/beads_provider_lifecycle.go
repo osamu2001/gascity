@@ -77,12 +77,12 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	// identity that differs from the bead prefix. New managed bd stores still
 	// default to prefix-named databases, but older/imported metadata may carry
 	// a different dolt_database that gc-beads-bd should preserve.
-	if err := initAndHookDir(cityPath, cityPath, beadsPrefix, ""); err != nil {
+	if err := initAndHookDir(cityPath, cityPath, beadsPrefix); err != nil {
 		return fmt.Errorf("init city beads: %w", err)
 	}
 	for i := range cfg.Rigs {
 		prefix := cfg.Rigs[i].EffectivePrefix()
-		if err := initAndHookDir(cityPath, cfg.Rigs[i].Path, prefix, ""); err != nil {
+		if err := initAndHookDir(cityPath, cfg.Rigs[i].Path, prefix); err != nil {
 			return fmt.Errorf("init rig %q beads: %w", cfg.Rigs[i].Name, err)
 		}
 	}
@@ -126,7 +126,7 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 		if err := ensureBeadsProvider(cityPath); err != nil {
 			return false, fmt.Errorf("bead store: %w", err)
 		}
-		if err := initAndHookDir(cityPath, dir, prefix, ""); err != nil {
+		if err := initAndHookDir(cityPath, dir, prefix); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -151,7 +151,7 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 	if err := ensureBeadsProvider(cityPath); err != nil {
 		return false, fmt.Errorf("bead store: %w", err)
 	}
-	if err := initAndHookDir(cityPath, dir, prefix, ""); err != nil {
+	if err := initAndHookDir(cityPath, dir, prefix); err != nil {
 		return false, err
 	}
 	return false, nil
@@ -304,8 +304,8 @@ func ensureDeferredManagedMetadata(path, doltDatabase string) {
 // initAndHookDir is the atomic unit of bead store initialization:
 // init the directory, then install event hooks. The ordering matters
 // because init (bd init) may recreate .beads/ and wipe existing hooks.
-func initAndHookDir(cityPath, dir, prefix, doltDatabase string) error {
-	if err := initBeadsForDir(cityPath, dir, prefix, doltDatabase); err != nil {
+func initAndHookDir(cityPath, dir, prefix string) error {
+	if err := initBeadsForDir(cityPath, dir, prefix, ""); err != nil {
 		return err
 	}
 	// Non-fatal: hooks are convenience (event forwarding), not critical.
