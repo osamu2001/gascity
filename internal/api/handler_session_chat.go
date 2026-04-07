@@ -403,6 +403,9 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 	resp := sessionToResponse(info, s.state.Config())
 	resp.Kind = "agent"
+	if caps, capErr := s.sessionManager(store).SubmissionCapabilities(info.ID); capErr == nil {
+		resp.SubmissionCapabilities = caps
+	}
 	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
 	statusCode := http.StatusAccepted // always async for agent sessions
 	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)

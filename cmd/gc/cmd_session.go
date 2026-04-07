@@ -730,7 +730,9 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Try reconciler-first path: set held_until metadata, poke controller.
-	if cityErr == nil {
+	// Only use this path when the city is managed by a standalone controller
+	// or the machine-wide supervisor — not for unmanaged ad-hoc cities.
+	if cityErr == nil && cityUsesManagedReconciler(cityPath) {
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
 			// Controller is running — metadata-only suspend.
 			// Set held_until far in the future so the reconciler drains/stops the session.
@@ -1173,8 +1175,10 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 
 func emitSessionSubmitResult(stdout io.Writer, target string, intent session.SubmitIntent, queued bool) {
 	switch {
-	case queued || intent == session.SubmitIntentFollowUp:
+	case queued:
 		fmt.Fprintf(stdout, "Queued follow-up for %s\n", target) //nolint:errcheck // best-effort stdout
+	case intent == session.SubmitIntentFollowUp:
+		fmt.Fprintf(stdout, "Submitted follow-up to %s\n", target) //nolint:errcheck // best-effort stdout
 	case intent == session.SubmitIntentInterruptNow:
 		fmt.Fprintf(stdout, "Interrupted and submitted to %s\n", target) //nolint:errcheck // best-effort stdout
 	default:

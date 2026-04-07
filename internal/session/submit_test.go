@@ -245,11 +245,8 @@ func TestSubmitInterruptNowFallsBackToHardRestartForClaude(t *testing.T) {
 		t.Fatal("Submit(interrupt_now) unexpectedly queued")
 	}
 
-	var sawInterrupt, sawStop, sawRestart, sawNudge bool
+	var sawStop, sawRestart, sawNudge bool
 	for _, call := range sp.Calls {
-		if call.Method == "Interrupt" && call.Name == info.SessionName {
-			sawInterrupt = true
-		}
 		if call.Method == "Stop" && call.Name == info.SessionName {
 			sawStop = true
 		}
@@ -260,12 +257,12 @@ func TestSubmitInterruptNowFallsBackToHardRestartForClaude(t *testing.T) {
 			sawNudge = true
 		}
 	}
-	if !sawInterrupt || !sawStop || !sawRestart || !sawNudge {
-		t.Fatalf("calls = %#v, want interrupt + stop + restart + nudge", sp.Calls)
+	if !sawStop || !sawRestart || !sawNudge {
+		t.Fatalf("calls = %#v, want stop + restart + nudge (no intermediate interrupt)", sp.Calls)
 	}
 }
 
-func TestStopTurnUsesSoftEscapeForCodex(t *testing.T) {
+func TestStopTurnUsesInterruptForCodex(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := NewManager(store, sp)
@@ -279,19 +276,43 @@ func TestStopTurnUsesSoftEscapeForCodex(t *testing.T) {
 		t.Fatalf("StopTurn: %v", err)
 	}
 
-	var sawEscape, sawInterrupt bool
+	// StopTurn always uses SIGINT (Interrupt) regardless of provider.
+	// Soft Escape is only used by the submit interrupt_now path via stopTurnLocked.
+	var sawInterrupt bool
 	for _, call := range sp.Calls {
-		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
-			sawEscape = true
-		}
 		if call.Method == "Interrupt" && call.Name == info.SessionName {
 			sawInterrupt = true
 		}
 	}
-	if !sawEscape {
-		t.Fatalf("calls = %#v, want SendKeys(Escape)", sp.Calls)
+	if !sawInterrupt {
+		t.Fatalf("calls = %#v, want Interrupt for StopTurn", sp.Calls)
 	}
-	if sawInterrupt {
-		t.Fatalf("calls = %#v, did not want Interrupt for codex stop", sp.Calls)
+}
+
+func TestSubmitInterruptNowUsesSoftEscapeForCodex(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "codex", t.TempDir(), "codex", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, err = mgr.Submit(context.Background(), info.ID, "replace", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentInterruptNow)
+	if err != nil {
+		t.Fatalf("Submit(interrupt_now): %v", err)
+	}
+
+	// The submit interrupt_now path uses stopTurnLocked which sends
+	// soft Escape for codex instead of SIGINT.
+	var sawEscape bool
+	for _, call := range sp.Calls {
+		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
+			sawEscape = true
+		}
+	}
+	if !sawEscape {
+		t.Fatalf("calls = %#v, want SendKeys(Escape) via submit interrupt_now", sp.Calls)
 	}
 }

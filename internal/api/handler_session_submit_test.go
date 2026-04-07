@@ -148,7 +148,7 @@ func TestHandleSessionGetIncludesSubmissionCapabilities(t *testing.T) {
 	}
 }
 
-func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
+func TestHandleSessionStopUsesInterruptForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
@@ -165,19 +165,15 @@ func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("stop status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	var sawEscape, sawInterrupt bool
+	// StopTurn (backing /stop) always uses SIGINT regardless of provider.
+	// Soft Escape is reserved for the submit interrupt_now path.
+	var sawInterrupt bool
 	for _, call := range fs.sp.Calls {
-		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
-			sawEscape = true
-		}
 		if call.Method == "Interrupt" && call.Name == info.SessionName {
 			sawInterrupt = true
 		}
 	}
-	if !sawEscape {
-		t.Fatalf("calls = %#v, want SendKeys(Escape)", fs.sp.Calls)
-	}
-	if sawInterrupt {
-		t.Fatalf("calls = %#v, did not want Interrupt for codex stop", fs.sp.Calls)
+	if !sawInterrupt {
+		t.Fatalf("calls = %#v, want Interrupt for StopTurn", fs.sp.Calls)
 	}
 }

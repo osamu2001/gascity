@@ -122,12 +122,16 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, id string, b bea
 	if !running {
 		return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
 	}
-	if err := m.stopTurnLocked(b, sessName); err != nil {
-		return err
-	}
 	if usesHardRestartSubmit(b) {
+		// Hard-restart providers (Claude over tmux) are killed and restarted.
+		// Stop() is a superset of stopTurnLocked(), so skip the intermediate
+		// interrupt to avoid wasted latency.
 		if err := m.sp.Stop(sessName); err != nil {
 			return fmt.Errorf("stopping session before submit: %w", err)
+		}
+	} else {
+		if err := m.stopTurnLocked(b, sessName); err != nil {
+			return err
 		}
 	}
 	return m.sendLocked(ctx, id, b, sessName, message, resumeCommand, hints, true)
@@ -230,6 +234,11 @@ func deferredSubmitAgentKey(b beads.Bead) string {
 
 var startSessionSubmitPoller = ensureSessionSubmitPoller
 
+// ensureSessionSubmitPoller starts a background nudge poller if one is not
+// already running. PID files are used here for orphan bounding rather than
+// state tracking: the poller validates PID liveness via kill(pid, 0) and the
+// 15-second grace period in shouldKeepNudgePollerAlive caps orphan lifetime
+// on parent crash.
 func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName)
 	return withSessionSubmitPollerPIDLock(pidPath, func() error {
