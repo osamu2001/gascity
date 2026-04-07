@@ -204,6 +204,9 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 		return err
 	}
 	if agentName == "" {
+		agentName = os.Getenv("GC_ALIAS")
+	}
+	if agentName == "" {
 		agentName = os.Getenv("GC_AGENT")
 	}
 	if agentName == "" {

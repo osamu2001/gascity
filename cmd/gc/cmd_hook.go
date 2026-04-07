@@ -105,26 +105,22 @@ func cmdHook(args []string, inject bool, stdout, stderr io.Writer) int {
 	resolvedSessionName := cliSessionName(cityPath, cfg.Workspace.Name, resolvedAgentName, cfg.Workspace.SessionTemplate)
 	restoreAgent := os.Getenv("GC_AGENT")
 	restoreSession := os.Getenv("GC_SESSION_NAME")
-	if os.Getenv("GC_AGENT") == "" {
-		_ = os.Setenv("GC_AGENT", resolvedAgentName)
-		defer func() {
-			if restoreAgent == "" {
-				_ = os.Unsetenv("GC_AGENT")
-			} else {
-				_ = os.Setenv("GC_AGENT", restoreAgent)
-			}
-		}()
-	}
-	if os.Getenv("GC_SESSION_NAME") == "" {
-		_ = os.Setenv("GC_SESSION_NAME", resolvedSessionName)
-		defer func() {
-			if restoreSession == "" {
-				_ = os.Unsetenv("GC_SESSION_NAME")
-			} else {
-				_ = os.Setenv("GC_SESSION_NAME", restoreSession)
-			}
-		}()
-	}
+	_ = os.Setenv("GC_AGENT", resolvedAgentName)
+	defer func() {
+		if restoreAgent == "" {
+			_ = os.Unsetenv("GC_AGENT")
+		} else {
+			_ = os.Setenv("GC_AGENT", restoreAgent)
+		}
+	}()
+	_ = os.Setenv("GC_SESSION_NAME", resolvedSessionName)
+	defer func() {
+		if restoreSession == "" {
+			_ = os.Unsetenv("GC_SESSION_NAME")
+		} else {
+			_ = os.Setenv("GC_SESSION_NAME", restoreSession)
+		}
+	}()
 
 	workQuery := a.EffectiveWorkQuery()
 	workDir := agentCommandDir(cityPath, &a, cfg.Rigs)

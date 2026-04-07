@@ -61,7 +61,7 @@ Use it to prime any CLI coding agent with city-aware instructions:
   codex --prompt "$(gc prime worker)"
 
 Runtime hook profiles may call ` + "`gc prime --hook`" + `.
-When agent-name is omitted, ` + "`GC_AGENT`" + ` is used automatically.
+When agent-name is omitted, ` + "`GC_ALIAS`" + ` is used (falling back to ` + "`GC_AGENT`" + `).
 
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.`,

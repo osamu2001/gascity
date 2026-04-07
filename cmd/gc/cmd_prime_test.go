@@ -40,6 +40,23 @@ func TestBuildPrimeContextPrefersGCAliasOverGCAgent(t *testing.T) {
 	}
 }
 
+func TestBuildPrimeContextUsesAliasEvenWhenDifferentFromConfigName(t *testing.T) {
+	// When GC_ALIAS is set but differs from the config agent name, AgentName
+	// should still reflect GC_ALIAS — the alias is the public identity the
+	// prompt should use.
+	t.Setenv("GC_AGENT", "bl-9jl")
+	t.Setenv("GC_ALIAS", "custom-alias")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_BRANCH", "")
+
+	ctx := buildPrimeContext("/city", &config.Agent{Name: "mayor"}, nil)
+
+	if ctx.AgentName != "custom-alias" {
+		t.Errorf("AgentName = %q, want %q (should use GC_ALIAS even when it differs from config name)", ctx.AgentName, "custom-alias")
+	}
+}
+
 func TestBuildPrimeContextFallsBackToGCAgentWhenNoAlias(t *testing.T) {
 	// When GC_ALIAS is not set, buildPrimeContext should still use GC_AGENT.
 	t.Setenv("GC_AGENT", "mayor")

@@ -18,7 +18,10 @@ import (
 func buildPod(name string, cfg runtime.Config, p *Provider) (*corev1.Pod, error) {
 	podName := SanitizeName(name)
 	label := SanitizeLabel(name)
-	agentName := cfg.Env["GC_AGENT"]
+	agentName := cfg.Env["GC_ALIAS"]
+	if agentName == "" {
+		agentName = cfg.Env["GC_AGENT"]
+	}
 	if agentName == "" {
 		agentName = "unknown"
 	}
