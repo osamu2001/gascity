@@ -23,6 +23,11 @@
 #   - clear-scrollback returns exit 2 until zmx ships a compatible command.
 #   - copy-to/copy-from operate on the local filesystem using the adapter's
 #     remembered workdir instead of a native zmx file-transfer primitive.
+#   - Session names are passed through to zmx as-is. Gas City's default names
+#     are compatible, but custom session_template output should avoid "/" and
+#     other zmx-invalid names.
+#   - zmx enforces a session-name length limit derived from its Unix socket
+#     path. Very long custom names may fail even if Gas City accepted them.
 #
 # Dependencies: zmx, jq, bash
 #
