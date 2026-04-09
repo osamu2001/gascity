@@ -31,7 +31,7 @@ func zmxScriptPath(t *testing.T) string {
 	return filepath.Join(repoRoot(t), "contrib", "session-scripts", "gc-session-zmx")
 }
 
-func writeFakeZMX(t *testing.T, dir string) string {
+func writeFakeZMX(t *testing.T, dir string) {
 	t.Helper()
 	path := filepath.Join(dir, "zmx")
 	const script = `#!/usr/bin/env bash
@@ -136,7 +136,6 @@ esac
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return path
 }
 
 func scriptEnv(pathDir, zmxStateDir, execStateDir string) []string {
