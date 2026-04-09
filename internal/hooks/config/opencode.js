@@ -43,16 +43,15 @@ export default async function gascityPlugin({ directory }) {
     return cachedPrime;
   }
 
+  function prependText(existing, prefix) {
+    return existing ? prefix + "\n\n" + existing : prefix;
+  }
+
   async function buildPrefix() {
     const prime = await readPrime();
     const nudges = await run(directory, "nudge", "drain", "--inject");
     const mail = await run(directory, "mail", "check", "--inject");
-    return {
-      prime,
-      nudges,
-      mail,
-      extras: [prime, nudges, mail].filter(Boolean),
-    };
+    return [prime, nudges, mail].filter(Boolean).join("\n\n");
   }
 
   return {
@@ -71,21 +70,17 @@ export default async function gascityPlugin({ directory }) {
     },
 
     "chat.message": async (_input, output) => {
-      const { prime, nudges, mail, extras } = await buildPrefix();
-      if (extras.length > 0) {
-        const prefix = extras.join("\n\n");
-        output.message.system = output.message.system
-          ? prefix + "\n\n" + output.message.system
-          : prefix;
+      const prefix = await buildPrefix();
+      if (prefix) {
+        output.message.system = prependText(output.message.system, prefix);
       }
     },
 
     "experimental.chat.system.transform": async (_input, output) => {
-      const { prime, nudges, mail, extras } = await buildPrefix();
-      if (extras.length > 0) {
-        const prefix = extras.join("\n\n");
+      const prefix = await buildPrefix();
+      if (prefix) {
         if (output.system[0]) {
-          output.system[0] = prefix + "\n\n" + output.system[0];
+          output.system[0] = prependText(output.system[0], prefix);
         } else {
           output.system.unshift(prefix);
         }

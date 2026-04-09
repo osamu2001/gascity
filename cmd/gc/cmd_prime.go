@@ -150,16 +150,16 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 				}))
 			}
 		}
+		var ctx PromptContext
+		if ok && (a.PromptTemplate != "" || hookMode) {
+			ctx = buildPrimeContext(cityPath, &a, cfg.Rigs)
+		}
 		if ok && a.PromptTemplate != "" {
-			ctx := buildPrimeContext(cityPath, &a, cfg.Rigs)
 			fragments := mergeFragmentLists(cfg.Workspace.GlobalFragments, a.InjectFragments)
 			prompt := renderPrompt(fsys.OSFS{}, cityPath, cityName, a.PromptTemplate, ctx, cfg.Workspace.SessionTemplate, stderr,
 				cfg.PackDirs, fragments, nil)
 			if prompt != "" {
-				if hookMode {
-					prompt = prependHookBeacon(cityName, ctx.AgentName, prompt)
-				}
-				fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
+				writePrimePrompt(stdout, cityName, ctx.AgentName, prompt, hookMode)
 				return 0
 			}
 		}
@@ -177,11 +177,7 @@ func doPrimeWithMode(args []string, stdout, stderr io.Writer, hookMode bool) int
 			}
 			if promptFile != "" {
 				if content, fErr := os.ReadFile(filepath.Join(cityPath, promptFile)); fErr == nil {
-					prompt := string(content)
-					if hookMode {
-						prompt = prependHookBeacon(cityName, buildPrimeContext(cityPath, &a, cfg.Rigs).AgentName, prompt)
-					}
-					fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
+					writePrimePrompt(stdout, cityName, ctx.AgentName, string(content), hookMode)
 					return 0
 				}
 			}
@@ -202,6 +198,13 @@ func prependHookBeacon(cityName, agentName, prompt string) string {
 		return beacon
 	}
 	return beacon + "\n\n" + prompt
+}
+
+func writePrimePrompt(stdout io.Writer, cityName, agentName, prompt string, hookMode bool) {
+	if hookMode {
+		prompt = prependHookBeacon(cityName, agentName, prompt)
+	}
+	fmt.Fprint(stdout, prompt) //nolint:errcheck // best-effort stdout
 }
 
 func readPrimeHookContext() (sessionID, source string) {

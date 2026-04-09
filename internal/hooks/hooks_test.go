@@ -45,6 +45,24 @@ func cursorHookCommand(t *testing.T, data []byte, event string) string {
 	return entries[0].Command
 }
 
+const openCodePluginPath = "/work/.opencode/plugins/gascity.js"
+
+func installOpenCodePlugin(t *testing.T, existing string) string {
+	t.Helper()
+	fs := fsys.NewFake()
+	if existing != "" {
+		fs.Files[openCodePluginPath] = []byte(existing)
+	}
+	if err := Install(fs, "/city", "/work", []string{"opencode"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	data, ok := fs.Files[openCodePluginPath]
+	if !ok {
+		t.Fatalf("expected %s to be written", openCodePluginPath)
+	}
+	return string(data)
+}
+
 func TestSupportedProviders(t *testing.T) {
 	got := SupportedProviders()
 	if len(got) != 8 {
@@ -202,16 +220,7 @@ func TestInstallCodex(t *testing.T) {
 }
 
 func TestInstallOpenCode(t *testing.T) {
-	fs := fsys.NewFake()
-	err := Install(fs, "/city", "/work", []string{"opencode"})
-	if err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	data, ok := fs.Files["/work/.opencode/plugins/gascity.js"]
-	if !ok {
-		t.Fatal("expected /work/.opencode/plugins/gascity.js to be written")
-	}
-	s := string(data)
+	s := installOpenCodePlugin(t, "")
 	if !strings.Contains(s, "gc prime") {
 		t.Error("opencode plugin should contain gc prime")
 	}
@@ -239,7 +248,7 @@ func TestInstallOpenCode(t *testing.T) {
 	if strings.Contains(s, "output.system[1] = prefix + \"\\n\\n\" + output.system[1]") {
 		t.Error("opencode plugin should not duplicate the prefix into output.system[1]")
 	}
-	if !strings.Contains(s, "output.system[0] = prefix + \"\\n\\n\" + output.system[0]") {
+	if !strings.Contains(s, "output.system[0] = prependText(output.system[0], prefix)") {
 		t.Error("opencode plugin should merge the prefix into output.system[0] when a system prompt already exists")
 	}
 	if !strings.Contains(s, `"chat.message"`) {
@@ -248,20 +257,13 @@ func TestInstallOpenCode(t *testing.T) {
 }
 
 func TestInstallOpenCodeUpgradesLegacyManagedPlugin(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/work/.opencode/plugins/gascity.js"] = []byte(`module.exports = {
+	data := installOpenCodePlugin(t, `module.exports = {
   hooks: {
     "experimental.chat.system.transform": async (_input, output) => {
       output.system.push("gc prime --hook")
     }
   }
 }`)
-
-	err := Install(fs, "/city", "/work", []string{"opencode"})
-	if err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	data := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	if !strings.Contains(data, "export default async function") {
 		t.Fatal("legacy opencode plugin was not upgraded")
 	}
@@ -280,8 +282,7 @@ func TestInstallOpenCodeUpgradesLegacyManagedPlugin(t *testing.T) {
 }
 
 func TestInstallOpenCodeUpgradesManagedPluginMissingShutdownHook(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/work/.opencode/plugins/gascity.js"] = []byte(`export default async function gascityPlugin() {
+	data := installOpenCodePlugin(t, `export default async function gascityPlugin() {
   return {
     event: async ({ event }) => {
       switch (event.type) {
@@ -298,12 +299,6 @@ func TestInstallOpenCodeUpgradesManagedPluginMissingShutdownHook(t *testing.T) {
     },
   }
 }`)
-
-	err := Install(fs, "/city", "/work", []string{"opencode"})
-	if err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	data := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	if !strings.Contains(data, `"session.deleted"`) {
 		t.Fatal("managed opencode plugin missing session.deleted was not upgraded")
 	}
@@ -313,8 +308,7 @@ func TestInstallOpenCodeUpgradesManagedPluginMissingShutdownHook(t *testing.T) {
 }
 
 func TestInstallOpenCodeUpgradesManagedPluginWithDuplicateTransformInjection(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/work/.opencode/plugins/gascity.js"] = []byte(`export default async function gascityPlugin() {
+	data := installOpenCodePlugin(t, `export default async function gascityPlugin() {
   return {
     event: async () => {},
     "chat.message": async () => {},
@@ -327,23 +321,16 @@ func TestInstallOpenCodeUpgradesManagedPluginWithDuplicateTransformInjection(t *
     },
   }
 }`)
-
-	err := Install(fs, "/city", "/work", []string{"opencode"})
-	if err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	data := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	if strings.Contains(data, "output.system[1] = prefix + \"\\n\\n\" + output.system[1]") {
 		t.Fatal("managed opencode plugin with duplicate transform injection was not upgraded")
 	}
-	if !strings.Contains(data, "output.system[0] = prefix + \"\\n\\n\" + output.system[0]") {
+	if !strings.Contains(data, "output.system[0] = prependText(output.system[0], prefix)") {
 		t.Fatal("upgraded opencode plugin should merge into output.system[0]")
 	}
 }
 
 func TestInstallOpenCodeUpgradesManagedPluginWithoutPrimeCache(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/work/.opencode/plugins/gascity.js"] = []byte(`export default async function gascityPlugin({ directory }) {
+	data := installOpenCodePlugin(t, `export default async function gascityPlugin({ directory }) {
   async function buildPrefix() {
     const prime = await run(directory, "prime", "--hook");
     return { prime, extras: [prime].filter(Boolean) };
@@ -354,12 +341,6 @@ func TestInstallOpenCodeUpgradesManagedPluginWithoutPrimeCache(t *testing.T) {
     "experimental.chat.system.transform": async () => {},
   }
 }`)
-
-	err := Install(fs, "/city", "/work", []string{"opencode"})
-	if err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	data := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	if !strings.Contains(data, `let cachedPrime = "";`) {
 		t.Fatal("managed opencode plugin without prime cache was not upgraded")
 	}
