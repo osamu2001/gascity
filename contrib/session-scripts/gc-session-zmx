@@ -55,6 +55,36 @@ warn() {
   printf '%s\n' "$*" >&2
 }
 
+build_session_argv() {
+  local command_str="$1"
+  local prompt_flag="$2"
+  local prompt_suffix="$3"
+
+  SESSION_ARGV=()
+  if [ -n "$command_str" ]; then
+    # command_str is produced by Gas City as a shell-escaped command line.
+    # Rehydrate it into argv so zmx run receives separate args instead of
+    # one big shell string.
+    eval "set -- $command_str"
+    SESSION_ARGV=("$@")
+  else
+    SESSION_ARGV=("${SHELL:-/bin/sh}")
+  fi
+
+  if [ -n "$prompt_suffix" ]; then
+    if [ -n "$prompt_flag" ]; then
+      SESSION_ARGV+=("$prompt_flag")
+    fi
+    # prompt_suffix is shell-quoted text from template_resolve.go.
+    eval "set -- $prompt_suffix"
+    if [ "$#" -ne 1 ]; then
+      warn "start: prompt suffix did not decode to a single argument"
+      return 1
+    fi
+    SESSION_ARGV+=("$1")
+  fi
+}
+
 store_work_dir() {
   printf '%s' "$2" > "$(state_file "$1" work_dir)"
 }
@@ -72,9 +102,42 @@ cleanup_session_state() {
   rm -f "$STATE_DIR/${1}.meta."*
 }
 
+canonical_path() {
+  local target="$1"
+  if [ -d "$target" ]; then
+    (
+      cd "$target"
+      pwd -P
+    )
+    return 0
+  fi
+
+  local parent base
+  parent="$(dirname "$target")"
+  base="$(basename "$target")"
+  if [ ! -d "$parent" ]; then
+    return 1
+  fi
+
+  (
+    cd "$parent"
+    printf '%s/%s\n' "$(pwd -P)" "$base"
+  )
+}
+
+same_path() {
+  local left right
+  left="$(canonical_path "$1" 2>/dev/null || printf '%s' "$1")"
+  right="$(canonical_path "$2" 2>/dev/null || printf '%s' "$2")"
+  [ "$left" = "$right" ]
+}
+
 copy_tree_contents() {
   local src="$1"
   local dst="$2"
+  if same_path "$src" "$dst"; then
+    return 0
+  fi
   mkdir -p "$dst"
   cp -Rf "$src/." "$dst/"
 }
@@ -88,12 +151,18 @@ copy_entry_to_work_dir() {
   [ -n "$rel_dst" ] && dst="$work_dir/$rel_dst"
 
   if [ -d "$src" ]; then
+    if same_path "$src" "$dst"; then
+      return 0
+    fi
     mkdir -p "$dst"
     cp -Rf "$src/." "$dst/"
     return 0
   fi
 
   if [ -f "$src" ]; then
+    if same_path "$src" "$dst"; then
+      return 0
+    fi
     if [ -d "$dst" ]; then
       cp -f "$src" "$dst/"
     elif [ -n "$rel_dst" ]; then
@@ -288,6 +357,8 @@ case "$op" in
   start)
     config="$(cat)"
     command="$(printf '%s' "$config" | jq -r '.command // ""')"
+    prompt_suffix="$(printf '%s' "$config" | jq -r '.prompt_suffix // ""')"
+    prompt_flag="$(printf '%s' "$config" | jq -r '.prompt_flag // ""')"
     work_dir="$(printf '%s' "$config" | jq -r '.work_dir // ""')"
 
     if [ -z "$name" ]; then
@@ -317,12 +388,18 @@ case "$op" in
       fi
     done < <(printf '%s' "$config" | jq -r '.pre_start // [] | .[]')
 
-    session_command="${command:-${SHELL:-/bin/sh}}"
+    build_session_argv "$command" "$prompt_flag" "$prompt_suffix"
 
     (
       export_config_env "$config"
       cd "$work_dir"
-      zmx run "$name" "$session_command"
+      # Detach stdio before creating the zmx session so long-lived agent
+      # children do not inherit the exec provider's stdout/stderr pipes.
+      # Without this, Go's exec provider can fail Start() with
+      # "WaitDelay expired before I/O complete" even though zmx created
+      # the session successfully.
+      exec </dev/null >/dev/null 2>&1
+      zmx run "$name" "${SESSION_ARGV[@]}"
     )
 
     store_work_dir "$name" "$work_dir"
