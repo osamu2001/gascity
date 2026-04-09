@@ -34,8 +34,17 @@ async function run(directory, ...args) {
 }
 
 export default async function gascityPlugin({ directory }) {
+  let cachedPrime = "";
+
+  async function readPrime(force = false) {
+    if (force || cachedPrime === "") {
+      cachedPrime = await run(directory, "prime", "--hook");
+    }
+    return cachedPrime;
+  }
+
   async function buildPrefix() {
-    const prime = await run(directory, "prime", "--hook");
+    const prime = await readPrime();
     const nudges = await run(directory, "nudge", "drain", "--inject");
     const mail = await run(directory, "mail", "check", "--inject");
     return {
@@ -51,7 +60,7 @@ export default async function gascityPlugin({ directory }) {
       switch (event.type) {
         case "session.created":
         case "session.compacted":
-          await run(directory, "prime", "--hook");
+          await readPrime(true);
           return;
         case "session.deleted":
           await run(directory, "hook", "--inject");
