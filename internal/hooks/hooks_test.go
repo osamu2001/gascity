@@ -230,6 +230,12 @@ func TestInstallOpenCode(t *testing.T) {
 	if strings.Contains(s, "output.system.push") {
 		t.Error("opencode plugin should merge prompt into the leading system prompt")
 	}
+	if strings.Contains(s, "output.system[1] = prefix + \"\\n\\n\" + output.system[1]") {
+		t.Error("opencode plugin should not duplicate the prefix into output.system[1]")
+	}
+	if !strings.Contains(s, "output.system[0] = prefix + \"\\n\\n\" + output.system[0]") {
+		t.Error("opencode plugin should merge the prefix into output.system[0] when a system prompt already exists")
+	}
 	if !strings.Contains(s, `"chat.message"`) {
 		t.Error("opencode plugin should inject the mayor prompt in chat.message as a runtime-safe fallback")
 	}
@@ -297,6 +303,35 @@ func TestInstallOpenCodeUpgradesManagedPluginMissingShutdownHook(t *testing.T) {
 	}
 	if !strings.Contains(data, "gc hook --inject") {
 		t.Fatal("managed opencode plugin missing gc hook --inject was not upgraded")
+	}
+}
+
+func TestInstallOpenCodeUpgradesManagedPluginWithDuplicateTransformInjection(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.opencode/plugins/gascity.js"] = []byte(`export default async function gascityPlugin() {
+  return {
+    event: async () => {},
+    "chat.message": async () => {},
+    "experimental.chat.system.transform": async (_input, output) => {
+      const prefix = "gc prime --hook"
+      output.system.unshift(prefix)
+      if (output.system[1]) {
+        output.system[1] = prefix + "\n\n" + output.system[1]
+      }
+    },
+  }
+}`)
+
+	err := Install(fs, "/city", "/work", []string{"opencode"})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	data := string(fs.Files["/work/.opencode/plugins/gascity.js"])
+	if strings.Contains(data, "output.system[1] = prefix + \"\\n\\n\" + output.system[1]") {
+		t.Fatal("managed opencode plugin with duplicate transform injection was not upgraded")
+	}
+	if !strings.Contains(data, "output.system[0] = prefix + \"\\n\\n\" + output.system[0]") {
+		t.Fatal("upgraded opencode plugin should merge into output.system[0]")
 	}
 }
 

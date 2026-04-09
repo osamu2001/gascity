@@ -75,9 +75,10 @@ export default async function gascityPlugin({ directory }) {
       const { prime, nudges, mail, extras } = await buildPrefix();
       if (extras.length > 0) {
         const prefix = extras.join("\n\n");
-        output.system.unshift(prefix);
-        if (output.system[1]) {
-          output.system[1] = prefix + "\n\n" + output.system[1];
+        if (output.system[0]) {
+          output.system[0] = prefix + "\n\n" + output.system[0];
+        } else {
+          output.system.unshift(prefix);
         }
       }
     },
