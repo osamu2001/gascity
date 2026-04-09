@@ -64,7 +64,6 @@ load_work_dir() {
 
 cleanup_session_state() {
   rm -f "$(state_file "$1" work_dir)"
-  rm -f "$(state_file "$1" command)"
   rm -f "$STATE_DIR/${1}.meta."*
 }
 
@@ -313,10 +312,7 @@ case "$op" in
       fi
     done < <(printf '%s' "$config" | jq -r '.pre_start // [] | .[]')
 
-    session_command="$command"
-    if [ -z "$session_command" ]; then
-      session_command="${SHELL:-/bin/sh}"
-    fi
+    session_command="${command:-${SHELL:-/bin/sh}}"
 
     (
       export_config_env "$config"
@@ -325,7 +321,6 @@ case "$op" in
     )
 
     store_work_dir "$name" "$work_dir"
-    printf '%s' "$session_command" > "$(state_file "$name" command)"
 
     run_session_setup_commands "$config" "$work_dir" "$name"
     nudge_text="$(printf '%s' "$config" | jq -r '.nudge // ""')"
