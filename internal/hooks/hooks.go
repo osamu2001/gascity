@@ -261,6 +261,11 @@ func opencodeFileNeedsUpgrade(existing []byte) bool {
 	if strings.Contains(content, `const prime = await run(directory, "prime", "--hook");`) {
 		return true
 	}
+	if strings.Contains(content, "export default async function") &&
+		strings.Contains(content, `let cachedPrime = "";`) &&
+		strings.Contains(content, `cachedPrime === ""`) {
+		return true
+	}
 	if strings.Contains(content, "output.system[1] = prefix + \"\\n\\n\" + output.system[1]") {
 		return true
 	}

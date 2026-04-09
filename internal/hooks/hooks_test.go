@@ -224,8 +224,11 @@ func TestInstallOpenCode(t *testing.T) {
 	if !strings.Contains(s, "gc prime") {
 		t.Error("opencode plugin should contain gc prime")
 	}
-	if !strings.Contains(s, `let cachedPrime = "";`) {
+	if !strings.Contains(s, `let cachedPrime = null;`) {
 		t.Error("opencode plugin should cache the prime output across turns")
+	}
+	if !strings.Contains(s, `if (force || cachedPrime === null) {`) {
+		t.Error("opencode plugin should treat empty prime output as a cached value")
 	}
 	if !strings.Contains(s, `const prime = await readPrime();`) {
 		t.Error("opencode plugin should reuse the cached prime output in buildPrefix")
@@ -341,11 +344,48 @@ func TestInstallOpenCodeUpgradesManagedPluginWithoutPrimeCache(t *testing.T) {
     "experimental.chat.system.transform": async () => {},
   }
 }`)
-	if !strings.Contains(data, `let cachedPrime = "";`) {
+	if !strings.Contains(data, `let cachedPrime = null;`) {
 		t.Fatal("managed opencode plugin without prime cache was not upgraded")
+	}
+	if !strings.Contains(data, `if (force || cachedPrime === null) {`) {
+		t.Fatal("upgraded opencode plugin should cache empty prime output")
 	}
 	if !strings.Contains(data, `const prime = await readPrime();`) {
 		t.Fatal("upgraded opencode plugin should read prime output from cache")
+	}
+}
+
+func TestInstallOpenCodeUpgradesManagedPluginWithEmptyStringPrimeCache(t *testing.T) {
+	data := installOpenCodePlugin(t, `export default async function gascityPlugin({ directory }) {
+  let cachedPrime = "";
+  async function readPrime(force = false) {
+    if (force || cachedPrime === "") {
+      cachedPrime = await run(directory, "prime", "--hook");
+    }
+    return cachedPrime;
+  }
+  return {
+    event: async ({ event }) => {
+      switch (event.type) {
+        case "session.created":
+          await readPrime(true);
+          return;
+        case "session.deleted":
+          await run(directory, "hook", "--inject");
+          return;
+        default:
+          return;
+      }
+    },
+    "chat.message": async () => {},
+    "experimental.chat.system.transform": async () => {},
+  }
+}`)
+	if !strings.Contains(data, `let cachedPrime = null;`) {
+		t.Fatal("managed opencode plugin with empty-string prime cache was not upgraded")
+	}
+	if !strings.Contains(data, `if (force || cachedPrime === null) {`) {
+		t.Fatal("upgraded opencode plugin should cache empty prime output")
 	}
 }
 

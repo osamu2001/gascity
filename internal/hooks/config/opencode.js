@@ -34,10 +34,10 @@ async function run(directory, ...args) {
 }
 
 export default async function gascityPlugin({ directory }) {
-  let cachedPrime = "";
+  let cachedPrime = null;
 
   async function readPrime(force = false) {
-    if (force || cachedPrime === "") {
+    if (force || cachedPrime === null) {
       cachedPrime = await run(directory, "prime", "--hook");
     }
     return cachedPrime;
