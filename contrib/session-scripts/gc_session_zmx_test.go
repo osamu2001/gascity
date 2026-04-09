@@ -75,6 +75,9 @@ case "$op" in
     printf '%s' "$*" > "$STATE/$name.command"
     printf 'startup line\n' > "$STATE/$name.history"
     write_session_json "$name" "${FAKE_ZMX_INFO_PID:-4242}" "$cmd"
+    if [ "${FAKE_ZMX_EXEC_RUN:-}" = "1" ]; then
+      "$@" >/dev/null 2>&1
+    fi
     if [ "${FAKE_ZMX_BACKGROUND_HOLD_STDIO:-}" = "1" ]; then
       sleep 5 &
     fi
@@ -271,7 +274,7 @@ func TestGCSessionZMXStartStagesWorkDirAndSupportsCopyOps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "agent-command\n--flag\n--prompt\nYou are the mayor.\n" {
+	if string(got) != "sh\n-c\nagent-command --flag --prompt 'You are the mayor.'\n" {
 		t.Fatalf("zmx run argv = %q", string(got))
 	}
 
@@ -284,15 +287,15 @@ func TestGCSessionZMXStartStagesWorkDirAndSupportsCopyOps(t *testing.T) {
 	}
 
 	for path, want := range map[string]string{
-		filepath.Join(workDir, "shared.txt"):                  "overlay",
-		filepath.Join(workDir, "copied.txt"):                  "copy-dir",
-		filepath.Join(workDir, "nested", "single.txt"):        "single",
+		filepath.Join(workDir, "shared.txt"):                         "overlay",
+		filepath.Join(workDir, "copied.txt"):                         "copy-dir",
+		filepath.Join(workDir, "nested", "single.txt"):               "single",
 		filepath.Join(workDir, ".opencode", "plugins", "gascity.js"): "same-path",
-		filepath.Join(workDir, "pre-start.txt"):               "mayor",
-		filepath.Join(workDir, "session-setup.txt"):           "gc-city-mayor",
-		filepath.Join(workDir, "session-setup-script.txt"):    "gc-city-mayor",
-		filepath.Join(workDir, "session-live.txt"):            "live:gc-city-mayor",
-		filepath.Join(execStateDir, "gc-city-mayor.work_dir"): workDir,
+		filepath.Join(workDir, "pre-start.txt"):                      "mayor",
+		filepath.Join(workDir, "session-setup.txt"):                  "gc-city-mayor",
+		filepath.Join(workDir, "session-setup-script.txt"):           "gc-city-mayor",
+		filepath.Join(workDir, "session-live.txt"):                   "live:gc-city-mayor",
+		filepath.Join(execStateDir, "gc-city-mayor.work_dir"):        workDir,
 	} {
 		got, err = os.ReadFile(path)
 		if err != nil {
@@ -376,6 +379,54 @@ func TestGCSessionZMXProcessAliveUsesInfoPID(t *testing.T) {
 	}
 }
 
+func TestGCSessionZMXStartPreservesShellCommandSemantics(t *testing.T) {
+	tmp := t.TempDir()
+	zmxBinDir := filepath.Join(tmp, "bin")
+	if err := os.MkdirAll(zmxBinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeZMX(t, zmxBinDir)
+
+	zmxStateDir := filepath.Join(tmp, "zmx-state")
+	execStateDir := filepath.Join(tmp, "exec-state")
+	workDir := filepath.Join(tmp, "workdir")
+	env := append(scriptEnv(zmxBinDir, zmxStateDir, execStateDir), "FAKE_ZMX_EXEC_RUN=1")
+
+	cfg := map[string]any{
+		"work_dir": workDir,
+		"command":  "printf shell > shell.txt && printf second > second.txt",
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, stderr, code := runAdapter(t, env, data, "start", "gc-city-shell"); code != 0 {
+		t.Fatalf("start exit=%d stderr=%q", code, stderr)
+	}
+
+	got, err := os.ReadFile(filepath.Join(zmxStateDir, "gc-city-shell.argv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "sh\n-c\nprintf shell > shell.txt && printf second > second.txt\n" {
+		t.Fatalf("zmx run argv = %q", string(got))
+	}
+
+	for path, want := range map[string]string{
+		filepath.Join(workDir, "shell.txt"):  "shell",
+		filepath.Join(workDir, "second.txt"): "second",
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if string(got) != want {
+			t.Fatalf("%s = %q, want %q", path, string(got), want)
+		}
+	}
+}
+
 func TestGCSessionZMXExecProviderIntegration(t *testing.T) {
 	tmp := t.TempDir()
 	zmxBinDir := filepath.Join(tmp, "bin")
@@ -396,7 +447,7 @@ func TestGCSessionZMXExecProviderIntegration(t *testing.T) {
 	name := "gc-city-mayor"
 
 	if err := p.Start(context.Background(), name, runtimepkg.Config{
-		WorkDir: workDir,
+		WorkDir:      workDir,
 		Command:      "agent-command",
 		PromptSuffix: "'You are the mayor.'",
 		PromptFlag:   "--prompt",
@@ -410,7 +461,7 @@ func TestGCSessionZMXExecProviderIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "agent-command\n--prompt\nYou are the mayor.\n" {
+	if string(got) != "sh\n-c\nagent-command --prompt 'You are the mayor.'\n" {
 		t.Fatalf("zmx argv = %q", string(got))
 	}
 

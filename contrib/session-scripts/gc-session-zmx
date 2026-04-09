@@ -59,29 +59,24 @@ build_session_argv() {
   local command_str="$1"
   local prompt_flag="$2"
   local prompt_suffix="$3"
+  local full_command="$command_str"
 
-  SESSION_ARGV=()
-  if [ -n "$command_str" ]; then
-    # command_str is produced by Gas City as a shell-escaped command line.
-    # Rehydrate it into argv so zmx run receives separate args instead of
-    # one big shell string.
-    eval "set -- $command_str"
-    SESSION_ARGV=("$@")
-  else
-    SESSION_ARGV=("${SHELL:-/bin/sh}")
+  if [ -n "$prompt_suffix" ] && [ -n "$full_command" ]; then
+    if [ -n "$prompt_flag" ]; then
+      full_command="$full_command $prompt_flag"
+    fi
+    # prompt_suffix is already shell-quoted text from template_resolve.go.
+    full_command="$full_command $prompt_suffix"
   fi
 
-  if [ -n "$prompt_suffix" ]; then
-    if [ -n "$prompt_flag" ]; then
-      SESSION_ARGV+=("$prompt_flag")
-    fi
-    # prompt_suffix is shell-quoted text from template_resolve.go.
-    eval "set -- $prompt_suffix"
-    if [ "$#" -ne 1 ]; then
-      warn "start: prompt suffix did not decode to a single argument"
-      return 1
-    fi
-    SESSION_ARGV+=("$1")
+  SESSION_ARGV=()
+  if [ -n "$full_command" ]; then
+    # runtime.Config.Command is a shell command. Preserve metacharacters,
+    # redirects, and wrappers by launching it through sh -c instead of
+    # splitting it back into argv.
+    SESSION_ARGV=("sh" "-c" "$full_command")
+  else
+    SESSION_ARGV=("${SHELL:-/bin/sh}")
   fi
 }
 
