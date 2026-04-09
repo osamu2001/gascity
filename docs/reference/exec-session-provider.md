@@ -61,6 +61,7 @@ care about.
 | `send-keys` | `script send-keys <name> <key>...` | — | — |
 | `clear-scrollback` | `script clear-scrollback <name>` | — | — |
 | `copy-to` | `script copy-to <name> <src> <rel-dst>` | — | — |
+| `copy-from` | `script copy-from <name> <path>` | — | file contents |
 
 ### Start Config (JSON on stdin)
 
@@ -111,8 +112,8 @@ hints or ignore them:
   filesystem **before** the session is created. Used for directory
   preparation, worktree creation, or other setup that must exist before
   the agent starts. Scripts should execute each command in the target
-  environment before creating the tmux session. Non-fatal: warn on
-  stderr if a command fails, but don't abort start.
+  environment before creating the session. Fatal: abort startup if a
+  command fails so the agent never launches into an unprepared workDir.
 
 - **`session_setup`** — array of shell commands to run on the target
   filesystem after the session is created and ready, before returning.
