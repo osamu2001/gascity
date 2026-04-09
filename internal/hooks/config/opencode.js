@@ -64,9 +64,6 @@ export default async function gascityPlugin({ directory }) {
         case "session.deleted":
           await run(directory, "hook", "--inject");
           return;
-        case "session.deleted":
-          await run(directory, "hook", "--inject");
-          return;
         default:
           return;
       }
