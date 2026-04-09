@@ -3,83 +3,68 @@ title: "Exec Session Provider"
 ---
 
 Gas City's exec session provider delegates each `runtime.Provider` operation
-to a user-supplied script. This lets any terminal multiplexer, local session
-manager, or remote control plane back Gas City without adding a Go provider to
-this repository.
-
-The Go-side contract lives in:
-
-- [`internal/runtime/exec/exec.go`](../../internal/runtime/exec/exec.go)
-- [`internal/runtime/exec/json.go`](../../internal/runtime/exec/json.go)
-
-This document describes the wire contract those files implement today.
+to a user-supplied script. This allows any terminal multiplexer or process
+manager to be used as a session backend without writing Go code.
 
 ## Usage
 
-Set `GC_SESSION` to `exec:<script>`:
+Set the `GC_SESSION` environment variable to `exec:<script>`:
 
 ```bash
 # Absolute path
-export GC_SESSION=exec:/path/to/gc-session-zmx
+export GC_SESSION=exec:/path/to/gc-session-screen
 
 # PATH lookup
-export GC_SESSION=exec:gc-session-zmx
+export GC_SESSION=exec:gc-session-screen
 ```
 
 ## Calling Convention
 
 The script receives the operation name as its first argument:
 
-```text
+```
 <script> <operation> <session-name> [args...]
 ```
 
-Gas City execs the script directly. There is no intermediate shell layer.
+No shell invocation — the script is exec'd directly.
 
 ## Exit Codes
 
 | Code | Meaning |
 |------|---------|
-| `0` | Success |
-| `1` | Failure (`stderr` should explain why) |
-| `2` | Unsupported/unknown operation |
+| 0 | Success |
+| 1 | Failure (stderr contains error message) |
+| 2 | Unknown operation (treated as success — forward compatible) |
 
-Exit code `2` is the forward-compatibility mechanism. Gas City's exec provider
-treats it as a successful no-op, which lets older scripts survive newly added
-operations.
+Exit code 2 is the forward-compatibility mechanism. When Gas City adds new
+operations in the future, old scripts return exit 2 and the provider treats
+it as a no-op success. Scripts only need to implement the operations they
+care about.
 
-## Core Operations
+## Operations
 
 | Operation | Invocation | Stdin | Stdout |
-|-----------|------------|-------|--------|
+|-----------|-----------|-------|--------|
 | `start` | `script start <name>` | JSON config | — |
 | `stop` | `script stop <name>` | — | — |
 | `interrupt` | `script interrupt <name>` | — | — |
 | `is-running` | `script is-running <name>` | — | `true` or `false` |
 | `attach` | `script attach <name>` | tty passthrough | tty passthrough |
-| `process-alive` | `script process-alive <name>` | process names (1 per line) | `true` or `false` |
+| `process-alive` | `script process-alive <name>` | process names (1/line) | `true` or `false` |
 | `nudge` | `script nudge <name>` | message text | — |
-| `set-meta` | `script set-meta <name> <key>` | value | — |
-| `get-meta` | `script get-meta <name> <key>` | — | value or empty |
+| `set-meta` | `script set-meta <name> <key>` | value on stdin | — |
+| `get-meta` | `script get-meta <name> <key>` | — | value (empty = not set) |
 | `remove-meta` | `script remove-meta <name> <key>` | — | — |
 | `peek` | `script peek <name> <lines>` | — | captured text |
 | `list-running` | `script list-running <prefix>` | — | one name per line |
-| `get-last-activity` | `script get-last-activity <name>` | — | RFC3339 timestamp or empty |
+| `get-last-activity` | `script get-last-activity <name>` | — | RFC3339 or empty |
 | `send-keys` | `script send-keys <name> <key>...` | — | — |
 | `clear-scrollback` | `script clear-scrollback <name>` | — | — |
 | `copy-to` | `script copy-to <name> <src> <rel-dst>` | — | — |
 
-### Script-Specific Extensions
+### Start Config (JSON on stdin)
 
-Some shipped scripts expose extra helper operations that are not part of the
-core `runtime.Provider` interface. Today the main example is `copy-from`,
-which some integration tests use to read a file from a remote/session-local
-filesystem. Treat these as script-specific extensions, not as guaranteed parts
-of the exec-provider contract.
-
-## Start Config JSON
-
-`start` receives one JSON object on stdin. All fields are optional.
+The `start` operation receives a JSON object on stdin:
 
 ```json
 {
@@ -90,7 +75,7 @@ of the exec-provider contract.
   "nudge": "initial prompt text",
   "ready_prompt_prefix": "> ",
   "ready_delay_ms": 1000,
-  "pre_start": ["mkdir -p /workspace"],
+  "pre_start": ["mkdir -p /workspace", "git clone repo /workspace"],
   "session_setup": ["./scripts/install-hooks.sh"],
   "session_setup_script": "/path/to/setup-script.sh",
   "session_live": ["./scripts/tmux-theme.sh"],
@@ -102,90 +87,91 @@ of the exec-provider contract.
 }
 ```
 
-### Field Semantics
+All fields are optional (omitted when empty).
 
-- `work_dir`: working directory for the session process.
-- `command`: shell command (or equivalent backend command string) to start.
-- `env`: extra environment variables to inject before startup.
-- `process_names`: process names used by Gas City for liveness/readiness logic.
-- `nudge`: initial text to type after the session is ready.
-- `ready_prompt_prefix`: readiness hint surfaced to the script for adapters
-  that want to participate in startup orchestration.
-- `ready_delay_ms`: fixed readiness delay hint, also passed through as JSON.
-- `pre_start`: host/target filesystem preparation commands that run before
-  session creation. These should be treated as fatal when they fail.
-- `session_setup`: post-start setup commands. Warnings are preferred over
-  hard failure here so the session stays usable.
-- `session_setup_script`: post-start script path on the controller filesystem.
-- `session_live`: idempotent post-start commands for theming or live
-  reconfiguration. Gas City does not currently send a separate re-apply
-  operation for exec providers, but the field is present in the startup JSON.
-- `pack_overlay_dirs`: lower-priority overlay directories contributed by packs.
-- `overlay_dir`: higher-priority overlay directory for the specific agent/rig.
-- `copy_files`: explicit file/directory copies to stage into the workdir before
-  the main command starts.
+### Startup Hints
+
+The JSON config contains fields that the tmux provider uses for multi-step
+startup orchestration. The exec provider itself is fire-and-forget — it
+calls `script start` and returns immediately. Scripts may handle these
+hints or ignore them:
+
+- **`process_names`** — the tmux adapter polls for these process names to
+  appear in the session's process tree (30s timeout) before considering the
+  agent "started." A script can implement this by polling its backend's
+  process tree after session creation, or ignore it for fire-and-forget
+  behavior (like the subprocess provider does).
+
+- **`nudge`** — text that the tmux adapter types into the session after
+  the agent is ready. Scripts that support interactive input can handle
+  this in `start` (type the text after session creation) or leave it to
+  the separate `nudge` operation which gc calls after `start` returns.
+
+- **`pre_start`** — array of shell commands to run on the target
+  filesystem **before** the session is created. Used for directory
+  preparation, worktree creation, or other setup that must exist before
+  the agent starts. Scripts should execute each command in the target
+  environment before creating the tmux session. Non-fatal: warn on
+  stderr if a command fails, but don't abort start.
+
+- **`session_setup`** — array of shell commands to run on the target
+  filesystem after the session is created and ready, before returning.
+  Scripts should execute each command inside the session environment
+  (e.g. `kubectl exec -- sh -c '<cmd>'` for K8s, `docker exec -- sh -c
+  '<cmd>'` for Docker, or plain `sh -c '<cmd>'` for local providers).
+  Non-fatal: warn on stderr if a command fails, but don't abort start.
+
+- **`session_setup_script`** — path to a script on the controller
+  filesystem, run after `session_setup` commands. For remote providers
+  (K8s, Docker), read the file locally and pipe its contents into the
+  session (e.g. `kubectl exec -i -- sh < script`). For local providers,
+  run directly via `sh -c`. Non-fatal like `session_setup`.
 
 ## Conventions
 
-- `stdin` carries structured values. `start`, `nudge`, `set-meta`, and
-  `process-alive` all rely on stdin instead of shell-quoted arguments.
-- `stdout` is reserved for machine-readable results only.
-- `stderr` should contain diagnostics and warnings only.
-- `stop` must be idempotent.
-- `interrupt` and `nudge` should be best-effort. Missing sessions should not
-  turn these into hard failures.
-- `get-meta` returns empty stdout when the key is unset.
-- `get-last-activity` returns empty stdout when unsupported or unknown.
-- `clear-scrollback` or other optional operations should exit `2` when not
-  supported.
+- **stdin for values**: `set-meta`, `nudge`, and `start` pass data on stdin
+  to avoid shell quoting and argument length limits.
+- **stdout for results**: `is-running`, `process-alive` return `true`/`false`.
+  `get-meta` returns the value or empty for unset. `list-running` returns one
+  name per line.
+- **Idempotent stop**: `stop` must succeed (exit 0) even if the session
+  doesn't exist.
+- **Best-effort interrupt/nudge**: Return 0 even if the session doesn't exist.
+- **Empty = unsupported**: `get-last-activity` returning empty stdout means
+  the backend doesn't support activity tracking (zero time in Go).
 
 ## Writing Your Own Script
 
-1. Start from a shipped script in `contrib/session-scripts/`.
-2. Treat the Go files above as the source of truth for current JSON fields and
-   operations.
-3. Implement only the operations your backend supports.
-4. Return exit `2` for unsupported ones.
-5. Verify the script with `GC_SESSION=exec:/path/to/script gc start <city>`.
+1. Start with `contrib/session-scripts/gc-session-screen` as a template.
+2. Implement the operations your backend supports.
+3. Return exit 2 for operations you don't support.
+4. Test with `GC_SESSION=exec:./your-script gc start <city>`.
 
-### Minimal Script
+### Minimal script (start/stop/is-running only)
 
 ```bash
 #!/bin/sh
 op="$1"
 name="$2"
-
 case "$op" in
-  start)
-    cat > /dev/null
-    my-backend start "$name"
-    ;;
-  stop)
-    my-backend stop "$name" 2>/dev/null || true
-    ;;
-  is-running)
-    if my-backend status "$name" >/dev/null 2>&1; then
-      echo true
-    else
-      echo false
-    fi
-    ;;
-  *)
-    exit 2
-    ;;
+  start)     cat > /dev/null; my-mux new "$name" ;;
+  stop)      my-mux kill "$name" 2>/dev/null; exit 0 ;;
+  is-running) my-mux list | grep -q "^${name}$" && echo true || echo false ;;
+  *)         exit 2 ;;
 esac
 ```
 
 ## Environment Variables
 
-Scripts may use `GC_EXEC_STATE_DIR` for sidecar state such as metadata files,
-wrapper scripts, or remembered workdirs. If unset, scripts should choose a
+Scripts can use `GC_EXEC_STATE_DIR` (if set) as a directory for sidecar
+state files (metadata, wrappers). If not set, scripts should use a
 reasonable default under `$TMPDIR` or `/tmp`.
 
 ## Shipped Scripts
 
-- `contrib/session-scripts/gc-session-screen`: GNU screen backend.
-- `contrib/session-scripts/gc-session-k8s`: reference exec-script K8s backend
-  (prefer the native `k8s` provider when possible).
-- `contrib/session-scripts/gc-session-zmx`: local zmx backend that maps Gas
-  City's exec-provider contract onto zmx CLI commands.
+See `contrib/session-scripts/` for maintained implementations:
+
+- **gc-session-screen** — GNU screen backend. Dependencies: `screen`,
+  `jq`, `bash`.
+- **gc-session-k8s** — Kubernetes backend via exec script.
+- **gc-session-zmx** — zmx backend via exec script.
