@@ -306,7 +306,7 @@ func TestGCSessionZMXStartStagesWorkDirAndSupportsCopyOps(t *testing.T) {
 	}
 
 	got := mustReadFile(t, filepath.Join(h.zmxStateDir, "gc-city-mayor.cwd"))
-	if string(got) != workDir {
+	if got != workDir {
 		t.Fatalf("zmx run cwd = %q, want %q", got, workDir)
 	}
 
