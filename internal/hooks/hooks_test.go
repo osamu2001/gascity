@@ -215,6 +215,12 @@ func TestInstallOpenCode(t *testing.T) {
 	if !strings.Contains(s, "gc prime") {
 		t.Error("opencode plugin should contain gc prime")
 	}
+	if !strings.Contains(s, `"session.deleted"`) {
+		t.Error("opencode plugin should handle session.deleted")
+	}
+	if !strings.Contains(s, "gc hook --inject") {
+		t.Error("opencode plugin should contain gc hook --inject")
+	}
 	if !strings.Contains(s, "export default async function") {
 		t.Error("opencode plugin should use ESM export default plugin format")
 	}
@@ -250,8 +256,47 @@ func TestInstallOpenCodeUpgradesLegacyManagedPlugin(t *testing.T) {
 	if strings.Contains(data, "output.system.push") {
 		t.Fatal("legacy opencode plugin push-based transform was not upgraded")
 	}
+	if !strings.Contains(data, `"session.deleted"`) {
+		t.Fatal("upgraded opencode plugin should restore session.deleted handling")
+	}
+	if !strings.Contains(data, "gc hook --inject") {
+		t.Fatal("upgraded opencode plugin should restore gc hook --inject")
+	}
 	if !strings.Contains(data, `"chat.message"`) {
 		t.Fatal("upgraded opencode plugin should include chat.message fallback")
+	}
+}
+
+func TestInstallOpenCodeUpgradesManagedPluginMissingShutdownHook(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.opencode/plugins/gascity.js"] = []byte(`export default async function gascityPlugin() {
+  return {
+    event: async ({ event }) => {
+      switch (event.type) {
+        case "session.created":
+        case "session.compacted":
+          return "gc prime --hook"
+        default:
+          return
+      }
+    },
+    "chat.message": async () => {},
+    "experimental.chat.system.transform": async (_input, output) => {
+      output.system.unshift("gc prime --hook")
+    },
+  }
+}`)
+
+	err := Install(fs, "/city", "/work", []string{"opencode"})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	data := string(fs.Files["/work/.opencode/plugins/gascity.js"])
+	if !strings.Contains(data, `"session.deleted"`) {
+		t.Fatal("managed opencode plugin missing session.deleted was not upgraded")
+	}
+	if !strings.Contains(data, "gc hook --inject") {
+		t.Fatal("managed opencode plugin missing gc hook --inject was not upgraded")
 	}
 }
 

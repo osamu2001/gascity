@@ -258,6 +258,12 @@ func opencodeFileNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, `"chat.message"`) {
 		return true
 	}
+	if strings.Contains(content, "export default async function") &&
+		strings.Contains(content, "gc prime --hook") &&
+		(!strings.Contains(content, `"session.deleted"`) ||
+			!strings.Contains(content, "gc hook --inject")) {
+		return true
+	}
 	return strings.Contains(content, "output.system.push(") &&
 		strings.Contains(content, "gc prime --hook") &&
 		strings.Contains(content, "experimental.chat.system.transform")
