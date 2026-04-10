@@ -220,7 +220,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.\nCommands run in gc's process (not inside the agent session) via sh -c."
+          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.\nProviders interpret these hints according to their startup model:\nthe built-in tmux backend runs them from gc's process via sh -c, while\nexec providers may translate them into commands inside the target runtime."
         },
         "session_setup_script": {
           "type": "string",

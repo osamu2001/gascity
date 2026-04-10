@@ -1255,7 +1255,9 @@ type Agent struct {
 	// Each command is a template string supporting placeholders:
 	// {{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},
 	// {{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.
-	// Commands run in gc's process (not inside the agent session) via sh -c.
+	// Providers interpret these hints according to their startup model:
+	// the built-in tmux backend runs them from gc's process via sh -c, while
+	// exec providers may translate them into commands inside the target runtime.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript is the path to a script run after session_setup commands.
 	// Relative paths resolve against the city directory. The script receives

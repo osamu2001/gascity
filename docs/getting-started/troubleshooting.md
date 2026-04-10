@@ -67,7 +67,7 @@ only requires `bd` / `dolt` / `flock` when the beads backend is `bd`.
 | Tool  | Min version | macOS                                                    | Linux                                                    | Skip when                         |
 | ----- | ----------- | -------------------------------------------------------- | -------------------------------------------------------- | --------------------------------- |
 | dolt  | 1.80.0      | `brew install dolt`                                      | [releases](https://github.com/dolthub/dolt/releases)     | Using `[beads].provider = "file"` |
-| bd    | 0.61.0      | [releases](https://github.com/steveyegge/beads/releases) | [releases](https://github.com/steveyegge/beads/releases) | Using `[beads].provider = "file"` |
+| bd    | 0.61.0      | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) | Using `[beads].provider = "file"` |
 | flock | --          | `brew install flock`                                     | `apt install util-linux`                                 | Using `[beads].provider = "file"` |
 
 If you do not want to install dolt, bd, and flock, switch to the file-based

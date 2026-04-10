@@ -111,7 +111,10 @@ hints or ignore them:
 
 - **`session_setup`** — array of shell commands to run on the target
   filesystem after the session is created and ready, before returning.
-  Scripts should execute each command inside the session environment
+  These are provider hints, not a hardcoded `gc` execution model: the
+  built-in tmux backend runs its equivalent commands from the controller
+  process, while exec scripts typically execute each command inside the
+  session environment
   (e.g. `kubectl exec -- sh -c '<cmd>'` for K8s, `docker exec -- sh -c
   '<cmd>'` for Docker, or plain `sh -c '<cmd>'` for local providers).
   Non-fatal: warn on stderr if a command fails, but don't abort start.
