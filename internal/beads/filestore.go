@@ -221,6 +221,7 @@ func (fs *FileStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return nil
 }
 
+// Get reloads the on-disk store before reading a bead by ID.
 func (fs *FileStore) Get(id string) (Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
@@ -230,6 +231,7 @@ func (fs *FileStore) Get(id string) (Bead, error) {
 	return fs.MemStore.Get(id)
 }
 
+// List reloads the on-disk store before listing beads that match the query.
 func (fs *FileStore) List(query ListQuery) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
@@ -239,6 +241,7 @@ func (fs *FileStore) List(query ListQuery) ([]Bead, error) {
 	return fs.MemStore.List(query)
 }
 
+// ListOpen reloads the on-disk store before listing open beads.
 func (fs *FileStore) ListOpen(status ...string) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
@@ -248,6 +251,7 @@ func (fs *FileStore) ListOpen(status ...string) ([]Bead, error) {
 	return fs.MemStore.ListOpen(status...)
 }
 
+// Ready reloads the on-disk store before listing ready beads.
 func (fs *FileStore) Ready() ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
@@ -257,6 +261,7 @@ func (fs *FileStore) Ready() ([]Bead, error) {
 	return fs.MemStore.Ready()
 }
 
+// Children reloads the on-disk store before listing child beads.
 func (fs *FileStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
@@ -266,6 +271,7 @@ func (fs *FileStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error)
 	return fs.MemStore.Children(parentID, opts...)
 }
 
+// ListByLabel reloads the on-disk store before listing beads for a label.
 func (fs *FileStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
@@ -275,6 +281,7 @@ func (fs *FileStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]B
 	return fs.MemStore.ListByLabel(label, limit, opts...)
 }
 
+// ListByAssignee reloads the on-disk store before listing beads for an assignee.
 func (fs *FileStore) ListByAssignee(assignee, status string, limit int) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
@@ -284,6 +291,7 @@ func (fs *FileStore) ListByAssignee(assignee, status string, limit int) ([]Bead,
 	return fs.MemStore.ListByAssignee(assignee, status, limit)
 }
 
+// ListByMetadata reloads the on-disk store before listing beads by metadata.
 func (fs *FileStore) ListByMetadata(filters map[string]string, limit int, opts ...QueryOpt) ([]Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
@@ -344,6 +352,7 @@ func (fs *FileStore) DepRemove(issueID, dependsOnID string) error {
 	return nil
 }
 
+// DepList reloads the on-disk store before listing dependencies.
 func (fs *FileStore) DepList(id, direction string) ([]Dep, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
