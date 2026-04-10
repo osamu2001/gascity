@@ -5,16 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	runtimepkg "github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 )
 
 func repoRoot(t *testing.T) string {
@@ -437,6 +440,7 @@ func TestGCSessionZMXExecProviderIntegration(t *testing.T) {
 	p := sessionexec.NewProvider(zmxScriptPath(t))
 	workDir := filepath.Join(h.tmpDir, "workdir")
 	name := "gc-city-mayor"
+	t.Cleanup(func() { _ = p.Stop(name) })
 
 	if err := p.Start(context.Background(), name, runtimepkg.Config{
 		WorkDir:      workDir,
@@ -489,6 +493,14 @@ func TestGCSessionZMXExecProviderIntegration(t *testing.T) {
 		t.Fatal("GetLastActivity returned zero time")
 	}
 
+	if err := p.Attach(name); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	got = mustReadFile(t, filepath.Join(h.zmxStateDir, name+".attach"))
+	if strings.TrimSpace(got) != "attach:"+name {
+		t.Fatalf("attach marker = %q", got)
+	}
+
 	if err := p.SetMeta(name, "GC_SESSION_ID", "sess-123"); err != nil {
 		t.Fatalf("SetMeta: %v", err)
 	}
@@ -530,6 +542,26 @@ func TestGCSessionZMXExecProviderIntegration(t *testing.T) {
 	if p.IsRunning(name) {
 		t.Fatal("IsRunning returned true after Stop")
 	}
+}
+
+func TestGCSessionZMXExecProviderConformance(t *testing.T) {
+	h := newFakeZMXHarness(t)
+	h.setProviderEnv(t)
+
+	p := sessionexec.NewProvider(zmxScriptPath(t))
+	var counter int64
+
+	runtimetest.RunProviderTests(t, func(t *testing.T) (runtimepkg.Provider, runtimepkg.Config, string) {
+		id := atomic.AddInt64(&counter, 1)
+		name := fmt.Sprintf("gc-zmx-conformance-%d", id)
+		cfg := runtimepkg.Config{
+			WorkDir: filepath.Join(t.TempDir(), "workdir"),
+			Command: "agent-command",
+			Env:     map[string]string{"GC_AGENT": "worker"},
+			Nudge:   "boot prompt",
+		}
+		return p, cfg, name
+	})
 }
 
 func TestGCSessionZMXExecProviderStartDetachesZMXRunStdio(t *testing.T) {
