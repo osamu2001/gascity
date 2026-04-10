@@ -193,8 +193,8 @@ func registerCoreBinaryChecks(d *doctor.Doctor, sessionProvider string) {
 	// Infrastructure checks — provider-aware core dependencies.
 	// dolt/bd/flock are checked by pack doctor scripts (check-bd.sh,
 	// check-dolt.sh) which also verify versions and service health.
-	if sessionProviderRequiresTmux(sessionProvider) {
-		d.Register(doctor.NewBinaryCheck("tmux", "", doctorLookPath))
+	for _, dep := range sessionProviderDependencies(sessionProvider) {
+		d.Register(newProviderDependencyCheck(dep, doctorLookPath))
 	}
 	d.Register(doctor.NewBinaryCheck("git", "", doctorLookPath))
 	d.Register(doctor.NewBinaryCheck("jq", "", doctorLookPath))

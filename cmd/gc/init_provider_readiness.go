@@ -445,6 +445,7 @@ const (
 func checkHardDependencies(cityPath string) []missingDep {
 	type dep struct {
 		name        string
+		lookupName  string
 		installHint string
 		minVersion  string      // empty = no version check
 		condition   func() bool // if non-nil, only checked when true
@@ -453,47 +454,55 @@ func checkHardDependencies(cityPath string) []missingDep {
 	beadsProvider := rawBeadsProvider(cityPath)
 	sessionProvider := effectiveSessionProviderForCity(cityPath)
 	needsBd := beadsProvider == "bd" || beadsProvider == ""
-	needsTmux := sessionProviderRequiresTmux(sessionProvider)
 
 	deps := []dep{
 		{
-			name:        "tmux",
-			installHint: "https://github.com/tmux/tmux/wiki/Installing",
-			condition:   func() bool { return needsTmux },
-		},
-		{
 			name:        "jq",
+			lookupName:  "jq",
 			installHint: "brew install jq (macOS) or apt install jq (Linux)",
 		},
 		{
 			name:        "git",
+			lookupName:  "git",
 			installHint: "https://git-scm.com/downloads",
 		},
 		{
 			name:        "dolt",
+			lookupName:  "dolt",
 			installHint: "https://github.com/dolthub/dolt/releases",
 			minVersion:  doltMinVersion,
 			condition:   func() bool { return needsBd },
 		},
 		{
 			name:        "bd",
+			lookupName:  "bd",
 			installHint: "https://github.com/gastownhall/beads/releases",
 			minVersion:  bdMinVersion,
 			condition:   func() bool { return needsBd },
 		},
 		{
 			name:        "flock",
+			lookupName:  "flock",
 			installHint: "brew install flock (macOS) or apt install util-linux (Linux)",
 			condition:   func() bool { return needsBd },
 		},
 		{
 			name:        "pgrep",
+			lookupName:  "pgrep",
 			installHint: "brew install proctools (macOS) or apt install procps (Linux)",
 		},
 		{
 			name:        "lsof",
+			lookupName:  "lsof",
 			installHint: "brew install lsof (macOS) or apt install lsof (Linux)",
 		},
+	}
+	for _, sessionDep := range sessionProviderDependencies(sessionProvider) {
+		deps = append(deps, dep{
+			name:        sessionDep.name,
+			lookupName:  sessionDep.lookupName,
+			installHint: sessionDep.installHint,
+		})
 	}
 
 	var missing []missingDep
@@ -501,7 +510,14 @@ func checkHardDependencies(cityPath string) []missingDep {
 		if d.condition != nil && !d.condition() {
 			continue
 		}
-		if _, err := initLookPath(d.name); err != nil {
+		if d.lookupName == "" {
+			missing = append(missing, missingDep{
+				name:        d.name,
+				installHint: d.installHint,
+			})
+			continue
+		}
+		if _, err := initLookPath(d.lookupName); err != nil {
 			missing = append(missing, missingDep{
 				name:        d.name,
 				installHint: d.installHint,

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -38,85 +39,158 @@ func hasMissingDep(missing []missingDep, prefix string) bool {
 	return false
 }
 
-func TestCheckHardDependenciesRespectsSessionProvider(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
-
-	oldLookPath := initLookPath
-	initLookPath = func(file string) (string, error) {
-		if file == "tmux" {
-			return "", errors.New("missing tmux")
+func fakeLookPath(missing ...string) func(string) (string, error) {
+	return func(file string) (string, error) {
+		if slices.Contains(missing, file) {
+			return "", errors.New("missing " + file)
+		}
+		if filepath.IsAbs(file) || strings.Contains(file, "/") {
+			return file, nil
 		}
 		return "/bin/" + file, nil
 	}
-	t.Cleanup(func() { initLookPath = oldLookPath })
+}
+
+func TestCheckHardDependenciesRespectsSessionProvider(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
 
 	cases := []struct {
-		name        string
-		provider    string
-		envOverride string
-		wantTmux    bool
+		name            string
+		provider        string
+		envOverride     string
+		missingBins     []string
+		wantMissing     []string
+		dontWantMissing []string
 	}{
-		{name: "default provider requires tmux", wantTmux: true},
-		{name: "subprocess skips tmux", provider: "subprocess"},
-		{name: "acp skips tmux", provider: "acp"},
-		{name: "exec skips tmux", provider: "exec:/tmp/spy"},
-		{name: "k8s skips tmux", provider: "k8s"},
-		{name: "hybrid still requires tmux", provider: "hybrid", wantTmux: true},
-		{name: "env override can skip tmux", envOverride: "subprocess"},
+		{
+			name:        "default provider requires tmux",
+			missingBins: []string{"tmux"},
+			wantMissing: []string{"tmux"},
+		},
+		{
+			name:            "subprocess skips tmux",
+			provider:        "subprocess",
+			missingBins:     []string{"tmux"},
+			dontWantMissing: []string{"tmux"},
+		},
+		{
+			name:            "acp skips tmux",
+			provider:        "acp",
+			missingBins:     []string{"tmux"},
+			dontWantMissing: []string{"tmux"},
+		},
+		{
+			name:            "exec requires provider script but skips tmux",
+			provider:        "exec:/tmp/spy",
+			missingBins:     []string{"tmux", "/tmp/spy"},
+			wantMissing:     []string{"/tmp/spy"},
+			dontWantMissing: []string{"tmux"},
+		},
+		{
+			name:            "k8s skips tmux",
+			provider:        "k8s",
+			missingBins:     []string{"tmux"},
+			dontWantMissing: []string{"tmux"},
+		},
+		{
+			name:        "hybrid still requires tmux",
+			provider:    "hybrid",
+			missingBins: []string{"tmux"},
+			wantMissing: []string{"tmux"},
+		},
+		{
+			name:            "env override can skip tmux",
+			envOverride:     "subprocess",
+			missingBins:     []string{"tmux"},
+			dontWantMissing: []string{"tmux"},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			oldLookPath := initLookPath
+			initLookPath = fakeLookPath(tc.missingBins...)
+			t.Cleanup(func() { initLookPath = oldLookPath })
+
 			t.Setenv("GC_SESSION", tc.envOverride)
 			cityPath := writeSessionProviderTestCity(t, tc.provider)
 
 			missing := checkHardDependencies(cityPath)
-			if got := hasMissingDep(missing, "tmux"); got != tc.wantTmux {
-				t.Fatalf("tmux missing = %v, want %v (missing=%v)", got, tc.wantTmux, missing)
+			for _, prefix := range tc.wantMissing {
+				if !hasMissingDep(missing, prefix) {
+					t.Fatalf("expected missing dep %q (missing=%v)", prefix, missing)
+				}
+			}
+			for _, prefix := range tc.dontWantMissing {
+				if hasMissingDep(missing, prefix) {
+					t.Fatalf("did not expect missing dep %q (missing=%v)", prefix, missing)
+				}
 			}
 		})
 	}
 }
 
 func TestRegisterCoreBinaryChecksRespectsSessionProvider(t *testing.T) {
-	oldLookPath := doctorLookPath
-	doctorLookPath = func(file string) (string, error) {
-		if file == "tmux" {
-			return "", errors.New("missing tmux")
-		}
-		return "/bin/" + file, nil
-	}
-	t.Cleanup(func() { doctorLookPath = oldLookPath })
-
 	cases := []struct {
-		name     string
-		provider string
-		wantTmux bool
+		name           string
+		provider       string
+		missingBins    []string
+		wantOutput     []string
+		dontWantOutput []string
+		wantFailed     int
 	}{
-		{name: "default provider checks tmux", wantTmux: true},
-		{name: "subprocess skips tmux", provider: "subprocess"},
-		{name: "exec skips tmux", provider: "exec:/tmp/spy"},
-		{name: "hybrid checks tmux", provider: "hybrid", wantTmux: true},
+		{
+			name:        "default provider checks tmux",
+			missingBins: []string{"tmux"},
+			wantOutput:  []string{"tmux"},
+			wantFailed:  1,
+		},
+		{
+			name:           "subprocess skips tmux",
+			provider:       "subprocess",
+			missingBins:    []string{"tmux"},
+			dontWantOutput: []string{"tmux"},
+		},
+		{
+			name:           "exec checks provider script but skips tmux",
+			provider:       "exec:/tmp/spy",
+			missingBins:    []string{"tmux", "/tmp/spy"},
+			wantOutput:     []string{"/tmp/spy"},
+			dontWantOutput: []string{"tmux"},
+			wantFailed:     1,
+		},
+		{
+			name:        "hybrid checks tmux",
+			provider:    "hybrid",
+			missingBins: []string{"tmux"},
+			wantOutput:  []string{"tmux"},
+			wantFailed:  1,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			oldLookPath := doctorLookPath
+			doctorLookPath = fakeLookPath(tc.missingBins...)
+			t.Cleanup(func() { doctorLookPath = oldLookPath })
+
 			d := &doctor.Doctor{}
 			registerCoreBinaryChecks(d, tc.provider)
 
 			var out bytes.Buffer
 			report := d.Run(&doctor.CheckContext{CityPath: t.TempDir()}, &out, false)
-			gotTmux := strings.Contains(out.String(), "tmux")
-			if gotTmux != tc.wantTmux {
-				t.Fatalf("tmux check output = %v, want %v\noutput=%s", gotTmux, tc.wantTmux, out.String())
+			for _, want := range tc.wantOutput {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("expected output to contain %q\noutput=%s", want, out.String())
+				}
 			}
-
-			wantFailed := 0
-			if tc.wantTmux {
-				wantFailed = 1
+			for _, dontWant := range tc.dontWantOutput {
+				if strings.Contains(out.String(), dontWant) {
+					t.Fatalf("did not expect output to contain %q\noutput=%s", dontWant, out.String())
+				}
 			}
-			if report.Failed != wantFailed {
-				t.Fatalf("failed checks = %d, want %d\noutput=%s", report.Failed, wantFailed, out.String())
+			if report.Failed != tc.wantFailed {
+				t.Fatalf("failed checks = %d, want %d\noutput=%s", report.Failed, tc.wantFailed, out.String())
 			}
 		})
 	}
