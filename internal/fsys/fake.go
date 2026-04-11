@@ -10,7 +10,8 @@ import (
 
 // Fake is an in-memory [FS] for testing. It records all calls (spy) and
 // simulates filesystem state (fake). Pre-populate Dirs, Files, and Errors
-// before calling methods.
+// before calling methods. ModTimes is optional unless a test needs exact
+// timestamp control; Stat synthesizes and stores a mod time on demand.
 type Fake struct {
 	Dirs     map[string]bool      // pre-populated directories
 	Files    map[string][]byte    // pre-populated files
@@ -103,7 +104,12 @@ func (f *Fake) Stat(name string) (os.FileInfo, error) {
 		return fakeFileInfo{name: filepath.Base(name), dir: true}, nil
 	}
 	if data, ok := f.Files[name]; ok {
-		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), modTime: f.ModTimes[name]}, nil
+		modTime := f.ModTimes[name]
+		if modTime.IsZero() {
+			modTime = f.nextModTime()
+			f.ModTimes[name] = modTime
+		}
+		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), modTime: modTime}, nil
 	}
 	return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
 }

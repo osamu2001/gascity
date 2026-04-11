@@ -44,6 +44,33 @@ func TestFakeStatFile(t *testing.T) {
 	}
 }
 
+func TestFakeStatSynthesizesModTimeForPrepopulatedFile(t *testing.T) {
+	f := &Fake{
+		Files: map[string][]byte{
+			"/city/city.toml": []byte("hello"),
+		},
+	}
+
+	fi, err := f.Stat("/city/city.toml")
+	if err != nil {
+		t.Fatalf("Stat existing file: %v", err)
+	}
+	if fi.ModTime().IsZero() {
+		t.Fatal("expected synthetic mod time for prepopulated file")
+	}
+	if got := f.ModTimes["/city/city.toml"]; !got.Equal(fi.ModTime()) {
+		t.Fatalf("stored mod time = %v, want %v", got, fi.ModTime())
+	}
+
+	fi2, err := f.Stat("/city/city.toml")
+	if err != nil {
+		t.Fatalf("second Stat existing file: %v", err)
+	}
+	if !fi2.ModTime().Equal(fi.ModTime()) {
+		t.Fatalf("second Stat mod time = %v, want %v", fi2.ModTime(), fi.ModTime())
+	}
+}
+
 func TestFakeStatMissing(t *testing.T) {
 	f := NewFake()
 
