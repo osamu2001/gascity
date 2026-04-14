@@ -14,20 +14,7 @@ import (
 )
 
 func writeSessionProviderTestCity(t *testing.T, provider string) string {
-	t.Helper()
-
-	cityPath := t.TempDir()
-	cfg := config.DefaultCity("bright-lights")
-	cfg.Session.Provider = provider
-	cfg.Beads.Provider = "file"
-	content, err := cfg.Marshal()
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), content, 0o644); err != nil {
-		t.Fatalf("WriteFile(city.toml): %v", err)
-	}
-	return cityPath
+	return writeSessionProviderTestCityWithProviders(t, provider, "file")
 }
 
 func hasMissingDep(missing []missingDep, prefix string) bool {
@@ -49,6 +36,48 @@ func fakeLookPath(missing ...string) func(string) (string, error) {
 		}
 		return "/bin/" + file, nil
 	}
+}
+
+func writeSessionProviderTestCityWithProviders(t *testing.T, sessionProvider, beadsProvider string) string {
+	t.Helper()
+
+	cityPath := t.TempDir()
+	cfg := config.DefaultCity("bright-lights")
+	cfg.Session.Provider = sessionProvider
+	cfg.Beads.Provider = beadsProvider
+	content, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), content, 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	return cityPath
+}
+
+func writeSessionProviderTestCityWithBeadsProvider(t *testing.T, sessionProvider, beadsProvider string) string {
+	t.Helper()
+	return writeSessionProviderTestCityWithProviders(t, sessionProvider, beadsProvider)
+}
+
+func dependencyNames(deps []binaryDependency) []string {
+	names := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		names = append(names, dep.name)
+	}
+	return names
+}
+
+func withInitRunVersion(t *testing.T, versions map[string]string) {
+	t.Helper()
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		if version, ok := versions[binary]; ok {
+			return version, nil
+		}
+		return "", errors.New("not checked")
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
 }
 
 func TestCheckHardDependenciesRespectsSessionProvider(t *testing.T) {
@@ -133,6 +162,163 @@ func TestCheckHardDependenciesRespectsSessionProvider(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCoreBinaryDependenciesPackManagedDeps(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cases := []struct {
+		name     string
+		provider string
+		opts     coreBinaryDependencyOptions
+		want     []string
+		dontWant []string
+	}{
+		{
+			name:     "bd provider gets pack-managed deps",
+			provider: "bd",
+			opts: coreBinaryDependencyOptions{
+				includePackManaged: true,
+			},
+			want: []string{"jq", "git", "pgrep", "lsof", "dolt", "bd", "flock"},
+		},
+		{
+			name:     "file provider skips pack-managed deps",
+			provider: "file",
+			opts: coreBinaryDependencyOptions{
+				includePackManaged: true,
+			},
+			dontWant: []string{"dolt", "bd", "flock"},
+		},
+		{
+			name:     "opt-out excludes pack-managed deps even for bd",
+			provider: "bd",
+			opts: coreBinaryDependencyOptions{
+				includePackManaged: false,
+			},
+			dontWant: []string{"dolt", "bd", "flock"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := coreBinaryDependencies("", tc.provider, tc.opts)
+			got := dependencyNames(deps)
+
+			for _, name := range tc.want {
+				if !slices.Contains(got, name) {
+					t.Fatalf("expected dependency %q in %v", name, got)
+				}
+			}
+			for _, name := range tc.dontWant {
+				if slices.Contains(got, name) {
+					t.Fatalf("did not expect dependency %q in %v", name, got)
+				}
+			}
+		})
+	}
+}
+
+func TestCoreBinaryDependenciesExecProviderPreservesScriptDependency(t *testing.T) {
+	deps := coreBinaryDependencies("exec:/tmp/spy", "bd", coreBinaryDependencyOptions{includePackManaged: false})
+	for _, dep := range deps {
+		if dep.lookupName == "/tmp/spy" {
+			if dep.provider != "exec:/tmp/spy" {
+				t.Fatalf("dep.provider=%q, want exec:/tmp/spy", dep.provider)
+			}
+			if dep.kind != binaryDependencyKindExecSessionProvider {
+				t.Fatalf("dep.kind=%d, want %d", dep.kind, binaryDependencyKindExecSessionProvider)
+			}
+			if dep.installHint == "" {
+				t.Fatal("expected exec-session install hint")
+			}
+			return
+		}
+	}
+	t.Fatal("expected exec provider dependency")
+}
+
+func TestCheckHardDependenciesRespectsMinVersions(t *testing.T) {
+	oldLookPath := initLookPath
+	t.Cleanup(func() { initLookPath = oldLookPath })
+	initLookPath = fakeLookPath()
+
+	cityPath := writeSessionProviderTestCityWithBeadsProvider(t, "", "bd")
+	t.Setenv("GC_BEADS", "bd")
+
+	t.Run("sufficient versions", func(t *testing.T) {
+		withInitRunVersion(t, map[string]string{
+			"dolt": "dolt version 1.86.1",
+			"bd":   "bd version 2.0.0",
+		})
+
+		missing := checkHardDependencies(cityPath)
+		if len(missing) != 0 {
+			t.Fatalf("missing = %v", missing)
+		}
+	})
+
+	t.Run("below minimum versions", func(t *testing.T) {
+		withInitRunVersion(t, map[string]string{
+			"dolt": "dolt version 1.10.0",
+			"bd":   "bd version 0.9.9",
+		})
+
+		missing := checkHardDependencies(cityPath)
+		if !hasMissingDep(missing, "dolt (found v1.10.0, need v1.86.1+)") {
+			t.Fatalf("expected dolt version gap, missing=%v", missing)
+		}
+		if !hasMissingDep(missing, "bd (found v0.9.9, need v1.0.0+)") {
+			t.Fatalf("expected bd version gap, missing=%v", missing)
+		}
+	})
+
+	t.Run("non-parseable versions are ignored", func(t *testing.T) {
+		withInitRunVersion(t, map[string]string{
+			"dolt": "dolt version unknown",
+			"bd":   "bd version ???",
+		})
+
+		missing := checkHardDependencies(cityPath)
+		if hasMissingDep(missing, "dolt (found") || hasMissingDep(missing, "bd (found") {
+			t.Fatalf("did not expect version-missing dependency from non-parseable output, missing=%v", missing)
+		}
+	})
+}
+
+func TestParseDepVersion(t *testing.T) {
+	t.Run("extracts first dotted version", func(t *testing.T) {
+		withInitRunVersion(t, map[string]string{"dolt": "dolt version 1.86.1"})
+
+		if got := parseDepVersion("dolt"); got != "1.86.1" {
+			t.Fatalf("parseDepVersion = %q, want 1.86.1", got)
+		}
+	})
+
+	t.Run("parsing non-numeric prefix fails", func(t *testing.T) {
+		withInitRunVersion(t, map[string]string{"dolt": "dolt version v1.86.1"})
+		if got := parseDepVersion("dolt"); got != "" {
+			t.Fatalf("parseDepVersion = %q, want empty", got)
+		}
+	})
+}
+
+func TestCompareVersions(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"1.2.3", "1.2.3", 0},
+		{"1.2", "1.2.0", 0},
+		{"1.10", "1.2", 1},
+		{"1.2.0", "1.3", -1},
+		{"2", "1.9.9", 1},
+	}
+	for _, tc := range cases {
+		if got := compareVersions(tc.a, tc.b); got != tc.want {
+			t.Fatalf("compareVersions(%q, %q) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
 	}
 }
 
