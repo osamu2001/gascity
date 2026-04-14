@@ -1175,8 +1175,11 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 		t.Fatalf("start session: %v", err)
 	}
 	env.sp.WaitForIdleErrors[sessionName] = nil
+	idleGate := make(chan struct{}) // see waitForIdleProbeReady godoc
+	env.sp.WaitForIdleGates[sessionName] = idleGate
 
 	env.reconcile([]beads.Bead{session})
+	close(idleGate)
 	waitForIdleProbeReady(t, env.dt, session.ID)
 	env.reconcile([]beads.Bead{session})
 
@@ -2630,6 +2633,19 @@ func TestResolvePoolSlot_NonPool(t *testing.T) {
 func TestResolvePoolSlot_NonNumericSuffix(t *testing.T) {
 	if got := resolvePoolSlot("worker-abc", "worker"); got != 0 {
 		t.Errorf("got %d, want 0", got)
+	}
+}
+
+func TestResolvePoolSlot_LegacyGCNaming(t *testing.T) {
+	if got := resolvePoolSlot("worker-gc-1", "worker"); got != 1 {
+		t.Errorf("resolvePoolSlot(worker-gc-1, worker) = %d, want 1", got)
+	}
+	if got := resolvePoolSlot("worker-gc-5", "worker"); got != 5 {
+		t.Errorf("resolvePoolSlot(worker-gc-5, worker) = %d, want 5", got)
+	}
+	// Non-numeric after gc- still returns 0.
+	if got := resolvePoolSlot("worker-gc-abc", "worker"); got != 0 {
+		t.Errorf("resolvePoolSlot(worker-gc-abc, worker) = %d, want 0", got)
 	}
 }
 

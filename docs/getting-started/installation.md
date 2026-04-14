@@ -23,17 +23,18 @@ Gas City's prerequisites depend on which session backend and beads backend you
 actually run. Homebrew installs the default stack for you; the other methods
 require manual installation of the rows that match your setup.
 
-| Tool           | When required                                         | macOS                | Linux                                                     | Notes                                                          |
-| -------------- | ----------------------------------------------------- | -------------------- | --------------------------------------------------------- | -------------------------------------------------------------- |
-| git            | Always                                                | (built-in)           | (built-in)                                                | Version control                                                |
-| jq             | Always                                                | `brew install jq`    | `apt install jq`                                          | JSON processing                                                |
-| pgrep          | Always                                                | (built-in)           | `apt install procps`                                      | Process discovery for runtime checks                           |
-| lsof           | Always                                                | (built-in)           | `apt install lsof`                                        | Process/port inspection                                        |
-| tmux           | Default session backend only (`""`, `tmux`, `hybrid`) | `brew install tmux`  | `apt install tmux`                                        | Skip when using `subprocess`, `acp`, `exec:<script>`, or `k8s` |
-| dolt           | Default beads backend only (`""`, `bd`)               | `brew install dolt`  | [releases](https://github.com/dolthub/dolt/releases)      | Skip when `[beads].provider = "file"`                          |
-| bd (Beads CLI) | Default beads backend only (`""`, `bd`)               | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Skip when `[beads].provider = "file"`                          |
-| flock          | Default beads backend only (`""`, `bd`)               | `brew install flock` | (built-in via util-linux)                                 | File locking for the `bd` backend                              |
-| Go 1.25+       | Source only                                           | `brew install go`    | [golang.org](https://go.dev/dl/)                          | Compiler                                                       |
+| Tool           | When required                                         | Min version | macOS                | Linux                                                     | Notes                                                          |
+| -------------- | ----------------------------------------------------- | ----------- | -------------------- | --------------------------------------------------------- | -------------------------------------------------------------- |
+| git            | Always                                                | —           | (built-in)           | (built-in)                                                | Version control                                                |
+| jq             | Always                                                | —           | `brew install jq`    | `apt install jq`                                          | JSON processing                                                |
+| pgrep          | Always                                                | —           | (built-in)           | `apt install procps`                                      | Process discovery for runtime checks                           |
+| lsof           | Always                                                | —           | (built-in)           | `apt install lsof`                                        | Process/port inspection                                        |
+| tmux           | Default session backend only (`""`, `tmux`, `hybrid`) | —           | `brew install tmux`  | `apt install tmux`                                        | Skip when using `subprocess`, `acp`, `exec:<script>`, or `k8s` |
+| dolt           | Default beads backend only (`""`, `bd`)               | 1.86.1      | `brew install dolt`  | [releases](https://github.com/dolthub/dolt/releases)      | Skip when `[beads].provider = "file"`                          |
+| bd (Beads CLI) | Default beads backend only (`""`, `bd`)               | 1.0.0       | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Skip when `[beads].provider = "file"`                          |
+| flock          | Default beads backend only (`""`, `bd`)               | —           | `brew install flock` | (built-in via util-linux)                                 | File locking for the `bd` backend                              |
+| Go 1.25+       | Source only                                           | 1.25        | `brew install go`    | [golang.org](https://go.dev/dl/)                          | Compiler                                                       |
+| make           | Source only                                           | —           | (built-in)           | `apt install make` (or `build-essential`)                 | Drives `make install`                                          |
 
 If you plan to follow the Quickstart exactly as written, install the default
 stack: `tmux` for sessions plus `bd`, `dolt`, and `flock` for beads.
@@ -130,7 +131,7 @@ chosen session and beads backends when using direct download.
 
 ## Build from source
 
-Requires Go 1.25+ (pinned in `go.mod`).
+Requires `make` and Go 1.25+ (pinned in `go.mod`).
 
 ```bash
 git clone https://github.com/gastownhall/gascity.git
@@ -173,10 +174,10 @@ Then create your first city:
 ```bash
 gc init ~/my-city
 cd ~/my-city
-gc start
 ```
 
-See the [Quickstart](./quickstart.md) for a complete walkthrough.
+`gc init` registers the city with the supervisor and starts it automatically.
+See the [Quickstart](/getting-started/quickstart) for a complete walkthrough.
 
 ## Docs preview
 

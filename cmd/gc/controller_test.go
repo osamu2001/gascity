@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -140,7 +143,8 @@ func TestControllerShutdown(t *testing.T) {
 	// Dolt-backed .beads/ database).
 	tomlPath := writeCityTOML(t, dir, "test", "mayor")
 
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	var stderr syncBuffer
 
 	// Run controller in a goroutine; it will block until canceled.
 	// Use a close-able channel so cleanup can detect whether the
@@ -162,7 +166,7 @@ func TestControllerShutdown(t *testing.T) {
 	})
 
 	// Poll for controller socket to become available instead of fixed sleep.
-	waitForController(t, dir, 5*time.Second)
+	waitForController(t, dir, 5*time.Second, done, &stderr)
 
 	if !tryStopController(dir, &bytes.Buffer{}) {
 		t.Fatal("tryStopController returned false, expected true")
@@ -296,11 +300,19 @@ func TestControllerReloadsConfig(t *testing.T) {
 		}
 	}
 
-	cancel()
-
-	names, _ := lastAgentNames.Load().([]string)
-	if len(names) != 2 || names[0] != "mayor" || names[1] != "worker" {
-		t.Errorf("expected [mayor worker], got %v", names)
+	deadline = time.After(5 * time.Second)
+	for {
+		names, _ := lastAgentNames.Load().([]string)
+		if len(names) == 2 && names[0] == "mayor" && names[1] == "worker" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for reconciled agents [mayor worker]; got %v stdout=%q stderr=%q",
+				names, stdout.String(), stderr.String())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 
@@ -417,6 +429,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	}
 	sp.SetActivity("mayor", time.Now().Add(-10*time.Minute))
 	var lastIdleTimeout atomic.Value
+	var reconcileCount atomic.Int32
 
 	store, err := openCityStoreAt(dir)
 	if err != nil {
@@ -462,6 +475,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	}
 
 	buildFn := func(c *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		reconcileCount.Add(1)
 		if len(c.Agents) > 0 {
 			lastIdleTimeout.Store(c.Agents[0].IdleTimeout)
 		}
@@ -519,6 +533,16 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	}
 
 	waitForNamedMode("always", 5*time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if reconcileCount.Load() >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := reconcileCount.Load(); got < 2 {
+		t.Fatalf("controller did not reach steady-state loop; reconcileCount=%d stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
 
 	writeControllerNamedSessionCityTOML(t, dir, "test", "on_demand", "5s")
 	parsedCfg, _, err := config.LoadWithIncludes(osFS{}, tomlPath)
@@ -547,7 +571,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 		t.Fatalf("controller buildFn idle_timeout = %q, want %q", got, "5s")
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if !sp.IsRunning("mayor") {
 			break
@@ -794,7 +818,8 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	// operations rather than falling back to cwd.
 	tomlPath := writeCityTOML(t, dir, "test")
 
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	var stderr syncBuffer
 
 	done := make(chan struct{})
 	go func() {
@@ -812,7 +837,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	})
 
 	// Poll for controller socket to become available.
-	waitForController(t, dir, 5*time.Second)
+	waitForController(t, dir, 5*time.Second, done, &stderr)
 
 	// Wait for initial tick.
 	deadline := time.After(5 * time.Second)
@@ -855,22 +880,126 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 	}
 }
 
+// syncBuffer is a concurrency-safe bytes.Buffer for use as an io.Writer
+// (e.g. capturing stderr from a goroutine) that can be read safely from
+// another goroutine. It implements io.Writer plus a String accessor.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (sb *syncBuffer) Write(p []byte) (int, error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Write(p)
+}
+
+func (sb *syncBuffer) String() string {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.String()
+}
+
 // waitForController polls until the controller socket at dir is responsive,
-// or fails the test after the given timeout. This replaces fixed sleeps that
-// are unreliable under load.
-func waitForController(t *testing.T, dir string, timeout time.Duration) {
+// or fails the test after the given timeout. If done is non-nil it is checked
+// on each poll iteration; a closed channel means runController exited early
+// and the real error is in stderr rather than a socket timeout.
+func waitForController(t *testing.T, dir string, timeout time.Duration, done <-chan struct{}, stderr *syncBuffer) {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {
 		if controllerAlive(dir) != 0 {
 			return
 		}
+		// Detect early exit: runController returned before the socket
+		// became responsive. Report stderr so the real error surfaces
+		// instead of a misleading "timed out" message.
+		if done != nil {
+			select {
+			case <-done:
+				var diag string
+				if stderr != nil {
+					diag = stderr.String()
+				}
+				t.Fatalf("controller exited before socket became ready; stderr: %s", diag)
+			default:
+			}
+		}
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for controller socket to become available")
+			msg := "timed out waiting for controller socket to become available"
+			if stderr != nil {
+				if s := stderr.String(); s != "" {
+					msg += "; stderr: " + s
+				}
+			}
+			t.Fatal(msg)
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+}
+
+// TestWaitForControllerDetectsEarlyExit verifies that waitForController
+// surfaces the real stderr content (not a generic timeout) when the
+// controller goroutine exits before the socket becomes ready.
+func TestWaitForControllerDetectsEarlyExit(t *testing.T) {
+	if os.Getenv("TEST_CONTROLLER_EARLY_EXIT") == "1" {
+		dir := t.TempDir()
+
+		var stderr syncBuffer
+		fmt.Fprint(&stderr, "gc start: injected startup failure\n") //nolint:errcheck // test setup
+
+		done := make(chan struct{})
+		close(done) // controller already exited
+
+		waitForController(t, dir, 5*time.Second, done, &stderr)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWaitForControllerDetectsEarlyExit$")
+	cmd.Env = append(os.Environ(), "TEST_CONTROLLER_EARLY_EXIT=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected subprocess to fail via t.Fatalf")
+	}
+	output := string(out)
+	if !strings.Contains(output, "controller exited before socket became ready") {
+		t.Fatalf("expected early-exit diagnostic, got:\n%s", output)
+	}
+	if !strings.Contains(output, "injected startup failure") {
+		t.Fatalf("expected stderr content in diagnostic, got:\n%s", output)
+	}
+}
+
+// TestWaitForControllerTimeoutIncludesStderr verifies that when
+// waitForController times out, it appends any buffered stderr content
+// to the failure message for diagnosis.
+func TestWaitForControllerTimeoutIncludesStderr(t *testing.T) {
+	if os.Getenv("TEST_CONTROLLER_TIMEOUT_STDERR") == "1" {
+		dir := t.TempDir()
+
+		var stderr syncBuffer
+		fmt.Fprint(&stderr, "gc start: partial startup output\n") //nolint:errcheck // test setup
+
+		done := make(chan struct{}) // never closed — simulates hung controller
+
+		waitForController(t, dir, 50*time.Millisecond, done, &stderr)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWaitForControllerTimeoutIncludesStderr$")
+	cmd.Env = append(os.Environ(), "TEST_CONTROLLER_TIMEOUT_STDERR=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected subprocess to fail via t.Fatalf")
+	}
+	output := string(out)
+	if !strings.Contains(output, "timed out waiting for controller socket") {
+		t.Fatalf("expected timeout message, got:\n%s", output)
+	}
+	if !strings.Contains(output, "partial startup output") {
+		t.Fatalf("expected stderr appended to timeout message, got:\n%s", output)
 	}
 }
 

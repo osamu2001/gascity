@@ -148,6 +148,34 @@ func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	}
 }
 
+func TestBuildDesiredState_UsesAgentHookOverride(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Name:              "test-city",
+			InstallAgentHooks: []string{"gemini"},
+		},
+		Agents: []config.Agent{{
+			Name:              "hookoverride",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			InstallAgentHooks: []string{"claude"},
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	if len(dsResult.State) != 1 {
+		t.Fatalf("desired state size = %d, want 1", len(dsResult.State))
+	}
+
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "settings.json")); err != nil {
+		t.Fatalf("agent claude hook not installed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".gemini", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("workspace gemini hook should not be installed for agent override: %v", err)
+	}
+}
+
 func TestBuildDesiredState_RoutedQueueDoesNotCreateOneSessionPerBead(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -290,6 +318,35 @@ func TestBuildDesiredState_AlwaysNamedSession_MaterializesWithoutWorkBeads(t *te
 	}
 	if !found {
 		t.Fatal("always-mode named session should materialize without work beads")
+	}
+}
+
+func TestBuildDesiredState_SuspendedNamedSession_DoesNotMaterialize(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "mayor",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			Suspended:         true,
+			WorkQuery:         "printf ''",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "mayor",
+			Mode:     "always",
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	for _, tp := range dsResult.State {
+		if tp.TemplateName == "mayor" {
+			t.Fatalf("suspended named session should not materialize: %+v", tp)
+		}
+	}
+	if dsResult.NamedSessionDemand["mayor"] {
+		t.Fatal("suspended named session should not record demand")
 	}
 }
 
@@ -1104,6 +1161,50 @@ func TestBuildDesiredState_DependencyFloorDoesNotReuseRegularPoolWorkerBead(t *t
 	}
 	if workerSessions != 1 {
 		t.Fatalf("worker desired sessions = %d, want 1; desired keys=%v", workerSessions, mapKeys(desired))
+	}
+}
+
+func TestBuildDesiredState_StoreBackedPoolUsesLogicalInstanceIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:              "worker",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(2),
+				ScaleCheck:        "printf 2",
+			},
+		},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(dsResult.State) != 2 {
+		t.Fatalf("desired session count = %d, want 2", len(dsResult.State))
+	}
+
+	want := map[string]int{"worker-1": 1, "worker-2": 2}
+	for _, tp := range dsResult.State {
+		slot, ok := want[tp.InstanceName]
+		if !ok {
+			t.Fatalf("unexpected instance name %q in desired state", tp.InstanceName)
+		}
+		if tp.TemplateName != "worker" {
+			t.Fatalf("TemplateName = %q, want worker", tp.TemplateName)
+		}
+		if tp.PoolSlot != slot {
+			t.Fatalf("PoolSlot(%q) = %d, want %d", tp.InstanceName, tp.PoolSlot, slot)
+		}
+		if got := tp.Env["GC_AGENT"]; got != tp.InstanceName {
+			t.Fatalf("GC_AGENT(%q) = %q, want %q", tp.InstanceName, got, tp.InstanceName)
+		}
+		if got := tp.Env["GC_ALIAS"]; got != tp.InstanceName {
+			t.Fatalf("GC_ALIAS(%q) = %q, want %q", tp.InstanceName, got, tp.InstanceName)
+		}
+		delete(want, tp.InstanceName)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing expected instance identities: %v", want)
 	}
 }
 

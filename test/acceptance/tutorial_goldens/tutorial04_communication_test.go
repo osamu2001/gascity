@@ -16,9 +16,7 @@ func TestTutorial04Communication(t *testing.T) {
 
 	myCity := expandHome(ws.home(), "~/my-city")
 	myProject := expandHome(ws.home(), "~/my-project")
-	myAPI := expandHome(ws.home(), "~/my-api")
 	mustMkdirAll(t, myProject)
-	mustMkdirAll(t, myAPI)
 
 	out, err := ws.runShell("gc init ~/my-city --provider claude --skip-provider-readiness", "")
 	if err != nil {
@@ -26,7 +24,7 @@ func TestTutorial04Communication(t *testing.T) {
 	}
 	ws.setCWD(myCity)
 
-	for _, cmd := range []string{"gc rig add ~/my-project", "gc rig add ~/my-api"} {
+	for _, cmd := range []string{"gc rig add ~/my-project"} {
 		if out, err := ws.runShell(cmd, ""); err != nil {
 			t.Fatalf("seed rig add %q: %v\n%s", cmd, err, out)
 		}
@@ -41,20 +39,10 @@ provider = "`+tutorialReviewerProvider()+`"
 prompt_template = "prompts/reviewer.md"
 `)
 	writeFile(t, filepath.Join(myCity, "prompts", "reviewer.md"), "# Reviewer\nReview code.\n", 0o644)
+	ws.noteWarning("TODO(issue #632): once bare agent names reliably resolve to the enclosing rig in acceptance-style paths, simplify tutorial 04's rig-local reviewer references from `my-project/reviewer` to bare `reviewer` where the shell is already in the rig")
 
-	mayorReady := func() bool {
-		listOut, listErr := ws.runShell("gc session list", "")
-		return listErr == nil && strings.Contains(listOut, "mayor")
-	}
-	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
-		restartOut, restartErr := ws.runShell("gc restart", "")
-		if restartErr != nil {
-			t.Fatalf("seed city restart: %v\n%s", restartErr, restartOut)
-		}
-	}
-	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorReady) {
-		listOut, _ := ws.runShell("gc session list", "")
-		t.Fatalf("mayor session did not materialize during tutorial 04 seed bootstrap:\n%s", listOut)
+	if err := ws.waitForPeekableSession("mayor", "mayor", 30*time.Second, time.Second); err != nil {
+		t.Fatalf("mayor should be an always-on named session immediately after init: %v", err)
 	}
 
 	t.Run(`gc mail send mayor -s "Review needed" -m "Please look at the auth module changes in my-project"`, func(t *testing.T) {
@@ -89,21 +77,17 @@ prompt_template = "prompts/reviewer.md"
 		}
 	})
 
-	t.Run("gc session peek mayor --lines 6", func(t *testing.T) {
-		ws.noteWarning("tutorial 04 coverage workaround: the page assumes a live mayor session reacts to mail immediately, so the page driver explicitly wakes mayor before nudging it to process hooks and route the work")
-		if _, err := ws.runShell("gc session wake mayor", ""); err != nil {
-			t.Fatalf("hidden mayor wake for communication tutorial: %v", err)
+	t.Run(`gc session nudge mayor "Check mail and hook status, then act accordingly"`, func(t *testing.T) {
+		out, err := ws.runShell(`gc session nudge mayor "Check mail and hook status, then act accordingly"`, "")
+		if err != nil {
+			t.Fatalf("gc session nudge mayor: %v\n%s", err, out)
 		}
-		if !waitForCondition(t, 30*time.Second, 2*time.Second, func() bool {
-			peekOut, peekErr := ws.runShell("gc session peek mayor --lines 1", "")
-			return peekErr == nil && strings.TrimSpace(peekOut) != ""
-		}) {
-			t.Fatal("mayor did not become peekable after hidden wake")
+		if !strings.Contains(out, "Nudged mayor") && !strings.Contains(out, "Queued nudge for mayor") {
+			t.Fatalf("nudge output mismatch:\n%s", out)
 		}
-		if _, err := ws.runShell(`gc session nudge mayor "Check mail and hook status, then act accordingly."`, ""); err != nil {
-			t.Fatalf("hidden mayor nudge for communication tutorial: %v", err)
-		}
+	})
 
+	t.Run("gc session peek mayor --lines 6", func(t *testing.T) {
 		var out string
 		ok := waitForCondition(t, 45*time.Second, 2*time.Second, func() bool {
 			var err error

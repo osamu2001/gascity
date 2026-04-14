@@ -33,13 +33,14 @@ gc [flags]
 | [gc events](#gc-events) | Show the event log |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
+| [gc halt](#gc-halt) | Pause the supervisor reconciliation tick |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart this session |
 | [gc help](#gc-help) | Help about any command |
 | [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
-| [gc order](#gc-order) | Manage orders (periodic formula dispatch) |
+| [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
@@ -835,6 +836,24 @@ gc graph gc-42               # expand convoy children
 | `--mermaid` | bool |  | output Mermaid.js flowchart |
 | `--tree` | bool |  | output Unicode dependency tree |
 
+## gc halt
+
+Halt the supervisor reconciliation tick for a city by creating
+a flag file at &lt;city&gt;/.gc/runtime/halt. While the flag is present the
+supervisor loop skips tick work (no session wakes, no convergence,
+no order dispatch) but keeps the process alive, logs, and control
+socket responsive.
+
+This is a soft circuit breaker for emergencies: it stops disk thrash
+from a runaway reconciler without requiring "systemctl stop". The
+supervisor process itself is not killed.
+
+Idempotent. Use "gc resume" to clear the flag.
+
+```
+gc halt [path]
+```
+
 ## gc handoff
 
 Convenience command for context handoff.
@@ -1141,11 +1160,12 @@ gc nudge status [session]
 
 ## gc order
 
-Manage orders — formulas with gate conditions for periodic dispatch.
+Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders are formulas annotated with scheduling gates (interval, cron
-schedule, or shell check commands). The controller evaluates gates
-periodically and dispatches order formulas when they are due.
+Orders live in orders/NAME/order.toml files. Each order pairs a gate
+condition (cooldown, cron, condition, event, or manual) with an action
+(a formula or an exec script). The controller evaluates gates on each
+tick and dispatches work when a gate opens.
 
 ```
 gc order
@@ -1189,8 +1209,8 @@ gc order history [name] [flags]
 
 List all available orders with their gate type, schedule, and target.
 
-Scans formula layers for formulas that have order metadata
-(gate, interval, schedule, check, pool).
+Scans orders/ directories for order.toml files defining gate conditions,
+scheduling parameters, and target pools.
 
 ```
 gc order list
@@ -1318,6 +1338,8 @@ gc restart [path]
 ## gc resume
 
 Resume a suspended city by clearing workspace.suspended in city.toml.
+Also clears the halt flag file (if any) created by "gc halt", so this
+is the single verb that takes a city out of every soft-pause state.
 
 Restores normal operation: the reconciler will spawn agents again and
 gc hook/prime will return work. Use "gc agent resume" to resume
@@ -1364,6 +1386,10 @@ Use --prefix to set the bead ID prefix explicitly (default: derived from name).
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
+Use --adopt to register a directory that already has a fully initialized
+.beads/ directory (must include both metadata.json and config.yaml).
+Skips beads init; the git repo check remains informational.
+
 ```
 gc rig add <path> [flags]
 ```
@@ -1376,10 +1402,12 @@ gc rig add /path/to/project
   gc rig add /path/to/project --prefix r1
   gc rig add ./my-project --include packs/gastown
   gc rig add ./my-project --include packs/gastown --start-suspended
+  gc rig add /path/to/existing --adopt
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
 | `--include` | string |  | pack directory for rig agents |
 | `--name` | string |  | rig name (default: directory basename) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
@@ -2311,3 +2339,4 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
+

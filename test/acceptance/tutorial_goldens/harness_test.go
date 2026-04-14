@@ -15,8 +15,11 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
 type tutorialWorkspace struct {
@@ -64,6 +67,9 @@ func (w *tutorialWorkspace) home() string {
 
 func (w *tutorialWorkspace) setCWD(dir string) {
 	w.cwd = dir
+	if dir != "" {
+		_ = helpers.EnsureClaudeProjectState(w.env.Env, dir)
+	}
 }
 
 func (w *tutorialWorkspace) noteWarning(format string, args ...any) {
@@ -92,6 +98,10 @@ func (w *tutorialWorkspace) attachDiagnostics(t *testing.T, pageName string) {
 			t.Logf("diagnostic notes:\n%s", strings.Join(w.diagNotes, "\n"))
 		}
 		for _, cmd := range []string{
+			"printf 'HOME=%s\\nGC_HOME=%s\\nCLAUDE_CONFIG_DIR=%s\\nTMUX_TMPDIR=%s\\nXDG_RUNTIME_DIR=%s\\n' \"$HOME\" \"$GC_HOME\" \"$CLAUDE_CONFIG_DIR\" \"$TMUX_TMPDIR\" \"$XDG_RUNTIME_DIR\"",
+			"pwd",
+			"pwd -P",
+			"claude auth status --json",
 			"gc status",
 			"gc session list",
 			"bd list --json --limit=20",
@@ -124,15 +134,21 @@ func (w *tutorialWorkspace) runShellWithTimeout(timeout time.Duration, command, 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = w.cwd
 	cmd.Env = w.env.Env.List()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
 	out, err := cmd.CombinedOutput()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return string(out), fmt.Errorf("timed out after %s: %w", timeout, ctx.Err())
+	}
+	if err == nil && strings.HasPrefix(strings.TrimSpace(command), "gc init ") {
+		if cfgErr := w.configureInitializedCities(); cfgErr != nil {
+			return string(out), cfgErr
+		}
 	}
 	return string(out), err
 }
@@ -160,6 +176,96 @@ func (w *tutorialWorkspace) sessionTargetByID(sessionID, template string) (strin
 	return "", fmt.Errorf("session %s not found in `%s`\n%s", sessionID, command, out)
 }
 
+func (w *tutorialWorkspace) firstSessionByTemplate(template string) (string, string, error) {
+	w.t.Helper()
+	command := "gc session list --template " + template
+	out, err := w.runShell(command, "")
+	if err != nil {
+		return "", "", err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		if fields[0] == "ID" || fields[1] != template {
+			continue
+		}
+		return fields[0], fields[4], nil
+	}
+	return "", "", fmt.Errorf("no session found for template %s in `%s`\n%s", template, command, out)
+}
+
+func (w *tutorialWorkspace) firstSessionByTarget(target string) (string, error) {
+	w.t.Helper()
+	command := "gc session list"
+	out, err := w.runShell(command, "")
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		if fields[0] == "ID" || fields[4] != target {
+			continue
+		}
+		return fields[0], nil
+	}
+	return "", fmt.Errorf("no session found for target %s in `%s`\n%s", target, command, out)
+}
+
+func (w *tutorialWorkspace) waitForSessionByTemplateOrTarget(template, target string, timeout, interval time.Duration) (string, error) {
+	w.t.Helper()
+
+	var sessionID string
+	ok := waitForCondition(w.t, timeout, interval, func() bool {
+		if template != "" {
+			if id, _, err := w.firstSessionByTemplate(template); err == nil && id != "" {
+				sessionID = id
+				return true
+			}
+		}
+		if target != "" {
+			if id, err := w.firstSessionByTarget(target); err == nil && id != "" {
+				sessionID = id
+				return true
+			}
+		}
+		return false
+	})
+	if ok {
+		return sessionID, nil
+	}
+
+	out, err := w.runShell("gc session list", "")
+	if err != nil {
+		return "", fmt.Errorf("resolving session template=%q target=%q: %w", template, target, err)
+	}
+	return "", fmt.Errorf("no session found for template=%q target=%q in `gc session list`\n%s", template, target, out)
+}
+
+func (w *tutorialWorkspace) waitForPeekableSession(template, target string, timeout, interval time.Duration) error {
+	w.t.Helper()
+
+	if _, err := w.waitForSessionByTemplateOrTarget(template, target, timeout, interval); err != nil {
+		return err
+	}
+
+	ok := waitForCondition(w.t, timeout, interval, func() bool {
+		peekOut, peekErr := w.runShell("gc session peek "+target+" --lines 1", "")
+		return peekErr == nil && strings.TrimSpace(peekOut) != ""
+	})
+	if ok {
+		return nil
+	}
+
+	statusOut, _ := w.runShell("gc status", "")
+	listOut, _ := w.runShell("gc session list", "")
+	return fmt.Errorf("session target %q did not become peekable\n\ngc status:\n%s\n\ngc session list:\n%s", target, statusOut, listOut)
+}
+
 type runningShell struct {
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
@@ -173,9 +279,10 @@ func (w *tutorialWorkspace) startShell(command, stdin string) (*runningShell, er
 	w.t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	cmd := exec.CommandContext(ctx, "bash", "-c", command)
 	cmd.Dir = w.cwd
 	cmd.Env = w.env.Env.List()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -229,6 +336,10 @@ func (r *runningShell) waitFor(substr string, timeout time.Duration) error {
 
 func (r *runningShell) stop() error {
 	r.cancel()
+	if r.cmd.Process != nil {
+		_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGTERM)
+		_ = r.cmd.Process.Signal(syscall.SIGTERM)
+	}
 	select {
 	case err := <-r.done:
 		if err == nil || errors.Is(err, context.Canceled) {
@@ -237,10 +348,18 @@ func (r *runningShell) stop() error {
 		return err
 	case <-time.After(5 * time.Second):
 		if r.cmd.Process != nil {
+			_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
 			_ = r.cmd.Process.Kill()
 		}
-		<-r.done
-		return nil
+		select {
+		case err := <-r.done:
+			if err == nil || errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("timed out stopping running shell\n%s", r.output())
+		}
 	}
 }
 
@@ -249,6 +368,19 @@ func expandHome(home, path string) string {
 		return filepath.Join(home, strings.TrimPrefix(path, "~/"))
 	}
 	return path
+}
+
+func (w *tutorialWorkspace) configureInitializedCities() error {
+	return filepath.WalkDir(w.env.Home, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() || d.Name() != "city.toml" {
+			return nil
+		}
+		cityDir := filepath.Dir(path)
+		if err := helpers.EnsureClaudeProjectState(w.env.Env, cityDir); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 var beadIDPattern = regexp.MustCompile(`\b[a-z]{2}-[a-z0-9.]+\b`)
@@ -300,6 +432,32 @@ func replaceInFile(t *testing.T, path, old, new string) {
 	}
 }
 
+func TestRunEnvCommandWithTimeoutUsesAcceptanceGCBinary(t *testing.T) {
+	home := t.TempDir()
+	runtimeDir := filepath.Join(home, "runtime")
+	mustMkdirAll(t, runtimeDir)
+
+	fakeBinDir := filepath.Join(home, "bin")
+	mustMkdirAll(t, fakeBinDir)
+	fakeGC := filepath.Join(fakeBinDir, "gc")
+	writeFile(t, fakeGC, "#!/bin/sh\nprintf 'tutorial-env-gc\\n'\n", 0o755)
+
+	env := helpers.NewEnv(fakeGC, home, runtimeDir).With("PATH", "/does/not/exist")
+	tutorial := &tutorialEnv{
+		Home:       home,
+		RuntimeDir: runtimeDir,
+		Env:        env,
+	}
+
+	out, err := runEnvCommandWithTimeout(tutorial, home, 2*time.Second, "gc", "supervisor", "status")
+	if err != nil {
+		t.Fatalf("runEnvCommandWithTimeout: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(out); got != "tutorial-env-gc" {
+		t.Fatalf("expected acceptance gc binary output, got %q", got)
+	}
+}
+
 func waitForCondition(t *testing.T, timeout, interval time.Duration, fn func() bool) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -312,6 +470,41 @@ func waitForCondition(t *testing.T, timeout, interval time.Duration, fn func() b
 	return false
 }
 
+func resolveEnvCommand(env *tutorialEnv, name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("command name is empty")
+	}
+	if strings.ContainsRune(name, filepath.Separator) {
+		return name, nil
+	}
+	if env != nil && env.Env != nil {
+		if name == "gc" {
+			return helpers.ResolveGCPath(env.Env)
+		}
+		if path := findExecutableInPath(env.Env.Get("PATH"), name); path != "" {
+			return path, nil
+		}
+	}
+	return exec.LookPath(name)
+}
+
+func findExecutableInPath(pathEnv, name string) string {
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Mode()&0o111 != 0 {
+			return path
+		}
+	}
+	return ""
+}
+
 func runEnvCommandWithTimeout(env *tutorialEnv, dir string, timeout time.Duration, argv ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -319,7 +512,11 @@ func runEnvCommandWithTimeout(env *tutorialEnv, dir string, timeout time.Duratio
 	if len(argv) == 0 {
 		return "", nil
 	}
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	commandPath, err := resolveEnvCommand(env, argv[0])
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, commandPath, argv[1:]...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
