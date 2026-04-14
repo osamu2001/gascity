@@ -125,6 +125,7 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 		if err != nil {
 			return err
 		}
+		resolveRigPaths(cityPath, cfg.Rigs)
 		switch bead.Metadata["gc.kind"] {
 		case "check", "fanout":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
@@ -258,7 +259,7 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 	for i := range fragment.Steps {
 		step := &fragment.Steps[i]
 		switch step.Metadata["gc.kind"] {
-		case "workflow", "scope", "ralph", "retry":
+		case "workflow", "scope", "ralph", "retry", "spec":
 			continue
 		}
 		binding, err := resolveGraphStepBinding(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, defaultRoute, routingRigContext, store, cityName, cfg)

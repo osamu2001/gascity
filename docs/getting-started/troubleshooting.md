@@ -60,8 +60,8 @@ check.
 
 | Tool | Min version | macOS | Linux |
 |------|-------------|-------|-------|
-| dolt | 1.80.0 | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
-| bd | 0.61.0 | [releases](https://github.com/steveyegge/beads/releases) | [releases](https://github.com/steveyegge/beads/releases) |
+| dolt | 1.86.1 | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
+| bd | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
 If you do not want to install dolt, bd, and flock, switch to the file-based
@@ -83,7 +83,7 @@ durable versioned storage and is recommended for real work.
 
 ## Dolt Version Too Old
 
-Gas City requires dolt 1.80.0 or newer. Check your version:
+Gas City requires dolt 1.86.1 or newer. Check your version:
 
 ```bash
 dolt version
@@ -91,6 +91,17 @@ dolt version
 
 Upgrade via Homebrew (`brew upgrade dolt`) or download a newer release from
 [dolthub/dolt/releases](https://github.com/dolthub/dolt/releases).
+
+## `bd` Version Too Old
+
+Gas City requires `bd` 1.0.0 or newer. Check your version:
+
+```bash
+bd version
+```
+
+Upgrade via Homebrew (`brew upgrade beads`) or download a newer release from
+[gastownhall/beads/releases](https://github.com/gastownhall/beads/releases).
 
 ## flock Not Found (macOS)
 
@@ -119,14 +130,16 @@ terminal emulator.
 
 ## Build From Source Fails
 
-Building from source requires Go 1.25 or newer:
+Building from source requires `make` and Go 1.25 or newer:
 
 ```bash
+make --version
 go version
 ```
 
-If your Go version is too old, update it from [go.dev/dl](https://go.dev/dl/)
-or via your package manager. Then:
+If `make` is missing, install it (`apt install make` on Debian/Ubuntu, or
+`xcode-select --install` on macOS). If your Go version is too old, update it
+from [go.dev/dl](https://go.dev/dl/) or via your package manager. Then:
 
 ```bash
 make build

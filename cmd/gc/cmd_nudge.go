@@ -465,7 +465,7 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, me
 			return 1
 		}
 		if sp.IsRunning(target.sessionName) {
-			maybeStartCodexNudgePoller(target)
+			maybeStartNudgePoller(target)
 		}
 		fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
 		return 0
@@ -478,7 +478,7 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, me
 			fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
 			return 0
 		}
-		if tryDeliverWaitIdleNudge(target, sp, message) {
+		if tryDeliverWaitIdleNudge(target, sp, "session", message) {
 			telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 			fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
 			return 0
@@ -487,7 +487,7 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, me
 			fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		maybeStartCodexNudgePoller(target)
+		maybeStartNudgePoller(target)
 		fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
 		return 0
 	default:
@@ -504,12 +504,12 @@ func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider, sender 
 	msg := fmt.Sprintf("You have mail from %s", sender)
 	now := time.Now()
 	running := sp.IsRunning(target.sessionName)
-	if !running || !tryDeliverWaitIdleNudge(target, sp, msg) {
+	if !running || !tryDeliverWaitIdleNudge(target, sp, "mail", msg) {
 		if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), msg, "mail", now, queuedNudgeOptionsFromTarget(target))); err != nil {
 			return err
 		}
 		if running {
-			maybeStartCodexNudgePoller(target)
+			maybeStartNudgePoller(target)
 		}
 		return nil
 	}
@@ -566,7 +566,7 @@ func resolveNudgeTargetFromSessionBead(cityPath string, cfg *config.City, b bead
 		alias:             alias,
 		aliasHistory:      session.AliasHistory(b.Metadata),
 		transport:         strings.TrimSpace(b.Metadata["transport"]),
-		resolved:          &config.ResolvedProvider{Name: strings.TrimSpace(b.Metadata["provider"])},
+		resolved:          resolvedProviderFromBeadMetadata(b.Metadata["provider"], b.Metadata["provider_kind"], cfg.Providers),
 		sessionID:         b.ID,
 		continuationEpoch: strings.TrimSpace(b.Metadata["continuation_epoch"]),
 		sessionName:       sessionName,
@@ -609,6 +609,50 @@ func resolveNudgeTargetFromSessionBead(cityPath string, cfg *config.City, b bead
 	return target
 }
 
+// resolvedProviderFromBeadMetadata creates a ResolvedProvider from a bead's
+// provider metadata fields, hydrating capability flags so that callers
+// (e.g. maybeStartNudgePoller) see the correct NeedsNudgePoller value even
+// when the provider is no longer in active config. It checks (in order):
+//  1. City-configured providers (handles custom providers with the flag)
+//  2. Builtin providers by provider name
+//  3. Builtin providers by provider_kind (handles codex-derived aliases)
+func resolvedProviderFromBeadMetadata(provider, providerKind string, cityProviders map[string]config.ProviderSpec) *config.ResolvedProvider {
+	name := strings.TrimSpace(provider)
+	kind := strings.TrimSpace(providerKind)
+	rp := &config.ResolvedProvider{Name: name}
+	builtins := config.BuiltinProviders()
+	// Determine the builtin base: prefer canonical kind (handles aliases like
+	// "my-fast-codex" with provider_kind="codex"), fall back to name.
+	var builtinBase *config.ProviderSpec
+	if kind != "" {
+		if spec, ok := builtins[kind]; ok {
+			builtinBase = &spec
+		}
+	}
+	if builtinBase == nil {
+		if spec, ok := builtins[name]; ok {
+			builtinBase = &spec
+		}
+	}
+	// Check city-configured providers first (may include custom providers).
+	if cityProviders != nil {
+		if spec, ok := cityProviders[name]; ok {
+			if builtinBase != nil {
+				merged := config.MergeProviderOverBuiltin(*builtinBase, spec)
+				rp.NeedsNudgePoller = merged.NeedsNudgePoller
+			} else {
+				rp.NeedsNudgePoller = spec.NeedsNudgePoller
+			}
+			return rp
+		}
+	}
+	// Fall back to builtin capabilities.
+	if builtinBase != nil {
+		rp.NeedsNudgePoller = builtinBase.NeedsNudgePoller
+	}
+	return rp
+}
+
 func parseNudgeAgentIdentity(identity string) config.Agent {
 	dir, name := config.ParseQualifiedName(identity)
 	return config.Agent{Dir: dir, Name: name}
@@ -633,7 +677,7 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func tryDeliverWaitIdleNudge(target nudgeTarget, sp runtime.Provider, message string) bool {
+func tryDeliverWaitIdleNudge(target nudgeTarget, sp runtime.Provider, source, message string) bool {
 	if target.sessionTransport() == "acp" {
 		err := sp.Nudge(target.sessionName, runtime.TextContent(message))
 		return err == nil
@@ -648,7 +692,7 @@ func tryDeliverWaitIdleNudge(target nudgeTarget, sp runtime.Provider, message st
 	if err := wp.WaitForIdle(context.Background(), target.sessionName, defaultNudgeWaitIdleTimeout); err != nil {
 		return false
 	}
-	if err := deliverImmediateNudge(sp, target.sessionName, runtime.TextContent(message)); err != nil {
+	if err := deliverImmediateNudge(sp, target.sessionName, runtime.TextContent(formatDirectReminderOutput(source, message))); err != nil {
 		return false
 	}
 	return true
@@ -697,7 +741,12 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, sp runtime.Provider, qui
 	if len(items) == 0 {
 		return false, nil
 	}
-	msg := formatNudgeRuntimeMessage(items)
+	var msg string
+	if target.sessionTransport() == "acp" {
+		msg = formatNudgeRuntimeMessage(items)
+	} else {
+		msg = formatNudgeInjectOutput(items)
+	}
 	// Queued nudges are background delivery, not user-initiated sends. Keep
 	// them on the provider's regular nudge path instead of the immediate path.
 	if err := sp.Nudge(target.sessionName, runtime.TextContent(msg)); err != nil {
@@ -719,8 +768,12 @@ func pollerSessionIdleEnough(sp runtime.Provider, sessionName string, quiescence
 	return time.Since(last) >= quiescence
 }
 
-func maybeStartCodexNudgePoller(target nudgeTarget) {
-	if target.resolved == nil || target.resolved.Name != "codex" {
+// maybeStartNudgePoller spawns a background poller that drains the queued-nudge
+// store for providers whose runtime cannot deliver on turn boundaries via hooks.
+// Providers opt in by setting NeedsNudgePoller on their ProviderSpec. The poller
+// is a no-op for providers that drain via UserPromptSubmit-equivalent hooks.
+func maybeStartNudgePoller(target nudgeTarget) {
+	if target.resolved == nil || !target.resolved.NeedsNudgePoller {
 		return
 	}
 	if target.sessionName == "" {
@@ -862,6 +915,13 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 		}
 		return cmd.Process.Release()
 	})
+}
+
+func formatDirectReminderOutput(source, message string) string {
+	return formatNudgeInjectOutput([]queuedNudge{{
+		Source:  source,
+		Message: message,
+	}})
 }
 
 func formatNudgeInjectOutput(items []queuedNudge) string {

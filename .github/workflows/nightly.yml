@@ -13,16 +13,19 @@ jobs:
     name: Tier C inference tests
     runs-on: ubuntu-latest
     env:
-      DOLT_VERSION: "1.85.0"
-      BD_COMMIT: "9d9d0e53c2330bd081bef350883f56c2557eb78b"
+      DOLT_VERSION: "1.86.1"
+      BD_VERSION: "v1.0.0"
+      ANTHROPIC_BASE_URL: https://api.synthetic.new/anthropic
+      ANTHROPIC_API_KEY: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.SYNTHETIC_API_KEY }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_HAIKU_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SONNET_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_OPUS_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.GC_WORKER_INFERENCE_CLAUDE_SYNTHETIC_SUBAGENT_MODEL }}
+      CLAUDE_CODE_EFFORT_LEVEL: auto
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          repository: gastownhall/beads
-          ref: ${{ env.BD_COMMIT }}
-          path: .beads-src
 
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
@@ -39,12 +42,28 @@ jobs:
         run: |
           curl -fsSL https://github.com/dolthub/dolt/releases/download/v${{ env.DOLT_VERSION }}/install.sh | sudo bash
 
-      - name: Build bd
-        working-directory: .beads-src
+      - name: Install released bd v${{ env.BD_VERSION }}
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/.bd-release"
-          GOBIN="$GITHUB_WORKSPACE/.bd-release" go install ./cmd/bd
-          sudo install -m 0755 "$GITHUB_WORKSPACE/.bd-release/bd" /usr/local/bin/bd
+          archive="beads_${BD_VERSION#v}_linux_amd64.tar.gz"
+          mkdir -p "$RUNNER_TEMP/beads"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gastownhall/beads/releases/download/${BD_VERSION}/${archive}"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/beads" bd
+          sudo install -m 0755 "$RUNNER_TEMP/beads/bd" /usr/local/bin/bd
+
+      - name: Validate Synthetic Claude configuration
+        run: |
+          test -n "$ANTHROPIC_API_KEY" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_AUTH_TOKEN" || { echo "Missing SYNTHETIC_API_KEY GitHub secret" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_HAIKU_MODEL" || { echo "ANTHROPIC_DEFAULT_HAIKU_MODEL resolved empty" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_SONNET_MODEL" || { echo "ANTHROPIC_DEFAULT_SONNET_MODEL resolved empty" >&2; exit 1; }
+          test -n "$ANTHROPIC_DEFAULT_OPUS_MODEL" || { echo "ANTHROPIC_DEFAULT_OPUS_MODEL resolved empty" >&2; exit 1; }
+          test -n "$CLAUDE_CODE_SUBAGENT_MODEL" || { echo "CLAUDE_CODE_SUBAGENT_MODEL resolved empty" >&2; exit 1; }
+          printf 'ANTHROPIC_BASE_URL=%s\n' "$ANTHROPIC_BASE_URL"
+          printf 'ANTHROPIC_DEFAULT_HAIKU_MODEL=%s\n' "$ANTHROPIC_DEFAULT_HAIKU_MODEL"
+          printf 'ANTHROPIC_DEFAULT_SONNET_MODEL=%s\n' "$ANTHROPIC_DEFAULT_SONNET_MODEL"
+          printf 'ANTHROPIC_DEFAULT_OPUS_MODEL=%s\n' "$ANTHROPIC_DEFAULT_OPUS_MODEL"
+          printf 'CLAUDE_CODE_SUBAGENT_MODEL=%s\n' "$CLAUDE_CODE_SUBAGENT_MODEL"
 
       - name: Install Claude CLI
         run: npm install -g @anthropic-ai/claude-code
@@ -53,6 +72,4 @@ jobs:
         run: make test-acceptance-b
 
       - name: Tier C inference tests
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: make test-acceptance-c

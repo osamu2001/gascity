@@ -54,6 +54,7 @@ type drainState struct {
 	reason     string // "idle", "pool-excess", "config-drift", "user"
 	generation int    // generation at drain start — fence for Stop
 	ackSet     bool   // true after GC_DRAIN_ACK has been set by the reconciler
+	followUp   bool   // true when the controller should trigger one more immediate tick
 }
 
 // idleProbeState tracks an async WaitForIdle probe for interactive idle sleep.
@@ -70,7 +71,6 @@ type drainTracker struct {
 	drains          map[string]*drainState     // session bead ID -> drain state
 	idleProbes      map[string]*idleProbeState // session bead ID -> async idle probe
 	idleProbeCursor int
-	idleProbeWG     sync.WaitGroup
 }
 
 func newDrainTracker() *drainTracker {
@@ -106,6 +106,24 @@ func (dt *drainTracker) all() map[string]*drainState {
 		cp[k] = v
 	}
 	return cp
+}
+
+func (dt *drainTracker) consumeFollowUpTick() bool {
+	if dt == nil {
+		return false
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+
+	needed := false
+	for _, ds := range dt.drains {
+		if ds == nil || !ds.followUp {
+			continue
+		}
+		ds.followUp = false
+		needed = true
+	}
+	return needed
 }
 
 func (dt *drainTracker) idleProbe(beadID string) (idleProbeState, bool) {
@@ -157,27 +175,6 @@ func (dt *drainTracker) clearIdleProbe(beadID string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 	delete(dt.idleProbes, beadID)
-}
-
-func (dt *drainTracker) beginIdleProbe() {
-	if dt == nil {
-		return
-	}
-	dt.idleProbeWG.Add(1)
-}
-
-func (dt *drainTracker) doneIdleProbe() {
-	if dt == nil {
-		return
-	}
-	dt.idleProbeWG.Done()
-}
-
-func (dt *drainTracker) waitIdleProbes() {
-	if dt == nil {
-		return
-	}
-	dt.idleProbeWG.Wait()
 }
 
 // Reconciler tuning defaults.

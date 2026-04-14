@@ -59,6 +59,11 @@ type ProviderSpec struct {
 	// SupportsHooks indicates the provider has an executable hook mechanism
 	// (settings.json, plugins, etc.) for lifecycle events.
 	SupportsHooks bool `toml:"supports_hooks,omitempty"`
+	// NeedsNudgePoller indicates the provider cannot drain queued nudges via
+	// turn-boundary hooks (like Claude's UserPromptSubmit) and requires a
+	// background poller that delivers on idle quiescence. Codex is the
+	// canonical case. See engdocs/architecture/nudge-delivery.md.
+	NeedsNudgePoller bool `toml:"needs_nudge_poller,omitempty"`
 	// InstructionsFile is the filename the provider reads for project instructions
 	// (e.g., "CLAUDE.md", "AGENTS.md"). Empty defaults to "AGENTS.md".
 	InstructionsFile string `toml:"instructions_file,omitempty"`
@@ -81,9 +86,10 @@ type ProviderSpec struct {
 	SessionIDFlag string `toml:"session_id_flag,omitempty"`
 	// PermissionModes maps permission mode names to CLI flags.
 	// Example: {"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"}
-	// This is a config-only lookup table consumed by external dashboard clients
-	// to populate permission mode dropdowns. Launch-time flag substitution is planned
-	// for a follow-up PR — currently no runtime code reads this field.
+	// This is a config-only lookup table consumed by external clients
+	// (e.g., Mission Control) to populate permission mode dropdowns.
+	// Launch-time flag substitution is planned for a follow-up PR —
+	// currently no runtime code reads this field.
 	PermissionModes map[string]string `toml:"permission_modes,omitempty"`
 	// OptionDefaults overrides the Default value in OptionsSchema entries
 	// without redefining the schema itself. Keys are option keys (e.g.,
@@ -126,6 +132,7 @@ type ResolvedProvider struct {
 	Env                    map[string]string
 	SupportsACP            bool
 	SupportsHooks          bool
+	NeedsNudgePoller       bool
 	InstructionsFile       string
 	ResumeFlag             string
 	ResumeStyle            string
@@ -294,6 +301,7 @@ func BuiltinProviders() map[string]ProviderSpec {
 			ReadyDelayMs:     3000,
 			ProcessNames:     []string{"codex"},
 			SupportsHooks:    true,
+			NeedsNudgePoller: true,
 			InstructionsFile: "AGENTS.md",
 			PrintArgs:        []string{"exec"},
 			TitleModel:       "o4-mini",
