@@ -15,6 +15,23 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+type statRaceFS struct {
+	fsys.FS
+	path            string
+	beforeFirstStat func()
+	fired           bool
+}
+
+func (f *statRaceFS) Stat(name string) (os.FileInfo, error) {
+	if name == f.path && !f.fired {
+		f.fired = true
+		if f.beforeFirstStat != nil {
+			f.beforeFirstStat()
+		}
+	}
+	return f.FS.Stat(name)
+}
+
 func TestFileStore(t *testing.T) {
 	factory := func() beads.Store {
 		path := filepath.Join(t.TempDir(), "beads.json")
@@ -178,6 +195,43 @@ func TestFileStoreRefreshesReadsAcrossOpenInstances(t *testing.T) {
 	}
 	if len(sessions) != 1 || sessions[0].ID != created.ID {
 		t.Fatalf("List(session label) = %+v, want only %s", sessions, created.ID)
+	}
+}
+
+func TestFileStoreRefreshesAfterOpenRace(t *testing.T) {
+	path := "/city/.gc/beads.json"
+	base := fsys.NewFake()
+
+	s1, err := beads.OpenFileStore(base, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := s1.Create(beads.Bead{Title: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	racyFS := &statRaceFS{
+		FS:   base,
+		path: path,
+		beforeFirstStat: func() {
+			if err := s1.Update(created.ID, beads.UpdateOpts{Title: ptr("bravo")}); err != nil {
+				t.Fatalf("Update(%q) during open race: %v", created.ID, err)
+			}
+		},
+	}
+
+	s2, err := beads.OpenFileStore(racyFS, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s2.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(%q) after open race: %v", created.ID, err)
+	}
+	if got.Title != "bravo" {
+		t.Fatalf("Title after open race = %q, want bravo", got.Title)
 	}
 }
 

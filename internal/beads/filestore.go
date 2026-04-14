@@ -83,7 +83,10 @@ func OpenFileStore(fs fsys.FS, path string) (*FileStore, error) {
 		path:     path,
 		locker:   nopLocker{},
 	}
-	store.refreshFreshnessCache()
+	// The JSON we just loaded and the file's current freshness can diverge if
+	// another handle rewrites the store between ReadFile and a follow-up Stat.
+	// Leave the cache unknown so the first read revalidates against disk.
+	store.freshness = fileFreshness{}
 	return store, nil
 }
 
