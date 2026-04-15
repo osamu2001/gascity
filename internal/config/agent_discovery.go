@@ -14,7 +14,7 @@ import (
 // agent.toml provides optional per-agent config, prompt.template.md is
 // canonical, prompt.md.tmpl remains temporarily supported, and prompt.md is
 // the plain-markdown fallback.
-func DiscoverPackAgents(fs fsys.FS, packDir, _ string, skipNames map[string]bool) ([]Agent, error) {
+func DiscoverPackAgents(fs fsys.FS, packDir, packName string, skipNames map[string]bool) ([]Agent, error) {
 	agentsDir := filepath.Join(packDir, "agents")
 	entries, err := fs.ReadDir(agentsDir)
 	if err != nil {
@@ -63,8 +63,34 @@ func DiscoverPackAgents(fs fsys.FS, packDir, _ string, skipNames map[string]bool
 			agent.Namepool = namepoolPath
 		}
 
+		skillsDir := filepath.Join(agentDir, "skills")
+		if info, sErr := fs.Stat(skillsDir); sErr == nil && info.IsDir() {
+			agent.SkillsDir = skillsDir
+		}
+
+		mcpDir := filepath.Join(agentDir, "mcp")
+		if info, mErr := fs.Stat(mcpDir); mErr == nil && info.IsDir() {
+			agent.MCPDir = mcpDir
+		}
+
 		discovered = append(discovered, agent)
 	}
 
 	return discovered, nil
+}
+
+// DiscoverPackAttachmentRoots reports the shared attachment catalog roots
+// for the current city pack if they exist.
+func DiscoverPackAttachmentRoots(fs fsys.FS, packDir string) (skillsDir, mcpDir string) {
+	skillsPath := filepath.Join(packDir, "skills")
+	if info, err := fs.Stat(skillsPath); err == nil && info.IsDir() {
+		skillsDir = skillsPath
+	}
+
+	mcpPath := filepath.Join(packDir, "mcp")
+	if info, err := fs.Stat(mcpPath); err == nil && info.IsDir() {
+		mcpDir = mcpPath
+	}
+
+	return skillsDir, mcpDir
 }

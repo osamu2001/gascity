@@ -3,6 +3,7 @@ package config
 // Tests for V2 convention-based agent discovery from agents/ directories.
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,7 +17,7 @@ func TestAgentDiscovery_BasicDirectory(t *testing.T) {
 	packDir := filepath.Join(dir, "mypk")
 	agentDir := filepath.Join(packDir, "agents", "worker")
 
-	mustMkdirAll(t, agentDir, 0o755)
+	os.MkdirAll(agentDir, 0o755)
 
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
@@ -26,7 +27,7 @@ schema = 1
 	writeTestFile(t, agentDir, "prompt.md", `You are a worker agent.`)
 
 	cityDir := filepath.Join(dir, "city")
-	mustMkdirAll(t, cityDir, 0o755)
+	os.MkdirAll(cityDir, 0o755)
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"
@@ -59,7 +60,7 @@ func TestAgentDiscovery_CanonicalTemplateSuffix(t *testing.T) {
 	packDir := filepath.Join(dir, "mypk")
 	agentDir := filepath.Join(packDir, "agents", "worker")
 
-	mustMkdirAll(t, agentDir, 0o755)
+	os.MkdirAll(agentDir, 0o755)
 
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
@@ -69,7 +70,7 @@ schema = 1
 	writeTestFile(t, agentDir, "prompt.template.md", `You are {{ .AgentName }}.`)
 
 	cityDir := filepath.Join(dir, "city")
-	mustMkdirAll(t, cityDir, 0o755)
+	os.MkdirAll(cityDir, 0o755)
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"
@@ -98,7 +99,7 @@ func TestAgentDiscovery_LegacyTemplateSuffixStillLoads(t *testing.T) {
 	packDir := filepath.Join(dir, "mypk")
 	agentDir := filepath.Join(packDir, "agents", "worker")
 
-	mustMkdirAll(t, agentDir, 0o755)
+	os.MkdirAll(agentDir, 0o755)
 
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
@@ -108,7 +109,7 @@ schema = 1
 	writeTestFile(t, agentDir, "prompt.md.tmpl", `legacy`)
 
 	cityDir := filepath.Join(dir, "city")
-	mustMkdirAll(t, cityDir, 0o755)
+	os.MkdirAll(cityDir, 0o755)
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"
@@ -137,7 +138,7 @@ func TestAgentDiscovery_PrefersCanonicalTemplateSuffix(t *testing.T) {
 	packDir := filepath.Join(dir, "mypk")
 	agentDir := filepath.Join(packDir, "agents", "worker")
 
-	mustMkdirAll(t, agentDir, 0o755)
+	os.MkdirAll(agentDir, 0o755)
 
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
@@ -149,7 +150,7 @@ schema = 1
 	writeTestFile(t, agentDir, "prompt.md", `plain`)
 
 	cityDir := filepath.Join(dir, "city")
-	mustMkdirAll(t, cityDir, 0o755)
+	os.MkdirAll(cityDir, 0o755)
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"
@@ -179,7 +180,7 @@ func TestAgentDiscovery_WithAgentToml(t *testing.T) {
 	packDir := filepath.Join(dir, "mypk")
 	agentDir := filepath.Join(packDir, "agents", "coder")
 
-	mustMkdirAll(t, agentDir, 0o755)
+	os.MkdirAll(agentDir, 0o755)
 
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
@@ -193,7 +194,7 @@ provider = "codex"
 	writeTestFile(t, agentDir, "prompt.md", `You are a coder.`)
 
 	cityDir := filepath.Join(dir, "city")
-	mustMkdirAll(t, cityDir, 0o755)
+	os.MkdirAll(cityDir, 0o755)
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"
@@ -227,7 +228,7 @@ func TestAgentDiscovery_TomlAgentTakesPrecedence(t *testing.T) {
 	packDir := filepath.Join(dir, "mypk")
 	agentDir := filepath.Join(packDir, "agents", "mayor")
 
-	mustMkdirAll(t, agentDir, 0o755)
+	os.MkdirAll(agentDir, 0o755)
 
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
@@ -246,7 +247,7 @@ provider = "codex"
 	writeTestFile(t, agentDir, "prompt.md", `Convention prompt.`)
 
 	cityDir := filepath.Join(dir, "city")
-	mustMkdirAll(t, cityDir, 0o755)
+	os.MkdirAll(cityDir, 0o755)
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"
@@ -284,7 +285,7 @@ func TestAgentDiscovery_WithOverlay(t *testing.T) {
 	agentDir := filepath.Join(packDir, "agents", "helper")
 	overlayDir := filepath.Join(agentDir, "overlay")
 
-	mustMkdirAll(t, overlayDir, 0o755)
+	os.MkdirAll(overlayDir, 0o755)
 
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
@@ -295,7 +296,7 @@ schema = 1
 	writeTestFile(t, overlayDir, "CLAUDE.md", `# Helper overlay`)
 
 	cityDir := filepath.Join(dir, "city")
-	mustMkdirAll(t, cityDir, 0o755)
+	os.MkdirAll(cityDir, 0o755)
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"
@@ -319,11 +320,58 @@ includes = ["../mypk"]
 	t.Error("helper agent not discovered from agents/ directory")
 }
 
+func TestAgentDiscovery_WithSharedCatalogRoots(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "mypk")
+	agentDir := filepath.Join(packDir, "agents", "helper")
+
+	os.MkdirAll(filepath.Join(agentDir, "skills", "private"), 0o755)
+	os.MkdirAll(filepath.Join(agentDir, "mcp"), 0o755)
+
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "mypk"
+schema = 1
+`)
+	writeTestFile(t, agentDir, "prompt.md", `Helper agent.`)
+	writeTestFile(t, agentDir, "skills/private/SKILL.md", `# private skill`)
+	writeTestFile(t, agentDir, "mcp/private.toml", `
+command = ["helper-mcp"]
+`)
+
+	cityDir := filepath.Join(dir, "city")
+	os.MkdirAll(cityDir, 0o755)
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+includes = ["../mypk"]
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	for _, a := range explicit {
+		if a.Name == "helper" {
+			if !strings.HasSuffix(a.SkillsDir, filepath.Join("agents", "helper", "skills")) {
+				t.Fatalf("helper SkillsDir = %q, want suffix agents/helper/skills", a.SkillsDir)
+			}
+			if !strings.HasSuffix(a.MCPDir, filepath.Join("agents", "helper", "mcp")) {
+				t.Fatalf("helper MCPDir = %q, want suffix agents/helper/mcp", a.MCPDir)
+			}
+			return
+		}
+	}
+	t.Fatal("helper agent not discovered from agents/ directory")
+}
+
 func TestAgentDiscovery_NoAgentsDir(t *testing.T) {
 	// A pack with no agents/ directory should work fine (no agents discovered).
 	dir := t.TempDir()
 	packDir := filepath.Join(dir, "mypk")
-	mustMkdirAll(t, packDir, 0o755)
+	os.MkdirAll(packDir, 0o755)
 
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
@@ -332,7 +380,7 @@ schema = 1
 `)
 
 	cityDir := filepath.Join(dir, "city")
-	mustMkdirAll(t, cityDir, 0o755)
+	os.MkdirAll(cityDir, 0o755)
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"
@@ -356,7 +404,7 @@ func TestAgentDiscovery_WithImport(t *testing.T) {
 	dir := t.TempDir()
 	packDir := filepath.Join(dir, "mypk")
 	agentDir := filepath.Join(packDir, "agents", "assist")
-	mustMkdirAll(t, agentDir, 0o755)
+	os.MkdirAll(agentDir, 0o755)
 
 	writeTestFile(t, packDir, "pack.toml", `
 [pack]
@@ -369,7 +417,7 @@ scope = "city"
 	writeTestFile(t, agentDir, "prompt.md", `Assist agent.`)
 
 	cityDir := filepath.Join(dir, "city")
-	mustMkdirAll(t, cityDir, 0o755)
+	os.MkdirAll(cityDir, 0o755)
 	writeTestFile(t, cityDir, "city.toml", `
 [workspace]
 name = "test"

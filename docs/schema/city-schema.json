@@ -211,6 +211,20 @@
           "type": "array",
           "description": "InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.\nWhen set, replaces (not adds to) the workspace default."
         },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills lists shared skills attached to this agent by name."
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP lists shared MCP definitions attached to this agent by name."
+        },
         "hooks_installed": {
           "type": "boolean",
           "description": "HooksInstalled overrides automatic hook detection. Set to true when hooks\nare manually installed (e.g., merged into the project's own hook config)\nand auto-installation via install_agent_hooks is not desired. When true,\nthe agent is treated as hook-enabled for startup behavior: no prime\ninstruction in beacon and no delayed nudge. Interacts with\ninstall_agent_hooks — set this instead when hooks are pre-installed."
@@ -321,6 +335,20 @@
           },
           "type": "array",
           "description": "AppendFragments lists named template fragments to auto-append to\n.template.md prompts after rendering. Legacy .md.tmpl prompts are\nstill supported during the transition; plain .md remains inert.\nV2 migration convenience — replaces global_fragments/inject_fragments\nfor city-wide defaults."
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills lists shared skills attached by name to agents through\n[agent_defaults].skills."
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP lists shared MCP definitions attached by name to agents through\n[agent_defaults].mcp."
         }
       },
       "additionalProperties": false,
@@ -409,6 +437,20 @@
           "type": "array",
           "description": "InstallAgentHooks overrides the agent's install_agent_hooks list."
         },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills overrides the agent's attached shared skills list."
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP overrides the agent's attached shared MCP list."
+        },
         "hooks_installed": {
           "type": "boolean",
           "description": "HooksInstalled overrides automatic hook detection."
@@ -473,6 +515,20 @@
           },
           "type": "array",
           "description": "InstallAgentHooksAppend appends to the agent's install_agent_hooks list."
+        },
+        "skills_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SkillsAppend appends to the agent's attached shared skills list."
+        },
+        "mcp_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCPAppend appends to the agent's attached shared MCP list."
         },
         "attach": {
           "type": "boolean",
@@ -612,6 +668,34 @@
           },
           "type": "array",
           "description": "InstallAgentHooks overrides the agent's install_agent_hooks list."
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Skills overrides the agent's attached shared skills list."
+        },
+        "mcp": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCP overrides the agent's attached shared MCP list."
+        },
+        "skills_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SkillsAppend appends to the agent's attached shared skills list."
+        },
+        "mcp_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MCPAppend appends to the agent's attached shared MCP list."
         },
         "hooks_installed": {
           "type": "boolean",
@@ -875,7 +959,7 @@
         },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
-          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula and append_fragments; other\nfields are parsed/composed but not yet inherited automatically."
+          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula plus shared skill/MCP\nattachment baselines; other fields are parsed/composed but not yet\ninherited automatically."
         }
       },
       "additionalProperties": false,

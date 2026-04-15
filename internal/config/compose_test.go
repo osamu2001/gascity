@@ -137,6 +137,8 @@ name = "mayor"
 [agents]
 default_sling_formula = "mol-focus-review"
 append_fragments = ["command-glossary"]
+skills = ["shared-skill", "common-skill"]
+mcp = ["shared-mcp", "common-mcp"]
 `)
 	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
 	if err != nil {
@@ -148,6 +150,12 @@ append_fragments = ["command-glossary"]
 	if got := cfg.AgentDefaults.AppendFragments; len(got) != 1 || got[0] != "command-glossary" {
 		t.Errorf("AgentDefaults.AppendFragments = %v, want [command-glossary]", got)
 	}
+	if got := cfg.AgentDefaults.Skills; !reflect.DeepEqual(got, []string{"shared-skill", "common-skill"}) {
+		t.Errorf("AgentDefaults.Skills = %v, want [shared-skill common-skill]", got)
+	}
+	if got := cfg.AgentDefaults.MCP; !reflect.DeepEqual(got, []string{"shared-mcp", "common-mcp"}) {
+		t.Errorf("AgentDefaults.MCP = %v, want [shared-mcp common-mcp]", got)
+	}
 	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
 		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
 	}
@@ -157,6 +165,12 @@ append_fragments = ["command-glossary"]
 			found = true
 			if got := a.EffectiveDefaultSlingFormula(); got != "mol-focus-review" {
 				t.Errorf("mayor EffectiveDefaultSlingFormula = %q, want %q", got, "mol-focus-review")
+			}
+			if got := a.SharedSkills; !reflect.DeepEqual(got, []string{"shared-skill", "common-skill"}) {
+				t.Errorf("mayor SharedSkills = %v, want [shared-skill common-skill]", got)
+			}
+			if got := a.SharedMCP; !reflect.DeepEqual(got, []string{"shared-mcp", "common-mcp"}) {
+				t.Errorf("mayor SharedMCP = %v, want [shared-mcp common-mcp]", got)
 			}
 		}
 	}

@@ -1800,6 +1800,18 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if len(ov.InstallAgentHooksAppend) > 0 {
 		a.InstallAgentHooks = append(a.InstallAgentHooks, ov.InstallAgentHooksAppend...)
 	}
+	if len(ov.Skills) > 0 {
+		a.Skills = append([]string(nil), ov.Skills...)
+	}
+	if len(ov.SkillsAppend) > 0 {
+		a.Skills = append(a.Skills, ov.SkillsAppend...)
+	}
+	if len(ov.MCP) > 0 {
+		a.MCP = append([]string(nil), ov.MCP...)
+	}
+	if len(ov.MCPAppend) > 0 {
+		a.MCP = append(a.MCP, ov.MCPAppend...)
+	}
 	if ov.HooksInstalled != nil {
 		a.HooksInstalled = ov.HooksInstalled
 	}

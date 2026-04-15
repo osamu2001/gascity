@@ -140,6 +140,16 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 			root.PackDoctors = appendDiscoveredDoctors(root.PackDoctors, packDoctors...)
 		}
 
+		if root.PackSkillsDir == "" || root.PackMCPDir == "" {
+			skillsDir, mcpDir := DiscoverPackAttachmentRoots(fs, cityRoot)
+			if root.PackSkillsDir == "" {
+				root.PackSkillsDir = skillsDir
+			}
+			if root.PackMCPDir == "" {
+				root.PackMCPDir = mcpDir
+			}
+		}
+
 		// Convention-discovered agents from the city pack root.
 		// Explicit pack.toml agents win over discovered agents, and
 		// city.toml agents win over both.

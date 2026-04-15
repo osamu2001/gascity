@@ -155,8 +155,9 @@ type City struct {
 	Services []Service `toml:"service,omitempty"`
 	// AgentDefaults provides city-level defaults for agents that don't
 	// override them (canonical TOML key: agent_defaults). The runtime
-	// currently applies default_sling_formula and append_fragments; other
-	// fields are parsed/composed but not yet inherited automatically.
+	// currently applies default_sling_formula plus shared skill/MCP
+	// attachment baselines; other fields are parsed/composed but not yet
+	// inherited automatically.
 	AgentDefaults AgentDefaults `toml:"agent_defaults,omitempty"`
 	// AgentsDefaults is a temporary compatibility alias for [agent_defaults].
 	// Parse/load normalize it into AgentDefaults and prefer [agent_defaults]
@@ -210,6 +211,12 @@ type City struct {
 	// PackDoctors holds convention-discovered pack doctor checks composed
 	// during city and rig expansion. Runtime-only.
 	PackDoctors []DiscoveredDoctor `toml:"-" json:"-"`
+	// PackSkillsDir holds the current city pack's shared skills catalog root.
+	// Runtime-only — not persisted to TOML or JSON.
+	PackSkillsDir string `toml:"-" json:"-"`
+	// PackMCPDir holds the current city pack's shared MCP catalog root.
+	// Runtime-only — not persisted to TOML or JSON.
+	PackMCPDir string `toml:"-" json:"-"`
 }
 
 // NamedSession defines a canonical persistent session backed by an agent
@@ -388,6 +395,10 @@ type AgentOverride struct {
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
+	// Skills overrides the agent's attached shared skills list.
+	Skills []string `toml:"skills,omitempty"`
+	// MCP overrides the agent's attached shared MCP list.
+	MCP []string `toml:"mcp,omitempty"`
 	// HooksInstalled overrides automatic hook detection.
 	HooksInstalled *bool `toml:"hooks_installed,omitempty"`
 	// SessionSetup overrides the agent's session_setup commands.
@@ -414,6 +425,10 @@ type AgentOverride struct {
 	SessionLiveAppend []string `toml:"session_live_append,omitempty"`
 	// InstallAgentHooksAppend appends to the agent's install_agent_hooks list.
 	InstallAgentHooksAppend []string `toml:"install_agent_hooks_append,omitempty"`
+	// SkillsAppend appends to the agent's attached shared skills list.
+	SkillsAppend []string `toml:"skills_append,omitempty"`
+	// MCPAppend appends to the agent's attached shared MCP list.
+	MCPAppend []string `toml:"mcp_append,omitempty"`
 	// Attach overrides the agent's attach setting.
 	Attach *bool `toml:"attach,omitempty"`
 	// DependsOn overrides the agent's dependency list.
@@ -1253,6 +1268,12 @@ type AgentDefaults struct {
 	// V2 migration convenience — replaces global_fragments/inject_fragments
 	// for city-wide defaults.
 	AppendFragments []string `toml:"append_fragments,omitempty"`
+	// Skills lists shared skills attached by name to agents through
+	// [agent_defaults].skills.
+	Skills []string `toml:"skills,omitempty"`
+	// MCP lists shared MCP definitions attached by name to agents through
+	// [agent_defaults].mcp.
+	MCP []string `toml:"mcp,omitempty"`
 }
 
 func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
@@ -1378,6 +1399,10 @@ type Agent struct {
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
+	// Skills lists shared skills attached to this agent by name.
+	Skills []string `toml:"skills,omitempty"`
+	// MCP lists shared MCP definitions attached to this agent by name.
+	MCP []string `toml:"mcp,omitempty"`
 	// HooksInstalled overrides automatic hook detection. Set to true when hooks
 	// are manually installed (e.g., merged into the project's own hook config)
 	// and auto-installation via install_agent_hooks is not desired. When true,
@@ -1410,6 +1435,18 @@ type Agent struct {
 	// Set during pack/fragment loading; empty for inline agents.
 	// Runtime-only — not persisted to TOML or JSON.
 	SourceDir string `toml:"-" json:"-"`
+	// SharedSkills holds the inherited shared skills baseline for this agent.
+	// Runtime-only — not persisted to TOML or JSON.
+	SharedSkills []string `toml:"-" json:"-"`
+	// SharedMCP holds the inherited shared MCP baseline for this agent.
+	// Runtime-only — not persisted to TOML or JSON.
+	SharedMCP []string `toml:"-" json:"-"`
+	// SkillsDir is the agent-local private skills catalog root.
+	// Runtime-only — not persisted to TOML or JSON.
+	SkillsDir string `toml:"-" json:"-"`
+	// MCPDir is the agent-local private MCP catalog root.
+	// Runtime-only — not persisted to TOML or JSON.
+	MCPDir string `toml:"-" json:"-"`
 	// Implicit marks agents auto-generated from built-in providers.
 	// These have pool min=0, max=-1 and are available as sling targets
 	// even without an explicit [[agent]] entry in city.toml.
@@ -1727,6 +1764,8 @@ func InjectImplicitAgents(cfg *City) {
 // implicit agents are already present. Control-dispatcher agents are
 // skipped because they are infrastructure, not work agents.
 func ApplyAgentDefaults(cfg *City) {
+	applyAgentSharedAttachmentDefaults(cfg.Agents, cfg.AgentDefaults)
+
 	formula := cfg.AgentDefaults.DefaultSlingFormula
 	if formula != "" {
 		for i := range cfg.Agents {
@@ -1736,6 +1775,26 @@ func ApplyAgentDefaults(cfg *City) {
 			if cfg.Agents[i].DefaultSlingFormula == nil {
 				cfg.Agents[i].DefaultSlingFormula = &formula
 			}
+		}
+	}
+}
+
+// applyAgentSharedAttachmentDefaults seeds inherited shared skills/MCP
+// onto the given agents. The explicit agent attachment lists stay in the
+// agent itself; the inherited baseline lives in SharedSkills/SharedMCP.
+func applyAgentSharedAttachmentDefaults(agents []Agent, defaults AgentDefaults) {
+	if len(defaults.Skills) == 0 && len(defaults.MCP) == 0 {
+		return
+	}
+	for i := range agents {
+		if agents[i].Name == ControlDispatcherAgentName {
+			continue
+		}
+		if len(defaults.Skills) > 0 {
+			agents[i].SharedSkills = appendUnique(agents[i].SharedSkills, defaults.Skills...)
+		}
+		if len(defaults.MCP) > 0 {
+			agents[i].SharedMCP = appendUnique(agents[i].SharedMCP, defaults.MCP...)
 		}
 	}
 }
@@ -1769,6 +1828,12 @@ func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, pro
 	}
 	if len(src.AppendFragments) > 0 {
 		dst.AppendFragments = appendUnique(dst.AppendFragments, src.AppendFragments...)
+	}
+	if len(src.Skills) > 0 {
+		dst.Skills = appendUnique(dst.Skills, src.Skills...)
+	}
+	if len(src.MCP) > 0 {
+		dst.MCP = appendUnique(dst.MCP, src.MCP...)
 	}
 }
 

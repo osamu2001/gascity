@@ -114,6 +114,31 @@ start_command = "claude --dangerously-skip-permissions"
 	}
 }
 
+func TestParseAgentSkillsAndMCP(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "bright-lights"
+
+[[agent]]
+name = "mayor"
+skills = ["code-review", "incident-response"]
+mcp = ["beads-health", "sentry"]
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
+	}
+	if got := cfg.Agents[0].Skills; !reflect.DeepEqual(got, []string{"code-review", "incident-response"}) {
+		t.Fatalf("Agents[0].Skills = %v, want [code-review incident-response]", got)
+	}
+	if got := cfg.Agents[0].MCP; !reflect.DeepEqual(got, []string{"beads-health", "sentry"}) {
+		t.Fatalf("Agents[0].MCP = %v, want [beads-health sentry]", got)
+	}
+}
+
 func TestParseAgentsNoStartCommand(t *testing.T) {
 	data := []byte(`
 [workspace]
@@ -142,6 +167,8 @@ name = "test-city"
 [agents]
 default_sling_formula = "mol-focus-review"
 append_fragments = ["command-glossary"]
+skills = ["skill-a", "skill-b"]
+mcp = ["mcp-a"]
 `)
 	cfg, err := Parse(data)
 	if err != nil {
@@ -152,6 +179,12 @@ append_fragments = ["command-glossary"]
 	}
 	if !reflect.DeepEqual(cfg.AgentDefaults.AppendFragments, []string{"command-glossary"}) {
 		t.Errorf("AgentDefaults.AppendFragments = %v, want %v", cfg.AgentDefaults.AppendFragments, []string{"command-glossary"})
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.Skills, []string{"skill-a", "skill-b"}) {
+		t.Errorf("AgentDefaults.Skills = %v, want %v", cfg.AgentDefaults.Skills, []string{"skill-a", "skill-b"})
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.MCP, []string{"mcp-a"}) {
+		t.Errorf("AgentDefaults.MCP = %v, want %v", cfg.AgentDefaults.MCP, []string{"mcp-a"})
 	}
 	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
 		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
@@ -180,6 +213,8 @@ append_fragments = ["legacy-fragment"]
 [agent_defaults]
 default_sling_formula = "mol-canonical"
 append_fragments = []
+skills = ["city-skill"]
+mcp = ["city-mcp"]
 `)
 	cfg, err := Parse(data)
 	if err != nil {
@@ -190,6 +225,12 @@ append_fragments = []
 	}
 	if len(cfg.AgentDefaults.AppendFragments) != 0 {
 		t.Errorf("AgentDefaults.AppendFragments = %v, want empty canonical override", cfg.AgentDefaults.AppendFragments)
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.Skills, []string{"city-skill"}) {
+		t.Errorf("AgentDefaults.Skills = %v, want %v", cfg.AgentDefaults.Skills, []string{"city-skill"})
+	}
+	if !reflect.DeepEqual(cfg.AgentDefaults.MCP, []string{"city-mcp"}) {
+		t.Errorf("AgentDefaults.MCP = %v, want %v", cfg.AgentDefaults.MCP, []string{"city-mcp"})
 	}
 	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
 		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
@@ -3968,6 +4009,39 @@ func TestAgentDefaultsSlingFormula_ExplicitAgentInherits(t *testing.T) {
 		}
 	}
 	t.Fatal("explicit agent 'worker' not found")
+}
+
+func TestAgentDefaultsSharedAttachments_InheritAndPreserveExplicitLists(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{
+				Name:         "worker",
+				Skills:       []string{"agent-skill"},
+				MCP:          []string{"agent-mcp"},
+				SharedSkills: []string{"pack-skill"},
+				SharedMCP:    []string{"pack-mcp"},
+			},
+		},
+		AgentDefaults: AgentDefaults{
+			Skills: []string{"city-skill", "pack-skill"},
+			MCP:    []string{"city-mcp", "pack-mcp"},
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	got := cfg.Agents[0]
+	if want := []string{"pack-skill", "city-skill"}; !reflect.DeepEqual(got.SharedSkills, want) {
+		t.Fatalf("SharedSkills = %v, want %v", got.SharedSkills, want)
+	}
+	if want := []string{"pack-mcp", "city-mcp"}; !reflect.DeepEqual(got.SharedMCP, want) {
+		t.Fatalf("SharedMCP = %v, want %v", got.SharedMCP, want)
+	}
+	if want := []string{"agent-skill"}; !reflect.DeepEqual(got.Skills, want) {
+		t.Fatalf("Skills = %v, want %v", got.Skills, want)
+	}
+	if want := []string{"agent-mcp"}; !reflect.DeepEqual(got.MCP, want) {
+		t.Fatalf("MCP = %v, want %v", got.MCP, want)
+	}
 }
 
 func TestAgentDefaultsSlingFormula_ExplicitOverrideWins(t *testing.T) {

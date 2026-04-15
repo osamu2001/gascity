@@ -36,6 +36,10 @@ func TestAgentFieldSync(t *testing.T) {
 		"MinActiveSessions":      "cap field, inherits from rig/workspace — not a patch concern",
 		"ScaleCheck":             "agent-specific scaling, derived from pool config — not a patch concern",
 		"SourceDir":              "runtime-only, set during pack/fragment loading",
+		"SharedSkills":           "runtime-only, inherited baseline seeded from agent_defaults.skills",
+		"SharedMCP":              "runtime-only, inherited baseline seeded from agent_defaults.mcp",
+		"SkillsDir":              "runtime-only, set during agent discovery from agents/<name>/skills/",
+		"MCPDir":                 "runtime-only, set during agent discovery from agents/<name>/mcp/",
 		"Fallback":               "pack composition hint, not overridable at runtime",
 		"PoolName":               "internal field set during pool expansion, not user-configurable",
 		"Implicit":               "runtime-only, set during InjectImplicitAgents, not user-configurable",
@@ -60,6 +64,8 @@ func TestAgentFieldSync(t *testing.T) {
 		"SessionLiveAppend":       true, // append modifier, no Agent field
 		"InstallAgentHooksAppend": true, // append modifier, no Agent field
 		"InjectFragmentsAppend":   true, // append modifier, no Agent field
+		"SkillsAppend":            true, // append modifier, no Agent field
+		"MCPAppend":               true, // append modifier, no Agent field
 		"Pool":                    true, // legacy PoolOverride, maps to flat Agent fields via applyPoolOverride
 	}
 
@@ -188,6 +194,10 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		SessionLiveAppend:       []string{"live-append"},
 		InstallAgentHooksAppend: []string{"gemini"},
 		InjectFragmentsAppend:   []string{"frag2"},
+		Skills:                  []string{"code-review"},
+		SkillsAppend:            []string{"security"},
+		MCP:                     []string{"beads-health"},
+		MCPAppend:               []string{"tmux-helper"},
 		EnvRemove:               []string{"REMOVE_ME"},
 		MaxActiveSessions:       intVal(5),
 		MinActiveSessions:       intVal(1),
@@ -220,6 +230,8 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		"SessionLiveAppend":       true,
 		"InstallAgentHooksAppend": true,
 		"InjectFragmentsAppend":   true,
+		"SkillsAppend":            true,
+		"MCPAppend":               true,
 	}
 
 	// Check that all non-targeting, non-modifier fields were applied.
@@ -324,6 +336,10 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		SessionLiveAppend:       []string{"live-append"},
 		InstallAgentHooksAppend: []string{"gemini"},
 		InjectFragmentsAppend:   []string{"frag2"},
+		Skills:                  []string{"code-review"},
+		SkillsAppend:            []string{"security"},
+		MCP:                     []string{"beads-health"},
+		MCPAppend:               []string{"tmux-helper"},
 		MaxActiveSessions:       intVal(5),
 		MinActiveSessions:       intVal(1),
 		ScaleCheck:              strVal("echo 3"),
@@ -353,6 +369,8 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		"SessionLiveAppend":       true,
 		"InstallAgentHooksAppend": true,
 		"InjectFragmentsAppend":   true,
+		"SkillsAppend":            true,
+		"MCPAppend":               true,
 	}
 
 	av := reflect.ValueOf(agent)

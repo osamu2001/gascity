@@ -363,6 +363,8 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		IdleTimeout:            "15m",
 		SleepAfterIdle:         "30s",
 		InstallAgentHooks:      []string{"claude"},
+		Skills:                 []string{"code-review"},
+		MCP:                    []string{"beads-health"},
 		HooksInstalled:         &trueVal,
 		SessionSetup:           []string{"setup-cmd"},
 		SessionSetupScript:     "scripts/setup.sh",
@@ -390,6 +392,10 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		"PoolName":             true,
 		"BindingName":          true,
 		"PackName":             true,
+		"SharedSkills":         true, // runtime-only (inherited from agent_defaults.skills)
+		"SharedMCP":            true, // runtime-only (inherited from agent_defaults.mcp)
+		"SkillsDir":            true, // runtime-only (discovered from agents/<n>/skills/)
+		"MCPDir":               true, // runtime-only (discovered from agents/<n>/mcp/)
 	}
 
 	cfgFields := make(map[string]bool)
