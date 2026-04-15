@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/formula"
 )
 
 func TestFormulaListReturnsCatalogSummaries(t *testing.T) {
@@ -548,6 +549,10 @@ func (s failPerRootChildLookupStore) List(query beads.ListQuery) ([]beads.Bead, 
 }
 
 func TestFormulaDetailReturnsCompiledPreview(t *testing.T) {
+	prev := formula.FormulaV2Enabled
+	formula.FormulaV2Enabled = true
+	t.Cleanup(func() { formula.FormulaV2Enabled = prev })
+
 	state := newFakeState(t)
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}

@@ -9,6 +9,10 @@ import (
 )
 
 func TestCompileExpansionFragmentRunsInlineExpansionAndConditionFiltering(t *testing.T) {
+	prev := FormulaV2Enabled
+	FormulaV2Enabled = true
+	t.Cleanup(func() { FormulaV2Enabled = prev })
+
 	dir := t.TempDir()
 
 	leaf := `
@@ -116,6 +120,10 @@ func TestApplyFragmentRecipeGraphControlsAddsInheritedScopeChecks(t *testing.T) 
 }
 
 func TestCompileExpansionFragmentValidatesRequiredVars(t *testing.T) {
+	prev := FormulaV2Enabled
+	FormulaV2Enabled = true
+	t.Cleanup(func() { FormulaV2Enabled = prev })
+
 	dir := t.TempDir()
 
 	expansion := `

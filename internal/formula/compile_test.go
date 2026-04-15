@@ -543,6 +543,75 @@ needs = ["a"]
 	}
 }
 
+func TestCompileV2FormulaFailsWhenFormulaV2Disabled(t *testing.T) {
+	// FormulaV2Enabled defaults to false — do not set it.
+
+	dir := t.TempDir()
+
+	t.Run("version 2 formula errors", func(t *testing.T) {
+		formulaContent := `
+formula = "needs-v2"
+version = 2
+
+[[steps]]
+id = "work"
+title = "Do work"
+`
+		if err := os.WriteFile(filepath.Join(dir, "needs-v2.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := Compile(context.Background(), "needs-v2", []string{dir}, nil)
+		if err == nil {
+			t.Fatal("Compile(needs-v2) succeeded, want error for v2 formula with FormulaV2Enabled=false")
+		}
+		if !strings.Contains(err.Error(), "formula_v2") {
+			t.Fatalf("error = %v, want message mentioning formula_v2", err)
+		}
+	})
+
+	t.Run("version 8 formula errors", func(t *testing.T) {
+		formulaContent := `
+formula = "needs-v8"
+version = 8
+
+[[steps]]
+id = "work"
+title = "Do work"
+`
+		if err := os.WriteFile(filepath.Join(dir, "needs-v8.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := Compile(context.Background(), "needs-v8", []string{dir}, nil)
+		if err == nil {
+			t.Fatal("Compile(needs-v8) succeeded, want error for v8 formula with FormulaV2Enabled=false")
+		}
+		if !strings.Contains(err.Error(), "formula_v2") {
+			t.Fatalf("error = %v, want message mentioning formula_v2", err)
+		}
+	})
+
+	t.Run("version 1 formula still compiles", func(t *testing.T) {
+		formulaContent := `
+formula = "still-v1"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do work"
+`
+		if err := os.WriteFile(filepath.Join(dir, "still-v1.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := Compile(context.Background(), "still-v1", []string{dir}, nil)
+		if err != nil {
+			t.Fatalf("Compile(still-v1) = %v, want nil for v1 formula", err)
+		}
+	})
+}
+
 func TestCompileValidatesRequiredVars(t *testing.T) {
 	dir := t.TempDir()
 	formulaContent := `

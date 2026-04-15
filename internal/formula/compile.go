@@ -3,7 +3,6 @@ package formula
 import (
 	"context"
 	"fmt"
-	"log"
 	"maps"
 )
 
@@ -161,7 +160,10 @@ func toRecipe(f *Formula) (*Recipe, error) {
 		Pour:        f.Pour,
 	}
 
-	graphWorkflow := isGraphWorkflow(f)
+	graphWorkflow, err := isGraphWorkflow(f)
+	if err != nil {
+		return nil, err
+	}
 
 	// Determine root title: use {{title}} placeholder if the variable
 	// is defined, otherwise fall back to formula name.
@@ -398,25 +400,25 @@ func flattenSteps(steps []*Step, parentID string, idMapping map[string]string, o
 }
 
 // FormulaV2Enabled controls whether graph.v2 formula compilation is
-// allowed. When false, isGraphWorkflow always returns false regardless of
-// the formula's Version field, causing v2 formulas to compile as v1.
+// allowed. When false, isGraphWorkflow returns an error for formulas
+// declaring version >= 2 rather than silently downgrading to v1.
 // Set by the daemon config loader from [daemon] formula_v2.
 var FormulaV2Enabled bool
 
-func isGraphWorkflow(f *Formula) bool {
+func isGraphWorkflow(f *Formula) (bool, error) {
 	if f == nil {
-		return false
+		return false, nil
 	}
 	if !FormulaV2Enabled {
 		if f.Version >= 2 {
-			log.Printf("formula declares version %d but formula_v2 is disabled; compiling as v1", f.Version)
+			return false, fmt.Errorf("formula %q declares version %d but formula_v2 is disabled; enable [daemon] formula_v2 or use a version 1 formula", f.Formula, f.Version)
 		}
-		return false
+		return false, nil
 	}
 	if f.Version >= 2 {
-		return true
+		return true, nil
 	}
-	return hasDetachedGraphSteps(f.Steps)
+	return hasDetachedGraphSteps(f.Steps), nil
 }
 
 func isDetachedGraphStep(step *Step) bool {
