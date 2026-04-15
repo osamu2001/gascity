@@ -58,3 +58,29 @@ gc start my-city
 
 See [docs/k8s-guide.md](../../docs/k8s-guide.md) for the full setup guide,
 K8s manifests, and agent Dockerfile.
+
+### gc-session-zmx
+
+Local `zmx` backend for the exec session provider. This adapter keeps Gas City
+on its existing Go-side exec provider and translates each session operation to
+the `zmx` CLI.
+
+**Dependencies:** `zmx`, `jq`, `bash`
+
+**Required zmx commands:** `run`, `kill`, `attach`, `history`, `list --short`,
+`info --json`, `send`, `send-keys`
+
+**Usage:**
+
+```bash
+export GC_SESSION=exec:/path/to/contrib/session-scripts/gc-session-zmx
+gc start my-city
+```
+
+**Important:** Gas City ships the adapter, but `zmx` must supply the machine-
+readable CLI surface. If your local `zmx` build does not yet expose
+`info --json`, `send`, and `send-keys`, the adapter will not be fully usable.
+
+**Current gaps:** `clear-scrollback` is intentionally unsupported in v1, and
+`copy-to` / `copy-from` are implemented as local filesystem helpers rather than
+native zmx transport commands.

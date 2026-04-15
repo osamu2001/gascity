@@ -1,0 +1,594 @@
+#!/usr/bin/env bash
+# gc-session-zmx — zmx-backed exec session provider for Gas City.
+#
+# Implements Gas City's exec session provider protocol by adapting each
+# operation to the zmx CLI. This is a local-provider style adapter:
+# workdir staging, pre_start, session_setup, and session_live all run on
+# the host filesystem, while zmx owns session lifecycle and PTY input.
+#
+# Required zmx CLI surface:
+#   - zmx run <name> <command>
+#   - zmx kill <name>
+#   - zmx attach <name>
+#   - zmx history <name>
+#   - zmx list --short
+#   - zmx info <name> --json
+#   - zmx send <name>
+#   - zmx send-keys <name> <key>...
+#
+# Optional zmx CLI surface:
+#   - zmx list --json (preferred over --short when available)
+#
+# Known limitations:
+#   - clear-scrollback returns exit 2 until zmx ships a compatible command.
+#   - copy-to/copy-from operate on the local filesystem using the adapter's
+#     remembered workdir instead of a native zmx file-transfer primitive.
+#   - Session names are passed through to zmx as-is. Gas City's default names
+#     are compatible, but custom session_template output should avoid "/" and
+#     other zmx-invalid names.
+#   - zmx enforces a session-name length limit derived from its Unix socket
+#     path. Very long custom names may fail even if Gas City accepted them.
+#
+# Dependencies: zmx, jq, bash
+#
+# Usage:
+#   export GC_SESSION=exec:/path/to/contrib/session-scripts/gc-session-zmx
+#   gc start my-city
+
+set -euo pipefail
+
+op="${1:?missing operation}"
+name="${2:-}"
+
+STATE_DIR="${GC_EXEC_STATE_DIR:-${TMPDIR:-/tmp}/gc-session-zmx}"
+mkdir -p "$STATE_DIR"
+
+state_file() {
+  printf '%s/%s.%s\n' "$STATE_DIR" "$1" "$2"
+}
+
+meta_file() {
+  printf '%s/%s.meta.%s\n' "$STATE_DIR" "$1" "$2"
+}
+
+warn() {
+  printf '%s\n' "$*" >&2
+}
+
+build_session_argv() {
+  local command_str="$1"
+  local prompt_flag="$2"
+  local prompt_suffix="$3"
+  local full_command="$command_str"
+
+  if [ -n "$prompt_suffix" ] && [ -n "$full_command" ]; then
+    if [ -n "$prompt_flag" ]; then
+      full_command="$full_command $prompt_flag"
+    fi
+    # prompt_suffix is already shell-quoted text from template_resolve.go.
+    full_command="$full_command $prompt_suffix"
+  fi
+
+  SESSION_ARGV=()
+  if [ -n "$full_command" ]; then
+    # runtime.Config.Command is a shell command. Preserve metacharacters,
+    # redirects, and wrappers by launching it through sh -c instead of
+    # splitting it back into argv.
+    SESSION_ARGV=("sh" "-c" "$full_command")
+  else
+    SESSION_ARGV=("${SHELL:-/bin/sh}")
+  fi
+}
+
+store_work_dir() {
+  printf '%s' "$2" > "$(state_file "$1" work_dir)"
+}
+
+load_work_dir() {
+  local file
+  file="$(state_file "$1" work_dir)"
+  if [ -f "$file" ]; then
+    cat "$file"
+  fi
+}
+
+cleanup_session_state() {
+  rm -f "$(state_file "$1" work_dir)"
+  rm -f "$STATE_DIR/${1}.meta."*
+}
+
+canonical_path() {
+  local target="$1"
+  if [ -d "$target" ]; then
+    (
+      cd "$target"
+      pwd -P
+    )
+    return 0
+  fi
+
+  local parent base
+  parent="$(dirname "$target")"
+  base="$(basename "$target")"
+  if [ ! -d "$parent" ]; then
+    return 1
+  fi
+
+  (
+    cd "$parent"
+    printf '%s/%s\n' "$(pwd -P)" "$base"
+  )
+}
+
+same_path() {
+  local left right
+  left="$(canonical_path "$1" 2>/dev/null || printf '%s' "$1")"
+  right="$(canonical_path "$2" 2>/dev/null || printf '%s' "$2")"
+  [ "$left" = "$right" ]
+}
+
+copy_tree_contents() {
+  local src="$1"
+  local dst="$2"
+  if same_path "$src" "$dst"; then
+    return 0
+  fi
+  mkdir -p "$dst"
+  cp -Rf "$src/." "$dst/"
+}
+
+copy_entry_to_work_dir() {
+  local src="$1"
+  local work_dir="$2"
+  local rel_dst="$3"
+  local dst="$work_dir"
+
+  [ -n "$rel_dst" ] && dst="$work_dir/$rel_dst"
+
+  if [ -d "$src" ]; then
+    if same_path "$src" "$dst"; then
+      return 0
+    fi
+    mkdir -p "$dst"
+    cp -Rf "$src/." "$dst/"
+    return 0
+  fi
+
+  if [ -f "$src" ]; then
+    if same_path "$src" "$dst"; then
+      return 0
+    fi
+    if [ -d "$dst" ]; then
+      cp -f "$src" "$dst/"
+    elif [ -n "$rel_dst" ]; then
+      mkdir -p "$(dirname "$dst")"
+      cp -f "$src" "$dst"
+    else
+      mkdir -p "$dst"
+      cp -f "$src" "$dst/"
+    fi
+    return 0
+  fi
+
+  warn "copy_files warning: missing source $src"
+}
+
+export_config_env() {
+  local config="$1"
+  local entry key value
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    key="$(printf '%s' "$entry" | jq -r '.key')"
+    value="$(printf '%s' "$entry" | jq -r '.value')"
+    export "$key=$value"
+  done < <(printf '%s' "$config" | jq -c '.env // {} | to_entries[]?')
+}
+
+run_host_command() {
+  local config="$1"
+  local work_dir="$2"
+  local session_name="$3"
+  local command="$4"
+  local include_session_env="$5"
+
+  # shellcheck disable=SC2030,SC2031
+  (
+    export_config_env "$config"
+    if [ "$include_session_env" = "1" ]; then
+      export GC_SESSION="$session_name"
+    fi
+    if [ -n "$work_dir" ]; then
+      mkdir -p "$work_dir"
+      cd "$work_dir"
+    fi
+    sh -c "$command"
+  )
+}
+
+run_host_script() {
+  local config="$1"
+  local work_dir="$2"
+  local session_name="$3"
+  local script_path="$4"
+  local include_session_env="$5"
+
+  # shellcheck disable=SC2030,SC2031
+  (
+    export_config_env "$config"
+    if [ "$include_session_env" = "1" ]; then
+      export GC_SESSION="$session_name"
+    fi
+    if [ -n "$work_dir" ]; then
+      mkdir -p "$work_dir"
+      cd "$work_dir"
+    fi
+    sh "$script_path"
+  )
+}
+
+session_exists() {
+  local target="$1"
+  local session_name
+
+  if [ -z "$target" ]; then
+    return 1
+  fi
+
+  # Avoid grep -q here: with pipefail enabled, an early match can SIGPIPE the
+  # upstream zmx list process and incorrectly report "not running" for valid
+  # sessions that appear before the final line.
+  while IFS= read -r session_name; do
+    if [ "$session_name" = "$target" ]; then
+      return 0
+    fi
+  done < <(list_running_names)
+
+  return 1
+}
+
+list_running_names() {
+  local json_out
+  if json_out="$(zmx list --json 2>/dev/null)"; then
+    printf '%s' "$json_out" | jq -r '
+      if type == "array" then
+        .[] | if type == "object" then .name // empty else . end
+      else
+        empty
+      end
+    '
+    return 0
+  fi
+  zmx list --short 2>/dev/null || true
+}
+
+zmx_info_json() {
+  zmx info "$1" --json
+}
+
+zmx_info_field() {
+  local json="$1"
+  local path="$2"
+  printf '%s' "$json" | jq -r "$path // empty"
+}
+
+zmx_has_pid_process() {
+  local pid="$1"
+  local pname="$2"
+  pgrep -P "$pid" -f "$pname" >/dev/null 2>&1
+}
+
+send_text_best_effort() {
+  local session_name="$1"
+  local message="$2"
+  [ -z "$message" ] && return 0
+  if ! session_exists "$session_name"; then
+    return 0
+  fi
+  printf '%s\r' "$message" | zmx send "$session_name" >/dev/null 2>&1 || true
+}
+
+run_session_setup_commands() {
+  local config="$1"
+  local work_dir="$2"
+  local session_name="$3"
+  local cmd
+
+  while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    if ! run_host_command "$config" "$work_dir" "$session_name" "$cmd" 1; then
+      warn "session_setup warning: $cmd"
+    fi
+  done < <(printf '%s' "$config" | jq -r '.session_setup // [] | .[]')
+
+  local setup_script
+  setup_script="$(printf '%s' "$config" | jq -r '.session_setup_script // ""')"
+  if [ -n "$setup_script" ]; then
+    if [ -f "$setup_script" ]; then
+      if ! run_host_script "$config" "$work_dir" "$session_name" "$setup_script" 1; then
+        warn "session_setup_script warning: $setup_script"
+      fi
+    else
+      warn "session_setup_script warning: $setup_script not found"
+    fi
+  fi
+}
+
+run_session_live_commands() {
+  local config="$1"
+  local work_dir="$2"
+  local session_name="$3"
+  local cmd
+
+  while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    if ! run_host_command "$config" "$work_dir" "$session_name" "$cmd" 1; then
+      warn "session_live warning: $cmd"
+    fi
+  done < <(printf '%s' "$config" | jq -r '.session_live // [] | .[]')
+}
+
+prepare_work_dir() {
+  local config="$1"
+  local work_dir="$2"
+  local overlay_dir src rel_dst
+
+  [ -n "$work_dir" ] && mkdir -p "$work_dir"
+
+  while IFS= read -r overlay_dir; do
+    [ -z "$overlay_dir" ] && continue
+    if [ -d "$overlay_dir" ]; then
+      copy_tree_contents "$overlay_dir" "$work_dir"
+    else
+      warn "pack_overlay_dirs warning: missing directory $overlay_dir"
+    fi
+  done < <(printf '%s' "$config" | jq -r '.pack_overlay_dirs // [] | .[]')
+
+  overlay_dir="$(printf '%s' "$config" | jq -r '.overlay_dir // ""')"
+  if [ -n "$overlay_dir" ]; then
+    if [ -d "$overlay_dir" ]; then
+      copy_tree_contents "$overlay_dir" "$work_dir"
+    else
+      warn "overlay_dir warning: missing directory $overlay_dir"
+    fi
+  fi
+
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    src="$(printf '%s' "$entry" | jq -r '.src // ""')"
+    rel_dst="$(printf '%s' "$entry" | jq -r '.rel_dst // ""')"
+    [ -z "$src" ] && continue
+    copy_entry_to_work_dir "$src" "$work_dir" "$rel_dst"
+  done < <(printf '%s' "$config" | jq -c '.copy_files // [] | .[]')
+}
+
+case "$op" in
+  start)
+    config="$(cat)"
+    command="$(printf '%s' "$config" | jq -r '.command // ""')"
+    prompt_suffix="$(printf '%s' "$config" | jq -r '.prompt_suffix // ""')"
+    prompt_flag="$(printf '%s' "$config" | jq -r '.prompt_flag // ""')"
+    work_dir="$(printf '%s' "$config" | jq -r '.work_dir // ""')"
+
+    if [ -z "$name" ]; then
+      warn "start: missing session name"
+      exit 1
+    fi
+
+    if session_exists "$name"; then
+      warn "session \"$name\" already exists"
+      exit 1
+    fi
+
+    if [ -n "$work_dir" ]; then
+      mkdir -p "$work_dir"
+      work_dir="$(cd "$work_dir" && pwd)"
+    else
+      work_dir="$(pwd)"
+    fi
+
+    prepare_work_dir "$config" "$work_dir"
+
+    while IFS= read -r cmd; do
+      [ -z "$cmd" ] && continue
+      if ! run_host_command "$config" "$work_dir" "$name" "$cmd" 0; then
+        warn "pre_start failed: $cmd"
+        exit 1
+      fi
+    done < <(printf '%s' "$config" | jq -r '.pre_start // [] | .[]')
+
+    build_session_argv "$command" "$prompt_flag" "$prompt_suffix"
+
+    (
+      export_config_env "$config"
+      cd "$work_dir"
+      # Detach stdio before creating the zmx session so long-lived agent
+      # children do not inherit the exec provider's stdout/stderr pipes.
+      # Without this, Go's exec provider can fail Start() with
+      # "WaitDelay expired before I/O complete" even though zmx created
+      # the session successfully.
+      exec </dev/null >/dev/null 2>&1
+      zmx run "$name" "${SESSION_ARGV[@]}"
+    )
+
+    store_work_dir "$name" "$work_dir"
+
+    run_session_setup_commands "$config" "$work_dir" "$name"
+    nudge_text="$(printf '%s' "$config" | jq -r '.nudge // ""')"
+    send_text_best_effort "$name" "$nudge_text"
+    run_session_live_commands "$config" "$work_dir" "$name"
+    ;;
+
+  stop)
+    if [ -z "$name" ]; then
+      warn "stop: missing session name"
+      exit 1
+    fi
+    zmx kill "$name" >/dev/null 2>&1 || true
+    cleanup_session_state "$name"
+    ;;
+
+  interrupt)
+    if [ -z "$name" ]; then
+      exit 0
+    fi
+    if ! session_exists "$name"; then
+      exit 0
+    fi
+    zmx send-keys "$name" C-c >/dev/null 2>&1 || printf '\003' | zmx send "$name" >/dev/null 2>&1 || true
+    ;;
+
+  is-running)
+    if session_exists "$name"; then
+      echo true
+    else
+      echo false
+    fi
+    ;;
+
+  attach)
+    if [ -z "$name" ]; then
+      warn "attach: missing session name"
+      exit 1
+    fi
+    exec zmx attach "$name"
+    ;;
+
+  process-alive)
+    if [ -z "$name" ]; then
+      echo true
+      exit 0
+    fi
+
+    process_names=()
+    while IFS= read -r pname || [ -n "$pname" ]; do
+      [ -n "$pname" ] && process_names+=("$pname")
+    done
+    if [ "${#process_names[@]}" -eq 0 ]; then
+      echo true
+      exit 0
+    fi
+
+    if ! info_json="$(zmx_info_json "$name" 2>/dev/null)"; then
+      echo false
+      exit 0
+    fi
+    pid="$(zmx_info_field "$info_json" '.pid')"
+    if [ -z "$pid" ]; then
+      echo false
+      exit 0
+    fi
+
+    for pname in "${process_names[@]}"; do
+      if zmx_has_pid_process "$pid" "$pname"; then
+        echo true
+        exit 0
+      fi
+    done
+    echo false
+    ;;
+
+  nudge)
+    if [ -z "$name" ]; then
+      cat > /dev/null
+      exit 0
+    fi
+    msg="$(cat)"
+    [ -z "$msg" ] && exit 0
+    send_text_best_effort "$name" "$msg"
+    ;;
+
+  set-meta)
+    key="${3:?set-meta: missing key}"
+    cat > "$(meta_file "$name" "$key")"
+    ;;
+
+  get-meta)
+    key="${3:?get-meta: missing key}"
+    file="$(meta_file "$name" "$key")"
+    [ ! -f "$file" ] || cat "$file"
+    ;;
+
+  remove-meta)
+    key="${3:?remove-meta: missing key}"
+    rm -f "$(meta_file "$name" "$key")"
+    ;;
+
+  peek)
+    lines="${3:-0}"
+    if [ -z "$name" ] || ! session_exists "$name"; then
+      exit 0
+    fi
+    if [ "$lines" -gt 0 ] 2>/dev/null; then
+      zmx history "$name" | tail -n "$lines"
+    else
+      zmx history "$name"
+    fi
+    ;;
+
+  list-running)
+    prefix="${name:-}"
+    list_running_names | while IFS= read -r session_name; do
+      [ -z "$session_name" ] && continue
+      if [ -z "$prefix" ] || [[ "$session_name" == "$prefix"* ]]; then
+        echo "$session_name"
+      fi
+    done
+    ;;
+
+  get-last-activity)
+    if [ -z "$name" ]; then
+      exit 0
+    fi
+    if ! info_json="$(zmx_info_json "$name" 2>/dev/null)"; then
+      exit 0
+    fi
+    zmx_info_field "$info_json" '.last_activity_at'
+    ;;
+
+  send-keys)
+    if [ -z "$name" ]; then
+      exit 0
+    fi
+    shift 2
+    [ "$#" -eq 0 ] && exit 0
+    if ! session_exists "$name"; then
+      exit 0
+    fi
+    exec zmx send-keys "$name" "$@"
+    ;;
+
+  clear-scrollback)
+    exit 2
+    ;;
+
+  copy-to)
+    src="${3:-}"
+    rel_dst="${4:-}"
+    work_dir="$(load_work_dir "$name")"
+    if [ -z "$src" ] || [ -z "$work_dir" ]; then
+      exit 0
+    fi
+    copy_entry_to_work_dir "$src" "$work_dir" "$rel_dst"
+    ;;
+
+  copy-from)
+    path="${3:-}"
+    work_dir="$(load_work_dir "$name")"
+    if [ -z "$path" ]; then
+      exit 1
+    fi
+    if [ -f "$path" ]; then
+      cat "$path"
+      exit 0
+    fi
+    if [ -n "$work_dir" ] && [ -f "$work_dir/$path" ]; then
+      cat "$work_dir/$path"
+      exit 0
+    fi
+    exit 1
+    ;;
+
+  *)
+    exit 2
+    ;;
+esac

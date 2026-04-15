@@ -25,6 +25,8 @@ type copyEntry struct {
 type startConfig struct {
 	WorkDir            string            `json:"work_dir,omitempty"`
 	Command            string            `json:"command,omitempty"`
+	PromptSuffix       string            `json:"prompt_suffix,omitempty"`
+	PromptFlag         string            `json:"prompt_flag,omitempty"`
 	Env                map[string]string `json:"env,omitempty"`
 	ProcessNames       []string          `json:"process_names,omitempty"`
 	Nudge              string            `json:"nudge,omitempty"`
@@ -48,6 +50,8 @@ func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
 	sc := startConfig{
 		WorkDir:            cfg.WorkDir,
 		Command:            cfg.Command,
+		PromptSuffix:       cfg.PromptSuffix,
+		PromptFlag:         cfg.PromptFlag,
 		Env:                cfg.Env,
 		ProcessNames:       cfg.ProcessNames,
 		Nudge:              cfg.Nudge,
