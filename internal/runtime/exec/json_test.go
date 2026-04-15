@@ -11,6 +11,8 @@ func TestMarshalStartConfig(t *testing.T) {
 	cfg := runtime.Config{
 		WorkDir:            "/tmp/work",
 		Command:            "claude --dangerously-skip-permissions",
+		PromptSuffix:       "'You are the mayor.'",
+		PromptFlag:         "--prompt",
 		Env:                map[string]string{"FOO": "bar", "BAZ": "qux"},
 		ProcessNames:       []string{"claude", "node"},
 		Nudge:              "hello agent",
@@ -36,6 +38,12 @@ func TestMarshalStartConfig(t *testing.T) {
 	}
 	if got.Command != cfg.Command {
 		t.Errorf("Command = %q, want %q", got.Command, cfg.Command)
+	}
+	if got.PromptSuffix != cfg.PromptSuffix {
+		t.Errorf("PromptSuffix = %q, want %q", got.PromptSuffix, cfg.PromptSuffix)
+	}
+	if got.PromptFlag != cfg.PromptFlag {
+		t.Errorf("PromptFlag = %q, want %q", got.PromptFlag, cfg.PromptFlag)
 	}
 	if got.Nudge != cfg.Nudge {
 		t.Errorf("Nudge = %q, want %q", got.Nudge, cfg.Nudge)

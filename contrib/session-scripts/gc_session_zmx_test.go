@@ -5,16 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	runtimepkg "github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 )
 
 func repoRoot(t *testing.T) string {
@@ -60,16 +63,27 @@ op="${1:-}"
 case "$op" in
   run)
     name="${2:?missing name}"
-    cmd="${3:-${SHELL:-/bin/sh}}"
+    shift 2
+    if [ "$#" -eq 0 ]; then
+      set -- "${SHELL:-/bin/sh}"
+    fi
+    cmd="$1"
     if [ -f "$STATE/$name.json" ]; then
       echo "session \"$name\" already exists" >&2
       exit 1
     fi
     printf '%s' "$PWD" > "$STATE/$name.cwd"
     env | sort > "$STATE/$name.env"
-    printf '%s' "$cmd" > "$STATE/$name.command"
+    printf '%s\n' "$@" > "$STATE/$name.argv"
+    printf '%s' "$*" > "$STATE/$name.command"
     printf 'startup line\n' > "$STATE/$name.history"
     write_session_json "$name" "${FAKE_ZMX_INFO_PID:-4242}" "$cmd"
+    if [ "${FAKE_ZMX_EXEC_RUN:-}" = "1" ]; then
+      "$@" >/dev/null 2>&1
+    fi
+    if [ "${FAKE_ZMX_BACKGROUND_HOLD_STDIO:-}" = "1" ]; then
+      sleep 5 &
+    fi
     ;;
   info)
     name="${2:?missing name}"
@@ -138,6 +152,29 @@ esac
 	}
 }
 
+type fakeZMXHarness struct {
+	tmpDir       string
+	zmxBinDir    string
+	zmxStateDir  string
+	execStateDir string
+}
+
+func newFakeZMXHarness(t *testing.T) fakeZMXHarness {
+	t.Helper()
+	tmpDir := t.TempDir()
+	zmxBinDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(zmxBinDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeZMX(t, zmxBinDir)
+	return fakeZMXHarness{
+		tmpDir:       tmpDir,
+		zmxBinDir:    zmxBinDir,
+		zmxStateDir:  filepath.Join(tmpDir, "zmx-state"),
+		execStateDir: filepath.Join(tmpDir, "exec-state"),
+	}
+}
+
 func scriptEnv(pathDir, zmxStateDir, execStateDir string) []string {
 	env := os.Environ()
 	env = append(env,
@@ -147,6 +184,34 @@ func scriptEnv(pathDir, zmxStateDir, execStateDir string) []string {
 		"SHELL=/bin/sh",
 	)
 	return env
+}
+
+func (h fakeZMXHarness) env(extra ...string) []string {
+	return append(scriptEnv(h.zmxBinDir, h.zmxStateDir, h.execStateDir), extra...)
+}
+
+func (h fakeZMXHarness) setProviderEnv(t *testing.T, extra ...string) {
+	t.Helper()
+	t.Setenv("PATH", h.zmxBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_ZMX_STATE_DIR", h.zmxStateDir)
+	t.Setenv("GC_EXEC_STATE_DIR", h.execStateDir)
+	t.Setenv("SHELL", "/bin/sh")
+	for _, kv := range extra {
+		key, value, ok := strings.Cut(kv, "=")
+		if !ok {
+			t.Fatalf("invalid env entry %q", kv)
+		}
+		t.Setenv(key, value)
+	}
+}
+
+func mustReadFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
 }
 
 func runAdapter(t *testing.T, env []string, stdin []byte, args ...string) (string, string, int) {
@@ -171,19 +236,11 @@ func runAdapter(t *testing.T, env []string, stdin []byte, args ...string) (strin
 }
 
 func TestGCSessionZMXStartStagesWorkDirAndSupportsCopyOps(t *testing.T) {
-	tmp := t.TempDir()
-	zmxBinDir := filepath.Join(tmp, "bin")
-	if err := os.MkdirAll(zmxBinDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeFakeZMX(t, zmxBinDir)
-
-	zmxStateDir := filepath.Join(tmp, "zmx-state")
-	execStateDir := filepath.Join(tmp, "exec-state")
-	workDir := filepath.Join(tmp, "workdir")
-	packOverlay := filepath.Join(tmp, "pack-overlay")
-	overlayDir := filepath.Join(tmp, "overlay")
-	copyDir := filepath.Join(tmp, "copy-dir")
+	h := newFakeZMXHarness(t)
+	workDir := filepath.Join(h.tmpDir, "workdir")
+	packOverlay := filepath.Join(h.tmpDir, "pack-overlay")
+	overlayDir := filepath.Join(h.tmpDir, "overlay")
+	copyDir := filepath.Join(h.tmpDir, "copy-dir")
 	if err := os.MkdirAll(packOverlay, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -202,11 +259,18 @@ func TestGCSessionZMXStartStagesWorkDirAndSupportsCopyOps(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(copyDir, "copied.txt"), []byte("copy-dir"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	singleFile := filepath.Join(tmp, "single.txt")
+	singleFile := filepath.Join(h.tmpDir, "single.txt")
 	if err := os.WriteFile(singleFile, []byte("single"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	setupScript := filepath.Join(tmp, "session-setup.sh")
+	sameDstFile := filepath.Join(workDir, ".opencode", "plugins", "gascity.js")
+	if err := os.MkdirAll(filepath.Dir(sameDstFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sameDstFile, []byte("same-path"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setupScript := filepath.Join(h.tmpDir, "session-setup.sh")
 	if err := os.WriteFile(setupScript, []byte("#!/bin/sh\nprintf '%s' \"$GC_SESSION\" > session-setup-script.txt\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -214,6 +278,8 @@ func TestGCSessionZMXStartStagesWorkDirAndSupportsCopyOps(t *testing.T) {
 	cfg := map[string]any{
 		"work_dir":             workDir,
 		"command":              "agent-command --flag",
+		"prompt_suffix":        "'You are the mayor.'",
+		"prompt_flag":          "--prompt",
 		"env":                  map[string]string{"GC_AGENT": "mayor", "EXTRA_ENV": "hello"},
 		"nudge":                "inspect inbox",
 		"pre_start":            []string{"printf '%s' \"$GC_AGENT\" > pre-start.txt"},
@@ -225,6 +291,7 @@ func TestGCSessionZMXStartStagesWorkDirAndSupportsCopyOps(t *testing.T) {
 		"copy_files": []map[string]string{
 			{"src": copyDir},
 			{"src": singleFile, "rel_dst": "nested/single.txt"},
+			{"src": sameDstFile, "rel_dst": ".opencode/plugins/gascity.js"},
 		},
 	}
 	data, err := json.Marshal(cfg)
@@ -232,7 +299,7 @@ func TestGCSessionZMXStartStagesWorkDirAndSupportsCopyOps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	env := scriptEnv(zmxBinDir, zmxStateDir, execStateDir)
+	env := h.env()
 	stdout, stderr, code := runAdapter(t, env, data, "start", "gc-city-mayor")
 	if code != 0 {
 		t.Fatalf("start exit=%d stdout=%q stderr=%q", code, stdout, stderr)
@@ -241,58 +308,44 @@ func TestGCSessionZMXStartStagesWorkDirAndSupportsCopyOps(t *testing.T) {
 		t.Fatalf("start stderr = %q, want empty", stderr)
 	}
 
-	got, err := os.ReadFile(filepath.Join(zmxStateDir, "gc-city-mayor.cwd"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != workDir {
-		t.Fatalf("zmx run cwd = %q, want %q", string(got), workDir)
+	got := mustReadFile(t, filepath.Join(h.zmxStateDir, "gc-city-mayor.cwd"))
+	if got != workDir {
+		t.Fatalf("zmx run cwd = %q, want %q", got, workDir)
 	}
 
-	got, err = os.ReadFile(filepath.Join(zmxStateDir, "gc-city-mayor.command"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "agent-command --flag" {
-		t.Fatalf("zmx run command = %q", string(got))
+	got = mustReadFile(t, filepath.Join(h.zmxStateDir, "gc-city-mayor.argv"))
+	if got != "sh\n-c\nagent-command --flag --prompt 'You are the mayor.'\n" {
+		t.Fatalf("zmx run argv = %q", got)
 	}
 
-	got, err = os.ReadFile(filepath.Join(zmxStateDir, "gc-city-mayor.env"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(got), "GC_AGENT=mayor") {
-		t.Fatalf("zmx run env missing GC_AGENT: %s", string(got))
+	got = mustReadFile(t, filepath.Join(h.zmxStateDir, "gc-city-mayor.env"))
+	if !strings.Contains(got, "GC_AGENT=mayor") {
+		t.Fatalf("zmx run env missing GC_AGENT: %s", got)
 	}
 
 	for path, want := range map[string]string{
-		filepath.Join(workDir, "shared.txt"):                  "overlay",
-		filepath.Join(workDir, "copied.txt"):                  "copy-dir",
-		filepath.Join(workDir, "nested", "single.txt"):        "single",
-		filepath.Join(workDir, "pre-start.txt"):               "mayor",
-		filepath.Join(workDir, "session-setup.txt"):           "gc-city-mayor",
-		filepath.Join(workDir, "session-setup-script.txt"):    "gc-city-mayor",
-		filepath.Join(workDir, "session-live.txt"):            "live:gc-city-mayor",
-		filepath.Join(execStateDir, "gc-city-mayor.work_dir"): workDir,
+		filepath.Join(workDir, "shared.txt"):                         "overlay",
+		filepath.Join(workDir, "copied.txt"):                         "copy-dir",
+		filepath.Join(workDir, "nested", "single.txt"):               "single",
+		filepath.Join(workDir, ".opencode", "plugins", "gascity.js"): "same-path",
+		filepath.Join(workDir, "pre-start.txt"):                      "mayor",
+		filepath.Join(workDir, "session-setup.txt"):                  "gc-city-mayor",
+		filepath.Join(workDir, "session-setup-script.txt"):           "gc-city-mayor",
+		filepath.Join(workDir, "session-live.txt"):                   "live:gc-city-mayor",
+		filepath.Join(h.execStateDir, "gc-city-mayor.work_dir"):      workDir,
 	} {
-		got, err = os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		if string(got) != want {
-			t.Fatalf("%s = %q, want %q", path, string(got), want)
+		got = mustReadFile(t, path)
+		if got != want {
+			t.Fatalf("%s = %q, want %q", path, got, want)
 		}
 	}
 
-	got, err = os.ReadFile(filepath.Join(zmxStateDir, "gc-city-mayor.send"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "inspect inbox\r" {
-		t.Fatalf("nudge payload = %q", string(got))
+	got = mustReadFile(t, filepath.Join(h.zmxStateDir, "gc-city-mayor.send"))
+	if got != "inspect inbox\r" {
+		t.Fatalf("nudge payload = %q", got)
 	}
 
-	extraSrc := filepath.Join(tmp, "extra.txt")
+	extraSrc := filepath.Join(h.tmpDir, "extra.txt")
 	if err := os.WriteFile(extraSrc, []byte("extra"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -300,12 +353,9 @@ func TestGCSessionZMXStartStagesWorkDirAndSupportsCopyOps(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("copy-to exit=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
-	got, err = os.ReadFile(filepath.Join(workDir, "copied-later", "extra.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "extra" {
-		t.Fatalf("copied-later/extra.txt = %q", string(got))
+	got = mustReadFile(t, filepath.Join(workDir, "copied-later", "extra.txt"))
+	if got != "extra" {
+		t.Fatalf("copied-later/extra.txt = %q", got)
 	}
 
 	stdout, stderr, code = runAdapter(t, env, nil, "copy-from", "gc-city-mayor", "copied-later/extra.txt")
@@ -318,16 +368,8 @@ func TestGCSessionZMXStartStagesWorkDirAndSupportsCopyOps(t *testing.T) {
 }
 
 func TestGCSessionZMXProcessAliveUsesInfoPID(t *testing.T) {
-	tmp := t.TempDir()
-	zmxBinDir := filepath.Join(tmp, "bin")
-	if err := os.MkdirAll(zmxBinDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeFakeZMX(t, zmxBinDir)
-
-	zmxStateDir := filepath.Join(tmp, "zmx-state")
-	execStateDir := filepath.Join(tmp, "exec-state")
-	env := scriptEnv(zmxBinDir, zmxStateDir, execStateDir)
+	h := newFakeZMXHarness(t)
+	env := h.env()
 
 	proc := exec.Command("sh", "-c", "sleep 30 & wait")
 	if err := proc.Start(); err != nil {
@@ -339,7 +381,7 @@ func TestGCSessionZMXProcessAliveUsesInfoPID(t *testing.T) {
 	}()
 
 	env = append(env, "FAKE_ZMX_INFO_PID="+strconv.Itoa(proc.Process.Pid))
-	cfg := map[string]any{"work_dir": filepath.Join(tmp, "workdir"), "command": "dummy"}
+	cfg := map[string]any{"work_dir": filepath.Join(h.tmpDir, "workdir"), "command": "dummy"}
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -357,32 +399,63 @@ func TestGCSessionZMXProcessAliveUsesInfoPID(t *testing.T) {
 	}
 }
 
-func TestGCSessionZMXExecProviderIntegration(t *testing.T) {
-	tmp := t.TempDir()
-	zmxBinDir := filepath.Join(tmp, "bin")
-	if err := os.MkdirAll(zmxBinDir, 0o755); err != nil {
+func TestGCSessionZMXStartPreservesShellCommandSemantics(t *testing.T) {
+	h := newFakeZMXHarness(t)
+	workDir := filepath.Join(h.tmpDir, "workdir")
+	env := h.env("FAKE_ZMX_EXEC_RUN=1")
+
+	cfg := map[string]any{
+		"work_dir": workDir,
+		"command":  "printf shell > shell.txt && printf second > second.txt",
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
 		t.Fatal(err)
 	}
-	writeFakeZMX(t, zmxBinDir)
 
-	zmxStateDir := filepath.Join(tmp, "zmx-state")
-	execStateDir := filepath.Join(tmp, "exec-state")
-	t.Setenv("PATH", zmxBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("FAKE_ZMX_STATE_DIR", zmxStateDir)
-	t.Setenv("GC_EXEC_STATE_DIR", execStateDir)
-	t.Setenv("SHELL", "/bin/sh")
+	if _, stderr, code := runAdapter(t, env, data, "start", "gc-city-shell"); code != 0 {
+		t.Fatalf("start exit=%d stderr=%q", code, stderr)
+	}
+
+	got := mustReadFile(t, filepath.Join(h.zmxStateDir, "gc-city-shell.argv"))
+	if got != "sh\n-c\nprintf shell > shell.txt && printf second > second.txt\n" {
+		t.Fatalf("zmx run argv = %q", got)
+	}
+
+	for path, want := range map[string]string{
+		filepath.Join(workDir, "shell.txt"):  "shell",
+		filepath.Join(workDir, "second.txt"): "second",
+	} {
+		got = mustReadFile(t, path)
+		if got != want {
+			t.Fatalf("%s = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestGCSessionZMXExecProviderIntegration(t *testing.T) {
+	h := newFakeZMXHarness(t)
+	h.setProviderEnv(t)
 
 	p := sessionexec.NewProvider(zmxScriptPath(t))
-	workDir := filepath.Join(tmp, "workdir")
+	workDir := filepath.Join(h.tmpDir, "workdir")
 	name := "gc-city-mayor"
+	t.Cleanup(func() { _ = p.Stop(name) })
 
 	if err := p.Start(context.Background(), name, runtimepkg.Config{
-		WorkDir: workDir,
-		Command: "agent-command",
-		Env:     map[string]string{"GC_AGENT": "mayor"},
-		Nudge:   "boot prompt",
+		WorkDir:      workDir,
+		Command:      "agent-command",
+		PromptSuffix: "'You are the mayor.'",
+		PromptFlag:   "--prompt",
+		Env:          map[string]string{"GC_AGENT": "mayor"},
+		Nudge:        "boot prompt",
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
+	}
+
+	got := mustReadFile(t, filepath.Join(h.zmxStateDir, name+".argv"))
+	if got != "sh\n-c\nagent-command --prompt 'You are the mayor.'\n" {
+		t.Fatalf("zmx argv = %q", got)
 	}
 
 	if !p.IsRunning(name) {
@@ -420,6 +493,14 @@ func TestGCSessionZMXExecProviderIntegration(t *testing.T) {
 		t.Fatal("GetLastActivity returned zero time")
 	}
 
+	if err := p.Attach(name); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	got = mustReadFile(t, filepath.Join(h.zmxStateDir, name+".attach"))
+	if strings.TrimSpace(got) != "attach:"+name {
+		t.Fatalf("attach marker = %q", got)
+	}
+
 	if err := p.SetMeta(name, "GC_SESSION_ID", "sess-123"); err != nil {
 		t.Fatalf("SetMeta: %v", err)
 	}
@@ -445,20 +526,14 @@ func TestGCSessionZMXExecProviderIntegration(t *testing.T) {
 		t.Fatalf("ClearScrollback should treat exit 2 as success: %v", err)
 	}
 
-	got, err := os.ReadFile(filepath.Join(zmxStateDir, name+".send"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "follow up\r" {
-		t.Fatalf("nudge payload = %q", string(got))
+	got = mustReadFile(t, filepath.Join(h.zmxStateDir, name+".send"))
+	if got != "follow up\r" {
+		t.Fatalf("nudge payload = %q", got)
 	}
 
-	got, err = os.ReadFile(filepath.Join(zmxStateDir, name+".keys"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(got)) != "Down Enter" {
-		t.Fatalf("keys payload = %q", string(got))
+	got = mustReadFile(t, filepath.Join(h.zmxStateDir, name+".keys"))
+	if strings.TrimSpace(got) != "Down Enter" {
+		t.Fatalf("keys payload = %q", got)
 	}
 
 	if err := p.Stop(name); err != nil {
@@ -466,5 +541,38 @@ func TestGCSessionZMXExecProviderIntegration(t *testing.T) {
 	}
 	if p.IsRunning(name) {
 		t.Fatal("IsRunning returned true after Stop")
+	}
+}
+
+func TestGCSessionZMXExecProviderConformance(t *testing.T) {
+	h := newFakeZMXHarness(t)
+	h.setProviderEnv(t)
+
+	p := sessionexec.NewProvider(zmxScriptPath(t))
+	var counter int64
+
+	runtimetest.RunProviderTests(t, func(t *testing.T) (runtimepkg.Provider, runtimepkg.Config, string) {
+		id := atomic.AddInt64(&counter, 1)
+		name := fmt.Sprintf("gc-zmx-conformance-%d", id)
+		cfg := runtimepkg.Config{
+			WorkDir: filepath.Join(t.TempDir(), "workdir"),
+			Command: "agent-command",
+			Env:     map[string]string{"GC_AGENT": "worker"},
+			Nudge:   "boot prompt",
+		}
+		return p, cfg, name
+	})
+}
+
+func TestGCSessionZMXExecProviderStartDetachesZMXRunStdio(t *testing.T) {
+	h := newFakeZMXHarness(t)
+	h.setProviderEnv(t, "FAKE_ZMX_BACKGROUND_HOLD_STDIO=1")
+
+	p := sessionexec.NewProvider(zmxScriptPath(t))
+	if err := p.Start(context.Background(), "gc-city-detach", runtimepkg.Config{
+		WorkDir: filepath.Join(h.tmpDir, "workdir"),
+		Command: "agent-command",
+	}); err != nil {
+		t.Fatalf("Start with background stdio holder: %v", err)
 	}
 }
