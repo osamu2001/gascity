@@ -66,6 +66,11 @@ type TemplateParams struct {
 	WakeMode string
 	// IsACP is true if session = "acp".
 	IsACP bool
+	// HookEnabled reports whether provider hooks are installed for this agent.
+	// Hook-enabled providers receive startup context via their hook path
+	// (for example gc prime --hook), so PromptMode=none should not also
+	// fall back to a delayed startup nudge.
+	HookEnabled bool
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
@@ -188,7 +193,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_SESSION_NAME": sessName,
 		"GC_SESSION_ID":   sessionBeadID,
 		"GC_TEMPLATE":     templateNameFor(cfgAgent, qualifiedName),
-		"GC_AGENT":        sessionBeadID,
+		"GC_AGENT":        qualifiedName,
 		"GC_ALIAS":        qualifiedName,
 		"BEADS_ACTOR":     sessName,
 		"GC_DIR":          workDir,
@@ -207,6 +212,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	for key, value := range citylayout.CityRuntimeEnvMap(p.cityPath) {
 		agentEnv[key] = value
 	}
+	// Agent-session data ops must bypass the lifecycle wrapper. See
+	// beadsProvider() docs and #647.
+	agentEnv["GC_BEADS"] = rawBeadsProvider(p.cityPath)
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
@@ -303,6 +311,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigRoot:          rigRoot,
 		WakeMode:         cfgAgent.WakeMode,
 		IsACP:            cfgAgent.Session == "acp",
+		HookEnabled:      hasHooks,
 	}, nil
 }
 
@@ -390,10 +399,14 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	nudge := tp.Hints.Nudge
 	if tp.Prompt != "" {
 		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
-			if nudge != "" {
-				nudge = tp.Prompt + "\n\n---\n\n" + nudge
-			} else {
-				nudge = tp.Prompt
+			// Hook-enabled providers prime themselves on startup, so the
+			// rendered role prompt must not also be replayed as a user nudge.
+			if !tp.HookEnabled || !tp.ResolvedProvider.SupportsHooks {
+				if nudge != "" {
+					nudge = tp.Prompt + "\n\n---\n\n" + nudge
+				} else {
+					nudge = tp.Prompt
+				}
 			}
 		} else {
 			promptSuffix = shellquote.Quote(tp.Prompt)

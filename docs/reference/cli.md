@@ -39,7 +39,7 @@ gc [flags]
 | [gc init](#gc-init) | Initialize a new city |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
-| [gc order](#gc-order) | Manage orders (periodic formula dispatch) |
+| [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
@@ -624,13 +624,14 @@ Web dashboard for monitoring the city
 gc dashboard [flags]
 ```
 
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--api` | string |  | GC API server URL override (auto-discovered by default) |
+| `--port` | int | `8080` | HTTP port |
+
 | Subcommand | Description |
 |------------|-------------|
 | [gc dashboard serve](#gc-dashboard-serve) | Start the web dashboard |
-
-Starts the dashboard directly and auto-discovers the GC API server when run
-inside a city. Use `gc dashboard serve` if you want the explicit subcommand
-form.
 
 ## gc dashboard serve
 
@@ -851,7 +852,7 @@ Returns immediately. Equivalent to:
   gc session kill &lt;target&gt;
 
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
-GC_SESSION_NAME and GC_CITY). Remote handoff accepts a session alias or ID.
+GC_SESSION_NAME and city context env). Remote handoff accepts a session alias or ID.
 
 ```
 gc handoff <subject> [message] [flags]
@@ -1139,11 +1140,12 @@ gc nudge status [session]
 
 ## gc order
 
-Manage orders — formulas with gate conditions for periodic dispatch.
+Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders are formulas annotated with scheduling gates (interval, cron
-schedule, or shell check commands). The controller evaluates gates
-periodically and dispatches order formulas when they are due.
+Orders live in orders/NAME/order.toml files. Each order pairs a gate
+condition (cooldown, cron, condition, event, or manual) with an action
+(a formula or an exec script). The controller evaluates gates on each
+tick and dispatches work when a gate opens.
 
 ```
 gc order
@@ -1187,8 +1189,8 @@ gc order history [name] [flags]
 
 List all available orders with their gate type, schedule, and target.
 
-Scans formula layers for formulas that have order metadata
-(gate, interval, schedule, check, pool).
+Scans orders/ directories for order.toml files defining gate conditions,
+scheduling parameters, and target pools.
 
 ```
 gc order list
@@ -1449,7 +1451,7 @@ The reconciler will restart the agents on its next tick. This is a
 quick way to force-refresh all agents working on a particular project.
 
 ```
-gc rig restart <name>
+gc rig restart [name]
 ```
 
 ## gc rig resume
@@ -1459,7 +1461,7 @@ Resume a suspended rig by clearing suspended in city.toml.
 The reconciler will start the rig's agents on its next tick.
 
 ```
-gc rig resume <name>
+gc rig resume [name]
 ```
 
 ## gc rig status
@@ -1467,7 +1469,7 @@ gc rig resume <name>
 Show rig status and agent running state
 
 ```
-gc rig status <name>
+gc rig status [name]
 ```
 
 ## gc rig suspend
@@ -1479,7 +1481,7 @@ the reconciler skips them and gc hook returns empty. The rig's beads
 database remains accessible. Use "gc rig resume" to restore.
 
 ```
-gc rig suspend <name>
+gc rig suspend [name]
 ```
 
 ## gc runtime
@@ -1631,6 +1633,8 @@ gc session
 | [gc session peek](#gc-session-peek) | View session output without attaching |
 | [gc session prune](#gc-session-prune) | Close old suspended sessions |
 | [gc session rename](#gc-session-rename) | Rename a session |
+| [gc session reset](#gc-session-reset) | Restart a session fresh while preserving the bead |
+| [gc session submit](#gc-session-submit) | Submit a message with semantic delivery intent |
 | [gc session suspend](#gc-session-suspend) | Suspend a session (save state, free resources) |
 | [gc session wait](#gc-session-wait) | Register a dependency wait for a session |
 | [gc session wake](#gc-session-wake) | Wake a session (clear hold and quarantine) |
@@ -1720,6 +1724,10 @@ gc session logs mayor
 Create a new persistent conversation from an agent template defined in
 city.toml. By default, attaches the terminal after creation.
 
+When --title-hint is provided without --title, the session title is
+auto-generated from the hint text: a short version is set immediately
+and refined by the title model in the background.
+
 ```
 gc session new <template> [flags]
 ```
@@ -1730,6 +1738,7 @@ gc session new <template> [flags]
 gc session new helper
   gc session new helper --alias sky
   gc session new helper --title "debugging auth"
+  gc session new helper --title-hint "fix the login redirect loop"
   gc session new helper --no-attach
 ```
 
@@ -1738,6 +1747,7 @@ gc session new helper
 | `--alias` | string |  | human-friendly session identifier for commands and mail |
 | `--no-attach` | bool |  | create session without attaching |
 | `--title` | string |  | human-readable session title |
+| `--title-hint` | string |  | text to auto-generate a session title from |
 
 ## gc session nudge
 
@@ -1796,6 +1806,43 @@ Rename a session
 ```
 gc session rename <session-id-or-alias> <title>
 ```
+
+## gc session reset
+
+Request a fresh restart for an existing session without closing its bead.
+
+The controller stops the current runtime and starts the same session again with
+fresh provider conversation state. Session identity, alias, mail, and queued
+work remain attached to the existing session bead.
+
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
+
+```
+gc session reset <session-id-or-alias>
+```
+
+## gc session submit
+
+Submit a user message to a session without choosing provider transport details.
+
+The runtime decides whether to wake, inject immediately, or queue the message
+according to the selected semantic intent.
+
+```
+gc session submit <id-or-alias> <message...> [flags]
+```
+
+**Example:**
+
+```
+gc session submit mayor "status update"
+  gc session submit mayor "after this run, handle docs" --intent follow_up
+  gc session submit mayor "stop and do this instead" --intent interrupt_now
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--intent` | string | `default` | submit intent: default, follow_up, or interrupt_now |
 
 ## gc session suspend
 
@@ -2264,3 +2311,4 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
+

@@ -83,7 +83,7 @@ func TestCurrentDoltPortPrefersRuntimeState(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	ln := listenOnRandomPort(t)
@@ -126,7 +126,7 @@ func TestSyncConfiguredDoltPortFilesWritesArbitraryRigPaths(t *testing.T) {
 	t.Cleanup(func() { _ = ln.Close() })
 
 	for _, dir := range []string{cityDir, rigDir} {
-		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt.port: 1234\ndolt.auto-start: true\n"), 0o644); err != nil {
@@ -173,7 +173,7 @@ func TestCurrentDoltPortIgnoresDeadRuntimeStateAndPrunesDeadPortFile(t *testing.
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -206,7 +206,7 @@ func TestCurrentDoltPortIgnoresReachablePortFileWhenManagedStateIsStopped(t *tes
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -414,9 +414,10 @@ func TestRunProviderOpSanitizesInheritedRuntimeEnv(t *testing.T) {
 	}
 }
 
-// TestStartBeadsLifecycle_InstallsAgentHooks verifies that startBeadsLifecycle
-// installs agent hooks for both the city and all rigs.
-func TestStartBeadsLifecycle_InstallsAgentHooks(t *testing.T) {
+// TestStartBeadsLifecycle_DoesNotInstallWorkspaceAgentHooks verifies that
+// startBeadsLifecycle only handles bead-store setup; agent hook installation
+// belongs to desired-state resolution where per-agent overrides are known.
+func TestStartBeadsLifecycle_DoesNotInstallWorkspaceAgentHooks(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 
@@ -444,16 +445,15 @@ func TestStartBeadsLifecycle_InstallsAgentHooks(t *testing.T) {
 		t.Fatalf("startBeadsLifecycle: %v", err)
 	}
 
-	// Verify gemini hooks installed in city dir.
-	cityHook := filepath.Join(cityPath, ".gemini", "settings.json")
-	if _, err := os.Stat(cityHook); err != nil {
-		t.Errorf("city gemini hook not created: %v", err)
-	}
-
-	// Verify gemini hooks installed in rig dir.
-	rigHook := filepath.Join(rigPath, ".gemini", "settings.json")
-	if _, err := os.Stat(rigHook); err != nil {
-		t.Errorf("rig gemini hook not created: %v", err)
+	// Workspace agent hooks are installed later, when each agent's resolved
+	// desired state is built. They should not be sprayed into roots here.
+	for _, hookPath := range []string{
+		filepath.Join(cityPath, ".gemini", "settings.json"),
+		filepath.Join(rigPath, ".gemini", "settings.json"),
+	} {
+		if _, err := os.Stat(hookPath); !os.IsNotExist(err) {
+			t.Fatalf("unexpected agent hook at %s: %v", hookPath, err)
+		}
 	}
 }
 
@@ -512,7 +512,14 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 
 	runScript("start")
 
+	// `start` spawns the dolt server in the background; the state and port
+	// files it writes may not exist the instant the script exits. Poll with
+	// a bounded timeout instead of reading once. Fixes flake (#542).
 	stateFile := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
+	portFile := filepath.Join(cityPath, ".beads", "dolt-server.port")
+	waitForFile(t, stateFile, 3*time.Second)
+	waitForFile(t, portFile, 3*time.Second)
+
 	state, err := os.ReadFile(stateFile)
 	if err != nil {
 		t.Fatalf("read state file: %v", err)
@@ -520,9 +527,30 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 	if !strings.Contains(string(state), filepath.Join(cityPath, ".beads", "dolt")) {
 		t.Fatalf("state file should point at .beads/dolt, got:\n%s", state)
 	}
+}
 
-	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "dolt-server.port")); err != nil {
-		t.Fatalf("dolt-server.port missing: %v", err)
+// waitForFile polls until path exists or timeout elapses. Used to avoid
+// racing background-spawned processes like dolt server during startup.
+// Real stat errors (permission denied, malformed path) fail immediately;
+// only not-found is retried. The last not-found error is surfaced in the
+// timeout message for easier debugging.
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		_, err := os.Stat(path)
+		if err == nil {
+			return
+		}
+		if !os.IsNotExist(err) {
+			t.Fatalf("waitForFile: stat %s: %v", path, err)
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			t.Fatalf("waitForFile: %s did not appear within %v (last error: %v)", path, timeout, lastErr)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -531,7 +559,7 @@ func TestGcBeadsBdInitRetriesRootStoreVerification(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"mc"}`), 0o644); err != nil {
@@ -708,7 +736,7 @@ func TestGcBeadsBdInitRepairsWrongDoltDatabaseFromExplicitCanonicalIdentity(t *t
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"wrong-db"}`), 0o644); err != nil {
@@ -785,7 +813,7 @@ func TestGcBeadsBdInitPreservesMetadataIdentityWhenCanonicalUnknownAndDatabaseMu
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gascity"}`), 0o644); err != nil {

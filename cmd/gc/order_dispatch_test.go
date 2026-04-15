@@ -76,35 +76,38 @@ func TestOrderDispatchCooldownDue(t *testing.T) {
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
 
-	// Wait briefly for goroutine to complete.
-	time.Sleep(50 * time.Millisecond)
-
-	// Verify tracking bead was created.
-	all := trackingBeads(t, store, "order-run:test-order")
-	if len(all) == 0 {
-		t.Fatal("expected tracking bead to be created")
-	}
-	found := false
-	for _, b := range all {
-		for _, l := range b.Labels {
-			if l == "order-run:test-order" {
-				found = true
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		// Verify tracking bead was created.
+		all := trackingBeads(t, store, "order-run:test-order")
+		foundTracking := false
+		for _, b := range all {
+			for _, l := range b.Labels {
+				if l == "order-run:test-order" {
+					foundTracking = true
+					break
+				}
+			}
+			if foundTracking {
+				break
 			}
 		}
-	}
-	if !found {
-		t.Error("tracking bead missing order-run:test-order label")
-	}
 
-	// Verify wisp was stamped with routed_to metadata.
-	foundRoute := false
-	for _, a := range labelArgs {
-		if a == "gc.routed_to=worker" {
-			foundRoute = true
+		// Verify wisp was stamped with routed_to metadata.
+		foundRoute := false
+		for _, a := range labelArgs {
+			if a == "gc.routed_to=worker" {
+				foundRoute = true
+				break
+			}
 		}
-	}
-	if !foundRoute {
-		t.Errorf("missing routed_to metadata, got %v", labelArgs)
+		if foundTracking && foundRoute {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for dispatch labels; tracking=%v labelArgs=%v", foundTracking, labelArgs)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -790,6 +793,150 @@ func TestOrderRigSuspended(t *testing.T) {
 				t.Errorf("orderRigSuspended() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// --- orphaned tracking bead sweep tests (#520) ---
+
+func TestSweepOrphanedOrderTracking_ClosesOpenTrackingBeads(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Create some open tracking beads (simulating goroutines killed on restart).
+	for _, name := range []string{"dolt-health", "gate-sweep", "beads-health"} {
+		_, err := store.Create(beads.Bead{
+			Title:  "order:" + name,
+			Labels: []string{"order-run:" + name, labelOrderTracking},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+	}
+
+	// Create one that's already closed (should be left alone).
+	b, err := store.Create(beads.Bead{
+		Title:  "order:old-sweep",
+		Labels: []string{"order-run:old-sweep", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(old-sweep): %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close(old-sweep): %v", err)
+	}
+
+	// Create a non-tracking bead that happens to be open (should not be touched).
+	_, err = store.Create(beads.Bead{
+		Title:  "real work",
+		Labels: []string{"order-run:dolt-health"},
+	})
+	if err != nil {
+		t.Fatalf("Create(real work): %v", err)
+	}
+
+	closed, err := sweepOrphanedOrderTracking(store)
+	if err != nil {
+		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
+	}
+	if closed != 3 {
+		t.Fatalf("closed = %d, want 3", closed)
+	}
+
+	// Verify the 3 open tracking beads are now closed.
+	all := trackingBeads(t, store, labelOrderTracking)
+	for _, b := range all {
+		if b.Status != "closed" {
+			t.Errorf("tracking bead %s (%s) still open", b.ID, b.Title)
+		}
+	}
+
+	// Verify the non-tracking work bead is still open.
+	work, err := store.ListByLabel("order-run:dolt-health", 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	for _, b := range work {
+		if b.Title == "real work" && b.Status != "open" {
+			t.Errorf("non-tracking bead %s should still be open, got %s", b.ID, b.Status)
+		}
+	}
+}
+
+func TestSweepOrphanedOrderTracking_NoOrphans(t *testing.T) {
+	store := beads.NewMemStore()
+
+	closed, err := sweepOrphanedOrderTracking(store)
+	if err != nil {
+		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
+	}
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+}
+
+func TestSweepOrphanedOrderTracking_OnlyClosedBeads(t *testing.T) {
+	store := beads.NewMemStore()
+
+	b, err := store.Create(beads.Bead{
+		Title:  "order:dolt-health",
+		Labels: []string{"order-run:dolt-health", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	closed, err := sweepOrphanedOrderTracking(store)
+	if err != nil {
+		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
+	}
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+}
+
+func TestStartupSweepThenBuildDispatcher(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Pre-create an orphaned tracking bead (simulating a crashed controller).
+	_, err := store.Create(beads.Bead{
+		Title:  "order:test-order",
+		Labels: []string{"order-run:test-order", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Production startup sequence: sweep first, then build dispatcher.
+	// This mirrors newCityRuntime which calls sweepOrphanedOrderTracking
+	// before buildOrderDispatcher. The sweep is intentionally NOT inside
+	// buildOrderDispatcher so config reloads don't close in-flight beads.
+	closed, err := sweepOrphanedOrderTracking(store)
+	if err != nil {
+		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+
+	aa := []orders.Order{{
+		Name:     "test-order",
+		Gate:     "cooldown",
+		Interval: "1m",
+		Formula:  "test-formula",
+	}}
+	ad := buildOrderDispatcherFromList(aa, store, nil, noopRunner)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	// The orphaned bead should have been closed before dispatcher construction.
+	all := trackingBeads(t, store, labelOrderTracking)
+	for _, b := range all {
+		if b.Status != "closed" {
+			t.Errorf("orphaned tracking bead %s still open after startup sweep", b.ID)
+		}
 	}
 }
 

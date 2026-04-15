@@ -177,10 +177,23 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 		return nil
 	}
 	it := newIdleTracker()
+	var registeredAny bool
 	for _, a := range cfg.Agents {
 		timeout := a.IdleTimeoutDuration()
 		if timeout <= 0 {
 			continue
+		}
+		named := config.FindNamedSession(cfg, a.QualifiedName())
+		if named != nil {
+			// Configured named sessions own the canonical runtime session for
+			// singletons. mode="always" must never be subject to idle timeout.
+			if named.ModeOrDefault() != "always" {
+				it.setTimeout(config.NamedSessionRuntimeName(cityName, cfg.Workspace, a.QualifiedName()), timeout)
+				registeredAny = true
+			}
+			if !isMultiSessionCfgAgent(&a) {
+				continue
+			}
 		}
 		sp0 := scaleParamsFor(&a)
 		if isMultiSessionCfgAgent(&a) {
@@ -188,11 +201,16 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 				sn := startupSessionName(cityName, qualifiedInstance, st)
 				it.setTimeout(sn, timeout)
+				registeredAny = true
 			}
 			continue
 		}
 		sn := startupSessionName(cityName, a.QualifiedName(), st)
 		it.setTimeout(sn, timeout)
+		registeredAny = true
+	}
+	if !registeredAny {
+		return nil
 	}
 	return it
 }
@@ -568,7 +586,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Enforce restrictive permissions on .gc/ and its subdirectories.
 	enforceGCPermissions(cityPath, stderr)
 
-	runPoolOnBoot(cfg, cityPath, shellScaleCheck, stderr)
+	runPoolOnBoot(cfg, cityPath, shellRunHook, stderr)
 
 	var oneShotStore beads.Store
 	if store, err := openCityStoreAt(cityPath); err == nil {
@@ -716,6 +734,9 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 
 	// workDir-based hooks: gemini, codex, opencode, copilot, pi, omp.
 	// Use path.Join for RelDst (container-target, always forward slashes).
+	// These paths live inside the agent worktree and are populated by
+	// pre_start staging (e.g. worktree-setup.sh --sync), so hashing their
+	// contents would drift across reconciler cycles. See issue #682.
 	for _, rel := range []string{
 		path.Join(".gemini", "settings.json"),
 		path.Join(".codex", "hooks.json"),
@@ -729,7 +750,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 		if _, err := os.Stat(abs); err == nil {
 			copyFiles = append(copyFiles, runtime.CopyEntry{
 				Src: abs, RelDst: path.Join(relWorkDir, rel),
-				Probed: true, ContentHash: runtime.HashPathContent(abs),
+				Probed: true, SkipFingerprint: true,
 			})
 		}
 	}
@@ -738,7 +759,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 	if info, err := os.Stat(skillsDir); err == nil && info.IsDir() {
 		copyFiles = append(copyFiles, runtime.CopyEntry{
 			Src: skillsDir, RelDst: path.Join(relWorkDir, ".claude", "skills"),
-			Probed: true, ContentHash: runtime.HashPathContent(skillsDir),
+			Probed: true, SkipFingerprint: true,
 		})
 	}
 	// cityDir-based hooks: claude (.gc/settings.json).

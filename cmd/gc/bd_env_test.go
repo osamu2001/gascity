@@ -414,7 +414,7 @@ func TestBdStoreForRig_DoesNotExist(t *testing.T) {
 func TestBdRuntimeEnvForRigUsesManagedRigPort(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "repo")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -447,7 +447,7 @@ func TestBdRuntimeEnvForRigFallsBackToManagedCityPort(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -468,7 +468,7 @@ func TestBdRuntimeEnvForRigFallsBackToManagedCityPort(t *testing.T) {
 	}
 
 	rigDir := filepath.Join(t.TempDir(), "repo")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -490,7 +490,7 @@ func TestBdRuntimeEnvForRigPrefersExplicitRigDoltConfigOverManagedCity(t *testin
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -511,7 +511,7 @@ func TestBdRuntimeEnvForRigPrefersExplicitRigDoltConfigOverManagedCity(t *testin
 	}
 
 	rigDir := filepath.Join(t.TempDir(), "repo")
-	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -545,6 +545,26 @@ func TestBdRuntimeEnvForRigPrefersExplicitRigDoltConfigOverManagedCity(t *testin
 	}
 	if got := env["GC_RIG_ROOT"]; got != rigDir {
 		t.Fatalf("GC_RIG_ROOT = %q, want %q", got, rigDir)
+	}
+}
+
+func TestBdRuntimeEnvAlwaysIncludesBeadsDoltServerPort(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	// No host/port configured — BEADS_DOLT_SERVER_PORT should still be
+	// present (empty) as defense-in-depth against inherited env leakage.
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+
+	cityPath := t.TempDir()
+	env := bdRuntimeEnv(cityPath)
+
+	val, ok := env["BEADS_DOLT_SERVER_PORT"]
+	if !ok {
+		t.Fatal("BEADS_DOLT_SERVER_PORT must always be present in bdRuntimeEnv output")
+	}
+	if val != "" {
+		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want empty (no port configured)", val)
 	}
 }
 

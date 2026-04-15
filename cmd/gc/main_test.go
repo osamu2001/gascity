@@ -569,7 +569,7 @@ func TestDoRigAddCreatesDirIfMissing(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, &stdout, &stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -589,7 +589,7 @@ func TestDoRigAddMkdirRigPathFails(t *testing.T) {
 	f.Errors["/projects/myapp"] = fmt.Errorf("permission denied")
 
 	var stderr bytes.Buffer
-	code := doRigAdd(f, "/city", "/projects/myapp", "", "", "", false, &bytes.Buffer{}, &stderr)
+	code := doRigAdd(f, "/city", "/projects/myapp", "", "", "", false, false, &bytes.Buffer{}, &stderr)
 	if code != 1 {
 		t.Errorf("doRigAdd = %d, want 1", code)
 	}
@@ -603,7 +603,7 @@ func TestDoRigAddNotADirectory(t *testing.T) {
 	f.Files["/projects/myapp"] = []byte("not a dir") // file, not directory
 
 	var stderr bytes.Buffer
-	code := doRigAdd(f, "/city", "/projects/myapp", "", "", "", false, &bytes.Buffer{}, &stderr)
+	code := doRigAdd(f, "/city", "/projects/myapp", "", "", "", false, false, &bytes.Buffer{}, &stderr)
 	if code != 1 {
 		t.Errorf("doRigAdd = %d, want 1", code)
 	}
@@ -633,7 +633,7 @@ func TestDoRigAddWithGit(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, &stdout, &stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -663,7 +663,7 @@ func TestDoRigAddWithoutGit(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, &stdout, &stderr)
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, "", "", "", false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigAdd = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -3358,8 +3358,15 @@ prompt_template = "prompts/mayor.md"
 	if code != 0 {
 		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != promptContent {
-		t.Errorf("stdout = %q, want %q", stdout.String(), promptContent)
+	out := stdout.String()
+	if !strings.Contains(out, promptContent) {
+		t.Errorf("stdout = %q, want prompt content %q", out, promptContent)
+	}
+	if !strings.Contains(out, "[test-city] mayor") {
+		t.Errorf("stdout = %q, want hook beacon", out)
+	}
+	if strings.Contains(out, "Run `gc prime`") {
+		t.Errorf("stdout = %q, hook beacon should not add manual gc prime instruction", out)
 	}
 
 	data, err := os.ReadFile(filepath.Join(dir, ".runtime", "session_id"))
@@ -3449,6 +3456,93 @@ func TestFindEnclosingRig(t *testing.T) {
 	name, _, found = findEnclosingRig("/projects/app-web/src", rigs2)
 	if !found || name != "app-web" {
 		t.Errorf("prefix collision: name=%q found=%v, want app-web", name, found)
+	}
+}
+
+func makeRigSymlinkAliasFixture(t *testing.T) (rigPath, aliasRigPath string) {
+	t.Helper()
+
+	root := t.TempDir()
+	realRoot := filepath.Join(root, "real")
+	rigPath = filepath.Join(realRoot, "my-project")
+	if err := os.MkdirAll(filepath.Join(rigPath, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(root, "alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlink setup unavailable: %v", err)
+	}
+	return rigPath, filepath.Join(aliasRoot, "my-project")
+}
+
+func TestFindEnclosingRigResolvesSymlinkAlias(t *testing.T) {
+	rigPath, aliasRigPath := makeRigSymlinkAliasFixture(t)
+	rigs := []config.Rig{{Name: "my-project", Path: rigPath}}
+	dirViaAlias := filepath.Join(aliasRigPath, "src")
+
+	name, rp, found := findEnclosingRig(dirViaAlias, rigs)
+	if !found || name != "my-project" || rp != rigPath {
+		t.Fatalf("symlink alias match: name=%q path=%q found=%v, want name=%q path=%q found=true", name, rp, found, "my-project", rigPath)
+	}
+}
+
+func TestFindEnclosingRigPrefersDeepestNormalizedMatch(t *testing.T) {
+	root := t.TempDir()
+	realRoot := filepath.Join(root, "real")
+	parentRigPath := filepath.Join(realRoot, "my-project")
+	nestedRigPath := filepath.Join(parentRigPath, "nested")
+	if err := os.MkdirAll(filepath.Join(nestedRigPath, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(root, "extremely-long-alias-name")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Skipf("symlink setup unavailable: %v", err)
+	}
+
+	rigs := []config.Rig{
+		{Name: "parent", Path: filepath.Join(aliasRoot, "my-project")},
+		{Name: "nested", Path: nestedRigPath},
+	}
+	dirViaAlias := filepath.Join(aliasRoot, "my-project", "nested", "src")
+
+	name, rp, found := findEnclosingRig(dirViaAlias, rigs)
+	if !found || name != "nested" || rp != nestedRigPath {
+		t.Fatalf("deepest normalized match: name=%q path=%q found=%v, want name=%q path=%q found=true", name, rp, found, "nested", nestedRigPath)
+	}
+}
+
+func TestCurrentRigContextUsesGCDirThroughSymlinkAlias(t *testing.T) {
+	rigPath, aliasRigPath := makeRigSymlinkAliasFixture(t)
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "my-project", Path: rigPath}},
+	}
+
+	t.Setenv("GC_DIR", aliasRigPath)
+	if got := currentRigContext(cfg); got != "my-project" {
+		t.Fatalf("currentRigContext() = %q, want %q", got, "my-project")
+	}
+}
+
+func TestCurrentRigContextUsesWorkingDirThroughSymlinkAlias(t *testing.T) {
+	rigPath, aliasRigPath := makeRigSymlinkAliasFixture(t)
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "my-project", Path: rigPath}},
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(aliasRigPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(cwd)
+	})
+
+	t.Setenv("GC_DIR", "")
+	if got := currentRigContext(cfg); got != "my-project" {
+		t.Fatalf("currentRigContext() = %q, want %q", got, "my-project")
 	}
 }
 

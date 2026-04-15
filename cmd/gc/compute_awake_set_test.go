@@ -224,12 +224,28 @@ func TestNamedOnDemand_Attached_StaysAwake(t *testing.T) {
 	assertAwake(t, result, "hello-world--refinery")
 }
 
-func TestNamedOnDemand_ScaleCheckIrrelevant(t *testing.T) {
+func TestNamedOnDemand_ScaleCheckWakes(t *testing.T) {
+	// On-demand named sessions should wake when ScaleCheckCounts > 0 for
+	// their backing template. This tests the fix for #508: named-session
+	// agents with an explicit scale_check should have it evaluated.
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:           []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions:    []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
 		SessionBeads:     []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
 		ScaleCheckCounts: map[string]int{"hello-world/refinery": 1},
+		Now:              now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "named-on-demand:scale-check")
+}
+
+func TestNamedOnDemand_ScaleCheckZeroStaysAsleep(t *testing.T) {
+	// ScaleCheckCounts of 0 should not wake the session.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:           []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions:    []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads:     []AwakeSessionBead{{ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery"}},
+		ScaleCheckCounts: map[string]int{"hello-world/refinery": 0},
 		Now:              now,
 	})
 	assertAsleep(t, result, "hello-world--refinery")
@@ -1232,6 +1248,28 @@ func TestOnDemand_DefaultIdleTimeoutKeepsAlive(t *testing.T) {
 	assertAwake(t, result, "gascity--quinn")
 }
 
+func TestOnDemand_IdleTimeoutSleepSuppressesStaleRunningOverride(t *testing.T) {
+	// After an idle-timeout stop, a stale running snapshot from the same tick
+	// must not immediately re-wake the asleep session.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "gascity/quinn", SleepAfterIdle: 5 * time.Second}},
+		NamedSessions: []AwakeNamedSession{{Identity: "gascity/quinn", Template: "gascity/quinn", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID:            "mc-1",
+				SessionName:   "gascity--quinn",
+				Template:      "gascity/quinn",
+				State:         "asleep",
+				SleepReason:   "idle-timeout",
+				NamedIdentity: "gascity/quinn",
+			},
+		},
+		RunningSessions: map[string]bool{"gascity--quinn": true},
+		Now:             now,
+	})
+	assertAsleep(t, result, "gascity--quinn")
+}
+
 func TestOnDemand_RunningNotIdleYet(t *testing.T) {
 	// On-demand running, idle 2min, explicit timeout 5min. Stays awake.
 	result := ComputeAwakeSet(AwakeInput{
@@ -1247,6 +1285,23 @@ func TestOnDemand_RunningNotIdleYet(t *testing.T) {
 		Now:             now,
 	})
 	assertAwake(t, result, "gascity--quinn")
+}
+
+func TestAlwaysNamed_IgnoresIdleTimeout(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "mayor", SleepAfterIdle: 5 * time.Second}},
+		NamedSessions: []AwakeNamedSession{{Identity: "mayor", Template: "mayor", Mode: "always"}},
+		SessionBeads: []AwakeSessionBead{
+			{
+				ID: "mc-1", SessionName: "mayor", Template: "mayor", State: "active", NamedIdentity: "mayor",
+				IdleSince: now.Add(-10 * time.Second),
+			},
+		},
+		RunningSessions: map[string]bool{"mayor": true},
+		Now:             now,
+	})
+	assertAwake(t, result, "mayor")
+	assertReason(t, result, "mayor", "named-always")
 }
 
 func TestAlwaysNamed_NotAffectedByRunningOverride(t *testing.T) {

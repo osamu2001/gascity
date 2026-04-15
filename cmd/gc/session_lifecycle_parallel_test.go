@@ -598,6 +598,58 @@ func TestExecutePlannedStarts_FreshWakeAfterDrainRetainsStartupContext(t *testin
 	}
 }
 
+func TestPrepareStartCandidate_GeneratesMissingSessionKeyBeforeWake(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "wendy",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:wendy"},
+		Metadata: map[string]string{
+			"template":     "wendy",
+			"session_name": "wendy",
+			"wake_mode":    "fresh",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidate(startCandidate{
+		session: &session,
+		tp: TemplateParams{
+			TemplateName: "wendy",
+			SessionName:  "wendy",
+			Command:      "aimux run claude --",
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:          "claude",
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		},
+		order: 0,
+	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 4, 9, 1, 26, 41, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	sessionKey := session.Metadata["session_key"]
+	if sessionKey == "" {
+		t.Fatal("session_key should be generated before wake")
+	}
+	if !strings.Contains(prepared.cfg.Command, "--session-id "+sessionKey) {
+		t.Fatalf("prepared.cfg.Command = %q, want --session-id %s", prepared.cfg.Command, sessionKey)
+	}
+
+	stored, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if stored.Metadata["session_key"] != sessionKey {
+		t.Fatalf("stored session_key = %q, want %q", stored.Metadata["session_key"], sessionKey)
+	}
+}
+
 func TestReconcileSessionBeads_BlockedCandidatesDoNotConsumeWakeBudget(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -807,8 +859,8 @@ func TestCommitStartResult_ClearsPendingCreateClaimBeforeHashBatch(t *testing.T)
 	}
 
 	ok := commitStartResult(result, store, &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)}, events.Discard, 0, ioDiscard{}, ioDiscard{})
-	if !ok {
-		t.Fatal("commitStartResult returned false, want true when only hash batch fails")
+	if ok {
+		t.Fatal("commitStartResult returned true, want false when metadata batch fails (state transition lost)")
 	}
 
 	got, err := store.Get(bead.ID)
@@ -1930,5 +1982,93 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 	}
 	if got := prepared.cfg.Env["GC_HOME"]; got != "/tmp/gc-home" {
 		t.Fatalf("GC_HOME = %q, want %q", got, "/tmp/gc-home")
+	}
+}
+
+func TestConfirmPendingStart(t *testing.T) {
+	// commitStartResultTraced must transition freshly-spawned pool
+	// session beads from the pending states ("", creating, asleep,
+	// drained) to active. Running states ("awake", "active") are left
+	// alone to avoid wasteful metadata rewrites on every reconcile
+	// cycle; terminal and transitional states ("draining", "archived",
+	// "quarantined", "suspended") are likewise ignored so we don't
+	// resurrect a session the reconciler deliberately wound down.
+	cases := []struct {
+		name  string
+		state string
+		want  bool
+	}{
+		{"<empty>", "", true},
+		{"creating", "creating", true},
+		{"asleep", "asleep", true},
+		{"drained", "drained", true},
+		{"creating_with_whitespace", "  creating  ", true},
+		{"active", "active", false},
+		{"awake", "awake", false},
+		{"draining", "draining", false},
+		{"archived", "archived", false},
+		{"quarantined", "quarantined", false},
+		{"suspended", "suspended", false},
+		{"unknown-future-state", "unknown-future-state", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := confirmPendingStart(tc.state); got != tc.want {
+				t.Errorf("confirmPendingStart(%q) = %v, want %v", tc.state, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCommitStartResult_TransitionsCreatingToActive(t *testing.T) {
+	// Verify that commitStartResult persists state=active and
+	// state_reason=creation_complete when the session starts in
+	// "creating" state. This is the critical integration seam for
+	// the creating→active fix.
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "worker-session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-1",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := startCandidate{
+		session: &session,
+		tp:      TemplateParams{TemplateName: "worker", InstanceName: "worker-1"},
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: candidate,
+			coreHash:  "core-abc",
+			liveHash:  "live-xyz",
+		},
+		outcome:  "success",
+		started:  time.Unix(100, 0),
+		finished: time.Unix(101, 0),
+	}
+	rec := events.NewFake()
+	ok := commitStartResult(result, store, &clock.Fake{Time: time.Unix(102, 0)}, rec, 0, ioDiscard{}, ioDiscard{})
+	if !ok {
+		t.Fatal("commitStartResult returned false for successful start")
+	}
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["state"] != "active" {
+		t.Errorf("state = %q, want %q", got.Metadata["state"], "active")
+	}
+	if got.Metadata["state_reason"] != "creation_complete" {
+		t.Errorf("state_reason = %q, want %q", got.Metadata["state_reason"], "creation_complete")
+	}
+	if got.Metadata["started_config_hash"] != "core-abc" {
+		t.Errorf("started_config_hash = %q, want %q", got.Metadata["started_config_hash"], "core-abc")
 	}
 }
