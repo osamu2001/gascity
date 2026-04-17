@@ -575,13 +575,10 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		SleepAfterIdle:         "30s",
 		SleepAfterIdleSource:   "agent",
 		InstallAgentHooks:      []string{"claude"},
-		Skills:                 []string{"code-review"},
-		MCP:                    []string{"beads-health"},
-		SharedSkills:           []string{"shared-skill"},
-		SharedMCP:              []string{"shared-mcp"},
 		SkillsDir:              "/skills",
 		MCPDir:                 "/mcp",
 		HooksInstalled:         &trueVal,
+		InjectAssignedSkills:   &trueVal,
 		SessionSetup:           []string{"setup-cmd"},
 		SessionSetupScript:     "scripts/setup.sh",
 		SessionLive:            []string{"live-cmd"},
@@ -606,12 +603,26 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		PackName:               "gastown",
 	}
 
-	// Verify every Agent field is set (non-zero) in the test data.
+	// Tombstone fields (deprecated in v0.15.1, removed in v0.16) are not
+	// deep-copied; they are accepted by the TOML parser but not propagated
+	// through the runtime. The deep-copy contract deliberately drops them.
+	tombstones := map[string]bool{
+		"Skills":       true,
+		"MCP":          true,
+		"SharedSkills": true,
+		"SharedMCP":    true,
+	}
+
+	// Verify every non-tombstone Agent field is set (non-zero) in the test data.
 	sv := reflect.ValueOf(src)
 	st := sv.Type()
 	for i := 0; i < st.NumField(); i++ {
+		fname := st.Field(i).Name
+		if tombstones[fname] {
+			continue
+		}
 		if sv.Field(i).IsZero() {
-			t.Fatalf("Agent field %q is zero in test data — add it to the test source", st.Field(i).Name)
+			t.Fatalf("Agent field %q is zero in test data — add it to the test source", fname)
 		}
 	}
 
@@ -625,12 +636,15 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		t.Errorf("Dir = %q, want %q", dst.Dir, "copy-dir")
 	}
 
-	// All other fields should match the source.
+	// All other non-tombstone fields should match the source.
 	dv := reflect.ValueOf(dst)
 	for i := 0; i < st.NumField(); i++ {
 		fname := st.Field(i).Name
 		if fname == "Name" || fname == "Dir" {
 			continue // Intentionally overridden.
+		}
+		if tombstones[fname] {
+			continue
 		}
 		if dv.Field(i).IsZero() {
 			t.Errorf("deepCopyAgent did not copy field %q", fname)

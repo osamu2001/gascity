@@ -1433,27 +1433,31 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		}
 	}
 
-	// Materialize Claude skill stubs.
-	if cfg.Workspace.Provider == "claude" {
-		dirs := []string{cityPath}
-		for _, r := range cfg.Rigs {
-			if r.Path != "" {
-				dirs = append(dirs, r.Path)
-			}
-		}
-		if err := runStep("materializing_skill_stubs", func() error {
-			return materializeSkillStubs(dirs...)
-		}); err != nil {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': skill stubs: %v\n", cityName, err) //nolint:errcheck
-		}
-	}
-
 	// Validate agents.
 	if err := runStep("validating_agents", func() error {
 		return config.ValidateAgents(cfg.Agents)
 	}); err != nil {
 		return fmt.Errorf("validate agents: %w", err)
 	}
+
+	// Skill collision validation precedes materialization so a
+	// collision cannot produce half-written sinks. Errors abort the
+	// tick without touching materialization state; the operator
+	// sees the collision message on the supervisor's stderr stream.
+	if err := runStep("validating_skill_collisions", func() error {
+		return checkSkillCollisions(cfg, cityPath)
+	}); err != nil {
+		return fmt.Errorf("validate skill collisions: %w", err)
+	}
+
+	// Stage-1 skill materialization. Runs on every tick so
+	// catalog edits land without requiring a supervisor restart.
+	// Idempotent — converged passes create nothing new.
+	// runStage1SkillMaterialization logs all errors inline and
+	// returns nil; this step cannot fail the tick.
+	_ = runStep("materializing_skills", func() error {
+		return runStage1SkillMaterialization(cityPath, cfg, stderr)
+	})
 
 	// Validate install_agent_hooks (workspace + all agents).
 	if err := runStep("validating_hooks", func() error {

@@ -1,3 +1,8 @@
+---
+name: gc-city
+description: City lifecycle — status, start, stop, init
+---
+
 # City Lifecycle
 
 A city is a directory containing `city.toml` and `.gc/` runtime state.

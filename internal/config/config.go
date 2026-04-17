@@ -4,6 +4,8 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -435,12 +437,21 @@ type AgentOverride struct {
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
-	// Skills overrides the agent's attached shared skills list.
+	// Skills is a tombstone field retained for v0.15.1 backwards compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	Skills []string `toml:"skills,omitempty"`
-	// MCP overrides the agent's attached shared MCP list.
+	// MCP is a tombstone field retained for v0.15.1 backwards compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	MCP []string `toml:"mcp,omitempty"`
 	// HooksInstalled overrides automatic hook detection.
 	HooksInstalled *bool `toml:"hooks_installed,omitempty"`
+	// InjectAssignedSkills overrides Agent.InjectAssignedSkills
+	// (see that field for semantics).
+	InjectAssignedSkills *bool `toml:"inject_assigned_skills,omitempty"`
 	// SessionSetup overrides the agent's session_setup commands.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript overrides the agent's session_setup_script path.
@@ -465,9 +476,17 @@ type AgentOverride struct {
 	SessionLiveAppend []string `toml:"session_live_append,omitempty"`
 	// InstallAgentHooksAppend appends to the agent's install_agent_hooks list.
 	InstallAgentHooksAppend []string `toml:"install_agent_hooks_append,omitempty"`
-	// SkillsAppend appends to the agent's attached shared skills list.
+	// SkillsAppend is a tombstone field retained for v0.15.1 backwards
+	// compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	SkillsAppend []string `toml:"skills_append,omitempty"`
-	// MCPAppend appends to the agent's attached shared MCP list.
+	// MCPAppend is a tombstone field retained for v0.15.1 backwards
+	// compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	MCPAppend []string `toml:"mcp_append,omitempty"`
 	// Attach overrides the agent's attach setting.
 	Attach *bool `toml:"attach,omitempty"`
@@ -1308,11 +1327,15 @@ type AgentDefaults struct {
 	// V2 migration convenience — replaces global_fragments/inject_fragments
 	// for city-wide defaults.
 	AppendFragments []string `toml:"append_fragments,omitempty"`
-	// Skills lists shared skills attached by name to agents through
-	// [agent_defaults].skills.
+	// Skills is a tombstone field retained for v0.15.1 backwards compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	Skills []string `toml:"skills,omitempty"`
-	// MCP lists shared MCP definitions attached by name to agents through
-	// [agent_defaults].mcp.
+	// MCP is a tombstone field retained for v0.15.1 backwards compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	MCP []string `toml:"mcp,omitempty"`
 }
 
@@ -1439,9 +1462,15 @@ type Agent struct {
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
-	// Skills lists shared skills attached to this agent by name.
+	// Skills is a tombstone field retained for v0.15.1 backwards compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	Skills []string `toml:"skills,omitempty"`
-	// MCP lists shared MCP definitions attached to this agent by name.
+	// MCP is a tombstone field retained for v0.15.1 backwards compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	MCP []string `toml:"mcp,omitempty"`
 	// HooksInstalled overrides automatic hook detection. Set to true when hooks
 	// are manually installed (e.g., merged into the project's own hook config)
@@ -1475,11 +1504,17 @@ type Agent struct {
 	// Set during pack/fragment loading; empty for inline agents.
 	// Runtime-only — not persisted to TOML or JSON.
 	SourceDir string `toml:"-" json:"-"`
-	// SharedSkills holds the inherited shared skills baseline for this agent.
-	// Runtime-only — not persisted to TOML or JSON.
+	// SharedSkills is a tombstone runtime field retained for v0.15.1 backwards
+	// compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	SharedSkills []string `toml:"-" json:"-"`
-	// SharedMCP holds the inherited shared MCP baseline for this agent.
-	// Runtime-only — not persisted to TOML or JSON.
+	// SharedMCP is a tombstone runtime field retained for v0.15.1 backwards
+	// compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
 	SharedMCP []string `toml:"-" json:"-"`
 	// SkillsDir is the agent-local private skills catalog root.
 	// Runtime-only — not persisted to TOML or JSON.
@@ -1500,6 +1535,21 @@ type Agent struct {
 	// rendered prompt. Fragments come from shared template directories across
 	// all loaded packs. Each name must match a {{ define "name" }} block.
 	InjectFragments []string `toml:"inject_fragments,omitempty"`
+	// InjectAssignedSkills controls whether gc appends an
+	// "assigned skills" appendix to the agent's rendered prompt. The
+	// appendix lists every skill visible to this agent, partitioned
+	// into (assigned-to-you, shared-with-every-agent), so agents
+	// sharing a scope-root sink can tell which skills are their
+	// specialisation vs which are the city-wide set.
+	//
+	// Pointer tri-state:
+	//   nil  → inherit: inject when the agent has a vendor sink
+	//   *true  → explicitly inject (equivalent to the default)
+	//   *false → disable; the template is responsible for rendering
+	//            any skill guidance itself
+	//
+	// See engdocs/proposals/skill-materialization.md.
+	InjectAssignedSkills *bool `toml:"inject_assigned_skills,omitempty"`
 	// Attach controls whether the agent's session supports interactive
 	// attachment (e.g., tmux attach). When false, the agent can use a
 	// lighter runtime (subprocess instead of tmux). Defaults to true.
@@ -1903,8 +1953,6 @@ func InjectImplicitAgents(cfg *City) {
 // implicit agents are already present. Control-dispatcher agents are
 // skipped because they are infrastructure, not work agents.
 func ApplyAgentDefaults(cfg *City) {
-	applyAgentSharedAttachmentDefaults(cfg.Agents, cfg.AgentDefaults)
-
 	formula := cfg.AgentDefaults.DefaultSlingFormula
 	if formula != "" {
 		for i := range cfg.Agents {
@@ -1918,24 +1966,62 @@ func ApplyAgentDefaults(cfg *City) {
 	}
 }
 
-// applyAgentSharedAttachmentDefaults seeds inherited shared skills/MCP
-// onto the given agents. The explicit agent attachment lists stay in the
-// agent itself; the inherited baseline lives in SharedSkills/SharedMCP.
-func applyAgentSharedAttachmentDefaults(agents []Agent, defaults AgentDefaults) {
-	if len(defaults.Skills) == 0 && len(defaults.MCP) == 0 {
+// deprecatedAttachmentWarning is the canonical warning message emitted when
+// a loaded config still references the tombstone attachment-list fields
+// removed from the active materializer path in v0.15.1. Exported so the
+// warning test can assert on its substring.
+const deprecatedAttachmentWarning = "gc: warning: attachment-list fields (`skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills`) are deprecated as of v0.15.1 and ignored. They may appear on agents, [agent_defaults], [[patches.agent]], [[rigs.overrides]], or [[rigs.patches]]. Remove them from your config (or run `gc doctor --fix` once available). Hard parse error lands in v0.16."
+
+// deprecationWarningSink is the writer used by WarnDeprecatedAttachmentFields.
+// Overridable from tests.
+var deprecationWarningSink io.Writer = os.Stderr
+
+// WarnDeprecatedAttachmentFields emits a one-time deprecation warning to
+// deprecationWarningSink (defaults to os.Stderr) if any of the v0.15.0
+// attachment-list tombstone fields appears populated anywhere in the
+// loaded config — agents, agent_defaults, patches, or rig-level overrides.
+// The check is best-effort and does not error; it only notifies the user
+// so they can clean up ahead of the v0.16 hard parse error.
+func WarnDeprecatedAttachmentFields(cfg *City) {
+	if cfg == nil {
 		return
 	}
-	for i := range agents {
-		if agents[i].Name == ControlDispatcherAgentName {
-			continue
-		}
-		if len(defaults.Skills) > 0 {
-			agents[i].SharedSkills = appendUnique(agents[i].SharedSkills, defaults.Skills...)
-		}
-		if len(defaults.MCP) > 0 {
-			agents[i].SharedMCP = appendUnique(agents[i].SharedMCP, defaults.MCP...)
+	if !hasDeprecatedAttachmentFields(cfg) {
+		return
+	}
+	fmt.Fprintln(deprecationWarningSink, deprecatedAttachmentWarning) //nolint:errcheck // best-effort warning sink
+}
+
+func hasDeprecatedAttachmentFields(cfg *City) bool {
+	if len(cfg.AgentDefaults.Skills) > 0 || len(cfg.AgentDefaults.MCP) > 0 {
+		return true
+	}
+	if len(cfg.AgentsDefaults.Skills) > 0 || len(cfg.AgentsDefaults.MCP) > 0 {
+		return true
+	}
+	for _, a := range cfg.Agents {
+		if len(a.Skills) > 0 || len(a.MCP) > 0 || len(a.SharedSkills) > 0 || len(a.SharedMCP) > 0 {
+			return true
 		}
 	}
+	for _, p := range cfg.Patches.Agents {
+		if len(p.Skills) > 0 || len(p.MCP) > 0 || len(p.SkillsAppend) > 0 || len(p.MCPAppend) > 0 {
+			return true
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		for _, ov := range rig.Overrides {
+			if len(ov.Skills) > 0 || len(ov.MCP) > 0 || len(ov.SkillsAppend) > 0 || len(ov.MCPAppend) > 0 {
+				return true
+			}
+		}
+		for _, ov := range rig.RigPatches {
+			if len(ov.Skills) > 0 || len(ov.MCP) > 0 || len(ov.SkillsAppend) > 0 || len(ov.MCPAppend) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mergeAgentDefaults merges src into dst using later-layer precedence for
@@ -1967,12 +2053,6 @@ func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, pro
 	}
 	if len(src.AppendFragments) > 0 {
 		dst.AppendFragments = appendUnique(dst.AppendFragments, src.AppendFragments...)
-	}
-	if len(src.Skills) > 0 {
-		dst.Skills = appendUnique(dst.Skills, src.Skills...)
-	}
-	if len(src.MCP) > 0 {
-		dst.MCP = appendUnique(dst.MCP, src.MCP...)
 	}
 }
 

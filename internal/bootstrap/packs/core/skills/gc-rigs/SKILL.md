@@ -1,3 +1,8 @@
+---
+name: gc-rigs
+description: Managing rigs — add, list, status, suspend, resume
+---
+
 # Rig Management
 
 A rig is a project directory registered with the city. Agents can be

@@ -96,6 +96,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	d.Register(&doctor.CityConfigCheck{})
 	registerV2DeprecationChecks(d)
 	d.Register(&doctor.ImplicitImportCacheCheck{})
+	d.Register(&doctor.DeprecatedAttachmentFieldsCheck{})
 
 	// Load config for deeper checks. If it fails, we still run the core
 	// checks above (which will report the parse error).
@@ -110,6 +111,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewBuiltinPackFamilyCheck(cfg, cityPath))
 		d.Register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		d.Register(doctor.NewDurationRangeCheck(cfg))
+		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 	}
 
 	// System formulas check.

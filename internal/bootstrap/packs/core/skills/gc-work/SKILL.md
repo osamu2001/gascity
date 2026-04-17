@@ -1,3 +1,8 @@
+---
+name: gc-work
+description: Finding, creating, claiming, and closing work items (beads)
+---
+
 # Work Items (Beads)
 
 Everything in Gas City is a bead — tasks, messages, molecules, convoys.

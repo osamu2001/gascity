@@ -1,3 +1,8 @@
+---
+name: gc-mail
+description: Sending and reading messages between agents
+---
+
 # Messaging (Mail)
 
 Mail is bead-based messaging between agents. Messages are beads with

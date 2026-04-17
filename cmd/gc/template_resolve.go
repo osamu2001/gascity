@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -255,6 +256,54 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		prompt = beacon
 	}
 
+	// Step 9b: Append the assigned-skills appendix when the agent
+	// has a vendor sink, hasn't opted out, AND the runtime actually
+	// delivers the skills to the session workdir. The appendix claims
+	// "these skills are materialized in your provider's skill
+	// directory and load automatically" — that claim has to match
+	// reality, so we gate on the same availability conditions as
+	// materialization itself:
+	//
+	//   - Stage-1-eligible runtime + workdir == scope root: stage 1
+	//     wrote the sink into the scope root the agent sees.
+	//   - Stage-2-eligible runtime (regardless of workdir): the
+	//     session PreStart invokes `gc internal materialize-skills`
+	//     into the session workdir before the agent starts.
+	//
+	// Agents for which neither path delivers (ACP, k8s, hybrid,
+	// subprocess with WorkDir ≠ scope root — because subprocess
+	// doesn't execute PreStart) get no appendix; we'd be lying to
+	// them. Discovered via the pass-1 Codex review.
+	if effectiveInjectAssignedSkills(cfgAgent) {
+		wsProvider := ""
+		if p.workspace != nil {
+			wsProvider = p.workspace.Provider
+		}
+		provider := effectiveAgentProvider(cfgAgent, wsProvider)
+		if _, ok := materialize.VendorSink(provider); ok {
+			scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
+			canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
+			stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
+			stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent)
+			if stage1Delivers || stage2Delivers {
+				var agentCat materialize.AgentCatalog
+				if cfgAgent.SkillsDir != "" {
+					// Best-effort: a transient I/O failure loading the
+					// agent catalog shouldn't break the prompt render.
+					// The error is already surfaced via
+					// effectiveSkillsForAgent's stderr path earlier in
+					// the call graph.
+					if c, err := materialize.LoadAgentCatalog(cfgAgent.SkillsDir); err == nil {
+						agentCat = c
+					}
+				}
+				if frag := buildAssignedSkillsPromptFragment(cfgAgent, p.skillCatalog, agentCat); frag != "" {
+					prompt = prompt + "\n\n" + frag
+				}
+			}
+		}
+	}
+
 	// Step 10: Merge environment layers.
 	env := convergence.ScrubTokenEnv(mergeEnv(passthroughEnv(), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv))
 
@@ -282,6 +331,38 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	resolvedScript := resolveSetupScript(cfgAgent.SessionSetupScript, p.cityPath)
 	expandedPreStart := expandSessionSetup(cfgAgent.PreStart, setupCtx)
 	expandedLive := expandSessionSetup(cfgAgent.SessionLive, setupCtx)
+
+	// Step 11b: Skill materialization integration (per engdocs
+	// skill-materialization.md § "When FingerprintExtra[\"skills:*\"]
+	// is populated" and § "Stage 2 runtime gate"). Stage-2 eligible
+	// runtimes (tmux for v0.15.1) get a PreStart entry for per-session
+	// materialization into non-scope-root workdirs, and every eligible
+	// agent gets per-skill fingerprint entries so catalog edits drain.
+	// Stage-2 ineligible runtimes (subprocess/acp/k8s/hybrid/...) get
+	// neither — the materializer cannot reach them, so spurious
+	// fingerprint drift would cause pointless drain-restart cycles.
+	if isStage2EligibleSession(p.sessionProvider, cfgAgent) {
+		scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
+		canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
+		wsProvider := ""
+		if p.workspace != nil {
+			wsProvider = p.workspace.Provider
+		}
+		desired := effectiveSkillsForAgent(p.skillCatalog, cfgAgent, wsProvider, p.stderr)
+		if len(desired) > 0 {
+			fpExtra = mergeSkillFingerprintEntries(fpExtra, desired)
+			if canonWorkDir != scopeRoot {
+				// Pool instances inherit their skill catalog from the
+				// template, not the instance — namepool members (e.g.
+				// repo/furiosa from polecat) are not resolvable as
+				// standalone agents by `gc internal materialize-skills`.
+				// templateNameFor returns cfgAgent.PoolName for pool
+				// instances and qualifiedName for singletons.
+				materializeAgent := templateNameFor(cfgAgent, qualifiedName)
+				expandedPreStart = appendMaterializeSkillsPreStart(expandedPreStart, materializeAgent, workDir)
+			}
+		}
+	}
 
 	// Step 12: Build startup hints.
 	hints := agent.StartupHints{

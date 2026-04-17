@@ -1,3 +1,8 @@
+---
+name: gc-dispatch
+description: Routing work to agents with gc sling and formulas
+---
+
 # Dispatching Work
 
 `gc sling` routes work to session configs. **Multi-session configs are valid

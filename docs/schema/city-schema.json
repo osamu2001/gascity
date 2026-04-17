@@ -216,14 +216,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Skills lists shared skills attached to this agent by name."
+          "description": "Skills is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
         },
         "mcp": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "MCP lists shared MCP definitions attached to this agent by name."
+          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
         },
         "hooks_installed": {
           "type": "boolean",
@@ -261,6 +261,10 @@
           },
           "type": "array",
           "description": "InjectFragments lists named template fragments to append to this agent's\nrendered prompt. Fragments come from shared template directories across\nall loaded packs. Each name must match a {{ define \"name\" }} block."
+        },
+        "inject_assigned_skills": {
+          "type": "boolean",
+          "description": "InjectAssignedSkills controls whether gc appends an\n\"assigned skills\" appendix to the agent's rendered prompt. The\nappendix lists every skill visible to this agent, partitioned\ninto (assigned-to-you, shared-with-every-agent), so agents\nsharing a scope-root sink can tell which skills are their\nspecialisation vs which are the city-wide set.\n\nPointer tri-state:\n  nil  → inherit: inject when the agent has a vendor sink\n  *true  → explicitly inject (equivalent to the default)\n  *false → disable; the template is responsible for rendering\n           any skill guidance itself\n\nSee engdocs/proposals/skill-materialization.md."
         },
         "attach": {
           "type": "boolean",
@@ -341,14 +345,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Skills lists shared skills attached by name to agents through\n[agent_defaults].skills."
+          "description": "Skills is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
         },
         "mcp": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "MCP lists shared MCP definitions attached by name to agents through\n[agent_defaults].mcp."
+          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
         }
       },
       "additionalProperties": false,
@@ -442,18 +446,22 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Skills overrides the agent's attached shared skills list."
+          "description": "Skills is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
         },
         "mcp": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "MCP overrides the agent's attached shared MCP list."
+          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
         },
         "hooks_installed": {
           "type": "boolean",
           "description": "HooksInstalled overrides automatic hook detection."
+        },
+        "inject_assigned_skills": {
+          "type": "boolean",
+          "description": "InjectAssignedSkills overrides Agent.InjectAssignedSkills\n(see that field for semantics)."
         },
         "session_setup": {
           "items": {
@@ -521,14 +529,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "SkillsAppend appends to the agent's attached shared skills list."
+          "description": "SkillsAppend is a tombstone field retained for v0.15.1 backwards\ncompatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
         },
         "mcp_append": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "MCPAppend appends to the agent's attached shared MCP list."
+          "description": "MCPAppend is a tombstone field retained for v0.15.1 backwards\ncompatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
         },
         "attach": {
           "type": "boolean",
@@ -674,32 +682,36 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Skills overrides the agent's attached shared skills list."
+          "description": "Skills is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
         },
         "mcp": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "MCP overrides the agent's attached shared MCP list."
+          "description": "MCP is a tombstone field retained for v0.15.1 backwards compatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
         },
         "skills_append": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "SkillsAppend appends to the agent's attached shared skills list."
+          "description": "SkillsAppend is a tombstone field retained for v0.15.1 backwards\ncompatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
         },
         "mcp_append": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "MCPAppend appends to the agent's attached shared MCP list."
+          "description": "MCPAppend is a tombstone field retained for v0.15.1 backwards\ncompatibility.\n\nDeprecated: removed in v0.16. Tombstone — accepted but ignored. See\nengdocs/proposals/skill-materialization.md"
         },
         "hooks_installed": {
           "type": "boolean",
           "description": "HooksInstalled overrides automatic hook detection."
+        },
+        "inject_assigned_skills": {
+          "type": "boolean",
+          "description": "InjectAssignedSkills overrides per-agent appendix injection\n(see Agent.InjectAssignedSkills)."
         },
         "session_setup": {
           "items": {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
@@ -43,7 +45,13 @@ type initProviderTarget struct {
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
 	MaterializeBeadsBdScript(cityPath) //nolint:errcheck // best-effort; only needed for bd provider
 	MaterializeBuiltinPacks(cityPath)  //nolint:errcheck // best-effort; only needed for bd provider
-	if err := bootstrap.EnsureBootstrap(""); err != nil {
+	// Collision detection: if the city already declares [imports.<name>]
+	// matching a bootstrap pack, refuse to write the implicit-import entry
+	// that would otherwise be silently shadowed. See
+	// engdocs/proposals/skill-materialization.md — "Name-collision with a
+	// user-declared [imports.core]".
+	cityImports := readCityImportsForBootstrap(cityPath)
+	if err := bootstrap.EnsureBootstrapForCity("", cityImports); err != nil {
 		fmt.Fprintf(stderr, "%s: bootstrapping implicit imports: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -118,6 +126,36 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		logInitProgress(stdout, 7, "Registering city with supervisor")
 	}
 	return registerCityWithSupervisor(cityPath, stdout, stderr, opts.commandName, opts.showProgress)
+}
+
+// readCityImportsForBootstrap reads the [imports] table from city.toml and
+// from any sibling pack.toml so the bootstrap writer can detect collisions
+// against user-declared imports. Best-effort: parse errors and missing
+// files return an empty map (the composer will surface a clearer error
+// later if the city is malformed). Only the import binding name is used
+// by the collision check — the rest of the Import struct is irrelevant.
+func readCityImportsForBootstrap(cityPath string) map[string]config.Import {
+	merged := make(map[string]config.Import)
+
+	for _, rel := range []string{"city.toml", "pack.toml"} {
+		data, err := os.ReadFile(filepath.Join(cityPath, rel))
+		if err != nil {
+			continue
+		}
+		var doc struct {
+			Imports map[string]config.Import `toml:"imports"`
+		}
+		if _, err := toml.Decode(string(data), &doc); err != nil {
+			continue
+		}
+		for name, imp := range doc.Imports {
+			if _, already := merged[name]; already {
+				continue
+			}
+			merged[name] = imp
+		}
+	}
+	return merged
 }
 
 func maybePrintWizardProviderGuidance(wiz wizardConfig, stdout io.Writer) {

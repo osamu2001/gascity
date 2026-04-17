@@ -1,3 +1,8 @@
+---
+name: gc-dashboard
+description: API server and web dashboard — config, start, monitor
+---
+
 # Dashboard
 
 The dashboard is a web UI compiled into the `gc` binary for monitoring

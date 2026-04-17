@@ -483,20 +483,6 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	// Materialize Claude skill stubs (after formulas, before agent startup).
-	if cfg.Workspace.Provider == "claude" {
-		dirs := []string{cityPath}
-		for _, r := range cfg.Rigs {
-			if r.Path != "" {
-				dirs = append(dirs, r.Path)
-			}
-		}
-		if err := materializeSkillStubs(dirs...); err != nil {
-			fmt.Fprintf(stderr, "gc start: skill stubs: %v\n", err) //nolint:errcheck // best-effort stderr
-			// Non-fatal.
-		}
-	}
-
 	// Materialize script symlinks before agent startup.
 	if len(cfg.ScriptLayers.City) > 0 {
 		if err := ResolveScripts(cityPath, cfg.ScriptLayers.City); err != nil {
@@ -516,6 +502,24 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// Skill collision validator — hard gate. Two agents sharing a
+	// (scope-root, vendor) sink cannot both provide an agent-local
+	// skill under the same name; the materialiser below would write
+	// conflicting symlinks. Block start so the operator fixes the
+	// collision before any half-written sink state lands. Per
+	// engdocs/proposals/skill-materialization.md § "Collision
+	// validation (startup validator)".
+	if err := checkSkillCollisions(cfg, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Stage-1 skill materialization — runs for every eligible agent
+	// at its scope root before sessions spawn. Non-fatal: per-agent
+	// errors are logged inline by runStage1SkillMaterialization
+	// itself; it never returns a non-nil error to its caller.
+	_ = runStage1SkillMaterialization(cityPath, cfg, stderr)
 
 	// Validate install_agent_hooks (workspace + all agents).
 	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {

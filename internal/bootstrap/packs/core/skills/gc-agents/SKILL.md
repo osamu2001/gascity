@@ -1,3 +1,8 @@
+---
+name: gc-agents
+description: Managing agents — list, peek, nudge, suspend, drain
+---
+
 # Agent Management
 
 Agents are the workers in a Gas City workspace. Each runs in its own
