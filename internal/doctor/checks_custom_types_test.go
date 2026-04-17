@@ -47,12 +47,31 @@ func TestCustomTypesCheck_RequiredTypesIncludeSpec(t *testing.T) {
 	}
 }
 
+// TestCustomTypesCheck_RequiredTypesIncludeConvergence verifies that
+// "convergence" is in the required list. gc's convergence handler
+// (internal/convergence/create.go) creates beads with Type="convergence"
+// on every `gc converge create` call; if the type isn't registered in
+// bd's types.custom, every convergence loop fails at creation with
+// "invalid issue type: convergence".
+func TestCustomTypesCheck_RequiredTypesIncludeConvergence(t *testing.T) {
+	found := false
+	for _, typ := range RequiredCustomTypes {
+		if typ == "convergence" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("RequiredCustomTypes must include 'convergence' — gc's convergence handler requires this type")
+	}
+}
+
 func TestCustomTypesCheck_RequiredTypesComplete(t *testing.T) {
 	expected := map[string]bool{
 		"molecule": true, "convoy": true, "message": true,
 		"event": true, "gate": true, "merge-request": true,
 		"agent": true, "role": true, "rig": true,
-		"session": true, "spec": true,
+		"session": true, "spec": true, "convergence": true,
 	}
 	for _, typ := range RequiredCustomTypes {
 		if !expected[typ] {

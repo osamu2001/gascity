@@ -10,9 +10,15 @@ import (
 
 // RequiredCustomTypes lists the bead types that Gas City requires
 // to be registered with every bd store (city + rigs).
+//
+// "convergence" is included because gc's convergence handler
+// (internal/convergence/create.go) creates beads with type="convergence"
+// as the root of every convergence loop. Without it registered, every
+// `gc converge create` call fails with "invalid issue type: convergence".
 var RequiredCustomTypes = []string{
 	"molecule", "convoy", "message", "event", "gate",
 	"merge-request", "agent", "role", "rig", "session", "spec",
+	"convergence",
 }
 
 // CustomTypesCheck verifies that all required Gas City custom bead
@@ -86,13 +92,47 @@ func (c *CustomTypesCheck) Run(_ *CheckContext) *CheckResult {
 // CanFix returns true — missing types can be registered.
 func (c *CustomTypesCheck) CanFix() bool { return true }
 
-// Fix registers all required custom types with the bd store.
+// Fix registers any missing required custom types with the bd store,
+// preserving any additional custom types the user has already added.
+//
+// This function MUST merge — not overwrite — because a city may have
+// additional custom types registered beyond the RequiredCustomTypes
+// baseline (e.g., pack-specific types, user-defined types). Overwriting
+// would silently delete those, causing failures the next time code tries
+// to create beads of the deleted types.
 func (c *CustomTypesCheck) Fix(_ *CheckContext) error {
 	if len(c.missing) == 0 {
 		return nil
 	}
-	fullList := strings.Join(RequiredCustomTypes, ",")
-	return setCustomTypes(c.Dir, fullList)
+	// Read the current list so we can preserve user-added types.
+	current, err := getCustomTypes(c.Dir)
+	if err != nil {
+		// If we cannot read the current list, fall back to writing just the
+		// required list. This is a degraded but safe path.
+		return setCustomTypes(c.Dir, strings.Join(RequiredCustomTypes, ","))
+	}
+
+	// Build the merged list: start with the current (preserved) types,
+	// then append any missing required types.
+	currentSet := make(map[string]bool, len(current))
+	var merged []string
+	for _, t := range current {
+		trimmed := strings.TrimSpace(t)
+		if trimmed == "" {
+			continue
+		}
+		if !currentSet[trimmed] {
+			currentSet[trimmed] = true
+			merged = append(merged, trimmed)
+		}
+	}
+	for _, req := range RequiredCustomTypes {
+		if !currentSet[req] {
+			currentSet[req] = true
+			merged = append(merged, req)
+		}
+	}
+	return setCustomTypes(c.Dir, strings.Join(merged, ","))
 }
 
 // getCustomTypes reads the current types.custom config from a bd store.
