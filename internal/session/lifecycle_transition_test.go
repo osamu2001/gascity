@@ -33,10 +33,11 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		},
 		{
 			name:  "confirm started",
-			patch: ConfirmStartedPatch(),
+			patch: ConfirmStartedPatch(now),
 			want: MetadataPatch{
 				"state":                string(StateActive),
 				"state_reason":         "creation_complete",
+				"creation_complete_at": now.UTC().Format(time.RFC3339),
 				"pending_create_claim": "",
 				"sleep_reason":         "",
 			},
@@ -330,22 +331,25 @@ func TestMetadataPatchApplyReturnsMergedCopy(t *testing.T) {
 }
 
 func TestCommitStartedPatchBuildsAtomicStartMetadata(t *testing.T) {
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
 	patch := CommitStartedPatch(CommitStartedPatchInput{
 		CoreHash:         "core-hash",
 		LiveHash:         "live-hash",
 		CoreBreakdown:    `{"command":"core-hash"}`,
 		ConfirmState:     true,
 		ClearSleepReason: true,
+		Now:              now,
 	})
 
 	want := MetadataPatch{
-		"started_config_hash": "core-hash",
-		"live_hash":           "live-hash",
-		"started_live_hash":   "live-hash",
-		"core_hash_breakdown": `{"command":"core-hash"}`,
-		"state":               string(StateActive),
-		"state_reason":        "creation_complete",
-		"sleep_reason":        "",
+		"started_config_hash":  "core-hash",
+		"live_hash":            "live-hash",
+		"started_live_hash":    "live-hash",
+		"core_hash_breakdown":  `{"command":"core-hash"}`,
+		"state":                string(StateActive),
+		"state_reason":         "creation_complete",
+		"creation_complete_at": now.Format(time.RFC3339),
+		"sleep_reason":         "",
 	}
 	if !reflect.DeepEqual(patch, want) {
 		t.Fatalf("patch = %#v, want %#v", patch, want)

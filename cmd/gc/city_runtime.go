@@ -962,26 +962,27 @@ func sweepUndesiredPoolSessionBeads(
 		//
 		// The guard must only match the post-create window, not crash/
 		// churn/start-failure paths that ALSO clear last_woke_at
-		// (checkStability in session_reconcile.go, checkChurn, and the
-		// start-failure branch in session_lifecycle_parallel.go all clear
-		// last_woke_at on a bead that may already be state=active). We
-		// distinguish the post-create window by requiring:
-		//   - state_reason=="creation_complete" (last state transition came
-		//     from the wake commit, not a crash clear)
-		//   - wake_attempts=="0" and churn_count=="0" (no prior crash/churn
-		//     cleared last_woke_at — recordWakeFailure/recordChurn both
-		//     increment these before clearing last_woke_at)
-		// Beads that actually drained/stopped keep state values like
-		// "drained"/"asleep"/"failed-create" and remain sweepable.
-		// The age bound mirrors staleCreatingState: a zero CreatedAt is
-		// treated as stale (sweepable) so malformed beads can be recovered.
+		// (checkStability, checkChurn, and the start-failure branch in
+		// session_lifecycle_parallel.go all clear last_woke_at on beads
+		// that may already be state=active). We distinguish by the
+		// per-start marker creation_complete_at, written atomically with
+		// the state transition by CommitStartedPatch / ConfirmStartedPatch.
+		// A bead is protected while creation_complete_at is recent
+		// (within staleCreatingStateTimeout) AND last_woke_at is still
+		// empty — crash/churn paths do not touch creation_complete_at,
+		// so a post-crash bead whose last successful start was longer
+		// than the timeout ago is sweepable even when wake_attempts or
+		// churn_count are non-zero. The age bound mirrors
+		// staleCreatingState: a missing or zero creation_complete_at is
+		// treated as stale (sweepable) so beads without the per-start
+		// marker (older builds, manually repaired) stay recoverable.
 		if strings.TrimSpace(bead.Metadata["state"]) == "active" &&
 			strings.TrimSpace(bead.Metadata["last_woke_at"]) == "" &&
-			strings.TrimSpace(bead.Metadata["state_reason"]) == "creation_complete" &&
-			isZeroOrEmpty(bead.Metadata["wake_attempts"]) &&
-			isZeroOrEmpty(bead.Metadata["churn_count"]) &&
-			!isStaleCreating(bead.CreatedAt) {
-			continue
+			strings.TrimSpace(bead.Metadata["state_reason"]) == "creation_complete" {
+			if creationCompleteAt, ok := parseRFC3339Metadata(bead.Metadata["creation_complete_at"]); ok &&
+				time.Since(creationCompleteAt) < staleCreatingStateTimeout {
+				continue
+			}
 		}
 		template := normalizedSessionTemplate(bead, cfg)
 		agentCfg := findAgentByTemplate(cfg, template)
@@ -991,16 +992,6 @@ func sweepUndesiredPoolSessionBeads(
 		candidates = append(candidates, bead)
 	}
 	return len(GCSweepSessionBeads(store, candidates, assignedWorkBeads))
-}
-
-// isZeroOrEmpty reports whether a metadata counter is absent or explicitly "0".
-// Unexpected (non-zero, non-empty) content returns false, so the protective
-// post-create guard declines to apply and the bead remains sweepable — the
-// guard is only granted when we're certain no prior crash/churn cycle cleared
-// last_woke_at.
-func isZeroOrEmpty(v string) bool {
-	v = strings.TrimSpace(v)
-	return v == "" || v == "0"
 }
 
 // isStaleCreating mirrors staleCreatingState in session_reconcile.go without
@@ -1013,6 +1004,23 @@ func isStaleCreating(createdAt time.Time) bool {
 		return true
 	}
 	return time.Since(createdAt) >= staleCreatingStateTimeout
+}
+
+// parseRFC3339Metadata parses an RFC3339 timestamp metadata value. A missing
+// or unparseable value returns ok=false; the caller treats that as "no per-
+// start marker present" so older beads (pre-creation_complete_at rollout)
+// fall through to the default sweepable path rather than being protected
+// indefinitely.
+func parseRFC3339Metadata(v string) (time.Time, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {

@@ -163,10 +163,11 @@ func TestSweepUndesiredPoolSessionBeads_SkipsRecentlyCreated(t *testing.T) {
 			// Post-creating: state/state_reason are advanced but last_woke
 			// hasn't landed yet. The real-world state observed as being
 			// swept incorrectly.
-			"state":              "active",
-			"state_reason":       "creation_complete",
-			"continuation_epoch": "1",
-			"generation":         "1",
+			"state":                "active",
+			"state_reason":         "creation_complete",
+			"creation_complete_at": time.Now().UTC().Format(time.RFC3339),
+			"continuation_epoch":   "1",
+			"generation":           "1",
 		},
 	})
 	if err != nil {
@@ -236,9 +237,9 @@ func TestSweepUndesiredPoolSessionBeads_SweepsStaleCreatingState(t *testing.T) {
 	}
 }
 
-// Stale post-creating beads (state=active, last_woke_at="", CreatedAt older
-// than staleCreatingStateTimeout) MUST be sweepable. Without this, the grace
-// window would never expire.
+// Stale post-creating beads (state=active, last_woke_at="",
+// creation_complete_at older than staleCreatingStateTimeout) MUST be
+// sweepable. Without this, the grace window would never expire.
 func TestSweepUndesiredPoolSessionBeads_SweepsLongStuckActiveWithoutWake(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
@@ -253,6 +254,7 @@ func TestSweepUndesiredPoolSessionBeads_SweepsLongStuckActiveWithoutWake(t *test
 			poolManagedMetadataKey: boolMetadata(true),
 			"state":                "active",
 			"state_reason":         "creation_complete",
+			"creation_complete_at": time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339),
 			"continuation_epoch":   "1",
 			"generation":           "1",
 		},
@@ -260,7 +262,6 @@ func TestSweepUndesiredPoolSessionBeads_SweepsLongStuckActiveWithoutWake(t *test
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	bead.CreatedAt = time.Now().Add(-2 * time.Minute)
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
 
 	closed := sweepUndesiredPoolSessionBeads(
@@ -277,33 +278,24 @@ func TestSweepUndesiredPoolSessionBeads_SweepsLongStuckActiveWithoutWake(t *test
 	}
 }
 
-// Crashed beads (state=active, last_woke_at="" cleared by checkStability,
-// wake_attempts>=1) MUST be sweepable. The post-create grace window is
-// gated on no prior wake attempts; checkStability/checkChurn/start-failure
-// paths all increment wake_attempts or churn_count before clearing
-// last_woke_at, so a crashed bead cannot masquerade as post-create.
-func TestSweepUndesiredPoolSessionBeads_SweepsCrashedActiveBead(t *testing.T) {
+// Missing creation_complete_at (older beads predating the per-start marker,
+// or beads produced by paths that don't stamp the marker) MUST be sweepable
+// rather than protected indefinitely.
+func TestSweepUndesiredPoolSessionBeads_SweepsActiveWithoutCreationCompleteAt(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
 		Title:  "worker",
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel, "agent:worker"},
 		Metadata: map[string]string{
-			"session_name":         "worker-bd-crashed",
+			"session_name":         "worker-bd-no-marker",
 			"template":             "worker",
 			"agent_name":           "worker",
 			"pool_slot":            "1",
 			poolManagedMetadataKey: boolMetadata(true),
-			// Crashed-after-wake signature: state still active because the
-			// reconciler hasn't transitioned it yet, state_reason still
-			// "creation_complete" from the last successful start, but
-			// last_woke_at cleared by checkStability after recording a
-			// wake failure. The bead is young enough that the unguarded
-			// age check would protect it.
-			"state":              "active",
-			"state_reason":       "creation_complete",
-			"last_woke_at":       "",
-			"wake_attempts":      "1",
+			"state":                "active",
+			"state_reason":         "creation_complete",
+			// creation_complete_at intentionally absent.
 			"continuation_epoch": "1",
 			"generation":         "1",
 		},
@@ -323,27 +315,37 @@ func TestSweepUndesiredPoolSessionBeads_SweepsCrashedActiveBead(t *testing.T) {
 		false,
 	)
 	if closed != 1 {
-		t.Fatalf("closed = %d, want 1 — crashed bead (wake_attempts>0) must not be protected", closed)
+		t.Fatalf("closed = %d, want 1 — bead without creation_complete_at must be sweepable", closed)
 	}
 }
 
-// Churned beads (state=active, last_woke_at="" cleared by checkChurn,
-// churn_count>=1) MUST be sweepable for the same reason as crashed beads.
-func TestSweepUndesiredPoolSessionBeads_SweepsChurnedActiveBead(t *testing.T) {
+// Crashed-then-recently-restarted beads: wake_attempts/churn_count are
+// preserved across a successful restart (CommitStartedPatch does not reset
+// them), so the post-create guard CANNOT be keyed on those counters or a
+// legitimate restart after a prior crash would fall into the same spin
+// loop. Gating on a fresh creation_complete_at lets a just-restarted bead
+// survive the pre-wake window even when its historical counters are
+// non-zero.
+func TestSweepUndesiredPoolSessionBeads_SkipsFreshRestartAfterPriorCrash(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
 		Title:  "worker",
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel, "agent:worker"},
 		Metadata: map[string]string{
-			"session_name":         "worker-bd-churned",
+			"session_name":         "worker-bd-restart-after-crash",
 			"template":             "worker",
 			"agent_name":           "worker",
 			"pool_slot":            "1",
 			poolManagedMetadataKey: boolMetadata(true),
+			// Just-restarted after a prior crash: state transitioned back
+			// to active with a fresh creation_complete_at, but historical
+			// failure counters remain because clearWakeFailures only fires
+			// after the session is stable-long-enough.
 			"state":                "active",
 			"state_reason":         "creation_complete",
-			"last_woke_at":         "",
+			"creation_complete_at": time.Now().UTC().Format(time.RFC3339),
+			"wake_attempts":        "2",
 			"churn_count":          "1",
 			"continuation_epoch":   "1",
 			"generation":           "1",
@@ -363,8 +365,54 @@ func TestSweepUndesiredPoolSessionBeads_SweepsChurnedActiveBead(t *testing.T) {
 		runtime.NewFake(),
 		false,
 	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 — fresh restart after prior crash must survive the pre-wake window", closed)
+	}
+}
+
+// Crashed beads (state=active, last_woke_at="" cleared by checkStability,
+// creation_complete_at stale because the last successful start was long
+// ago) MUST be sweepable. checkStability/checkChurn/start-failure do not
+// touch creation_complete_at, so an old marker is the signal that the
+// state=active+empty-last_woke_at shape came from a crash-clear rather
+// than a fresh start.
+func TestSweepUndesiredPoolSessionBeads_SweepsCrashedActiveBead(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-crashed",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+			"state_reason":         "creation_complete",
+			"creation_complete_at": time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339),
+			"last_woke_at":         "",
+			"wake_attempts":        "1",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		nil,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		runtime.NewFake(),
+		false,
+	)
 	if closed != 1 {
-		t.Fatalf("closed = %d, want 1 — churned bead (churn_count>0) must not be protected", closed)
+		t.Fatalf("closed = %d, want 1 — crashed bead with stale creation_complete_at must be swept", closed)
 	}
 }
 

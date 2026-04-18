@@ -87,11 +87,15 @@ func ClearExpiredQuarantinePatch(sleepReason string) MetadataPatch {
 	return patch
 }
 
-// ConfirmStartedPatch records a confirmed runtime start.
-func ConfirmStartedPatch() MetadataPatch {
+// ConfirmStartedPatch records a confirmed runtime start. The timestamp pins
+// the "creation_complete" transition so downstream readers (e.g. the pool
+// bead sweep) can distinguish a just-committed start from a long-stable
+// bead whose last_woke_at was later cleared by crash/churn recovery.
+func ConfirmStartedPatch(now time.Time) MetadataPatch {
 	return MetadataPatch{
 		"state":                string(StateActive),
 		"state_reason":         "creation_complete",
+		"creation_complete_at": now.UTC().Format(time.RFC3339),
 		"pending_create_claim": "",
 		"sleep_reason":         "",
 	}
@@ -100,13 +104,15 @@ func ConfirmStartedPatch() MetadataPatch {
 // CommitStartedPatchInput describes metadata persisted after a runtime start
 // has completed. Hashes describe the runtime configuration that actually
 // launched; ConfirmState controls whether this start should stamp lifecycle
-// state active.
+// state active. Now is used to stamp creation_complete_at when ConfirmState
+// is true.
 type CommitStartedPatchInput struct {
 	CoreHash         string
 	LiveHash         string
 	CoreBreakdown    string
 	ConfirmState     bool
 	ClearSleepReason bool
+	Now              time.Time
 }
 
 // CommitStartedPatch records a successful runtime start atomically with the
@@ -123,6 +129,9 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	if input.ConfirmState {
 		patch["state"] = string(StateActive)
 		patch["state_reason"] = "creation_complete"
+		if !input.Now.IsZero() {
+			patch["creation_complete_at"] = input.Now.UTC().Format(time.RFC3339)
+		}
 	}
 	if input.ClearSleepReason {
 		patch["sleep_reason"] = ""

@@ -625,6 +625,7 @@ func commitStartResultTraced(
 		CoreBreakdown:    coreBreakdown,
 		ConfirmState:     confirmPendingStart(session.Metadata["state"]),
 		ClearSleepReason: session.Metadata["sleep_reason"] != "",
+		Now:              clk.Now(),
 	})
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
@@ -675,6 +676,7 @@ func recoverRunningPendingCreate(
 	tp TemplateParams,
 	cfg *config.City,
 	store beads.Store,
+	clk clock.Clock,
 	trace *sessionReconcilerTraceCycle,
 ) bool {
 	if session == nil || store == nil {
@@ -696,6 +698,10 @@ func recoverRunningPendingCreate(
 	if bdj, err := json.Marshal(prepared.coreBreakdown); err == nil {
 		coreBreakdown = string(bdj)
 	}
+	now := time.Time{}
+	if clk != nil {
+		now = clk.Now()
+	}
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
 		CoreHash:      prepared.coreHash,
 		LiveHash:      prepared.liveHash,
@@ -703,6 +709,7 @@ func recoverRunningPendingCreate(
 		ConfirmState: confirmPendingStart(session.Metadata["state"]) ||
 			sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) == sessionpkg.StateAwake,
 		ClearSleepReason: session.Metadata["sleep_reason"] != "",
+		Now:              now,
 	})
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		if trace != nil {
