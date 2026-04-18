@@ -199,6 +199,49 @@ func TestResolveWorkDir(t *testing.T) {
 	}
 }
 
+func TestCmdSessionNew_PoolTemplateUsesAliasBackedWorkDirIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writePoolSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	for _, alias := range []string{"demo/ant-fenrir", "demo/ant-grendel"} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := cmdSessionNew([]string{"demo/ant"}, alias, "", "", true, &stdout, &stderr); code != 0 {
+			t.Fatalf("cmdSessionNew(%q) = %d, want 0; stderr=%s", alias, code, stderr.String())
+		}
+	}
+
+	all := sessionBeads(t, cityDir)
+	if len(all) != 2 {
+		t.Fatalf("session beads = %d, want 2", len(all))
+	}
+
+	wantWorkDir := map[string]string{
+		"demo/ant-fenrir":  filepath.Join(cityDir, ".gc", "worktrees", "demo", "ants", "ant-fenrir"),
+		"demo/ant-grendel": filepath.Join(cityDir, ".gc", "worktrees", "demo", "ants", "ant-grendel"),
+	}
+	seenWorkDir := make(map[string]string, len(all))
+	for _, bead := range all {
+		alias := bead.Metadata["alias"]
+		want, ok := wantWorkDir[alias]
+		if !ok {
+			t.Fatalf("unexpected alias %q in bead metadata", alias)
+		}
+		if got := bead.Metadata["work_dir"]; got != want {
+			t.Fatalf("work_dir(%q) = %q, want %q", alias, got, want)
+		}
+		if otherAlias, collision := seenWorkDir[bead.Metadata["work_dir"]]; collision {
+			t.Fatalf("work_dir collision: %q and %q both use %q", otherAlias, alias, bead.Metadata["work_dir"])
+		}
+		seenWorkDir[bead.Metadata["work_dir"]] = alias
+	}
+}
+
 // NOTE: session kill is tested via internal/session.Manager.Kill which
 // delegates to Provider.Stop. The CLI layer (cmdSessionKill) is a thin
 // wrapper that resolves the session ID and calls mgr.Kill, so it does
@@ -783,7 +826,40 @@ template = "mayor"
 	}
 }
 
-func onlySessionBead(t *testing.T, cityDir string) beads.Bead {
+func writePoolSessionCityTOML(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	rigRoot := filepath.Join(dir, "repos", "demo")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig root): %v", err)
+	}
+	data := []byte(fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "demo"
+path = %q
+
+[[agent]]
+name = "ant"
+dir = "demo"
+provider = "codex"
+start_command = "echo"
+work_dir = ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}"
+min_active_sessions = 0
+max_active_sessions = 4
+`, rigRoot))
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), data, 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+}
+
+func sessionBeads(t *testing.T, cityDir string) []beads.Bead {
 	t.Helper()
 	store, err := openCityStoreAt(cityDir)
 	if err != nil {
@@ -793,6 +869,12 @@ func onlySessionBead(t *testing.T, cityDir string) beads.Bead {
 	if err != nil {
 		t.Fatalf("ListByLabel(session): %v", err)
 	}
+	return all
+}
+
+func onlySessionBead(t *testing.T, cityDir string) beads.Bead {
+	t.Helper()
+	all := sessionBeads(t, cityDir)
 	if len(all) != 1 {
 		t.Fatalf("session beads = %d, want 1", len(all))
 	}

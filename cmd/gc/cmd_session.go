@@ -185,7 +185,12 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	mgr := newSessionManager(store, sp)
 
 	// Build the work directory.
-	workDir, err := resolveWorkDir(cityPath, cfg, &found)
+	workDir, err := resolveWorkDirForQualifiedName(
+		cityPath,
+		cfg,
+		&found,
+		sessionWorkDirQualifiedName(cityPath, cfg, &found, alias),
+	)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1380,6 +1385,10 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, stdout, stderr i
 // resolveWorkDir determines the working directory for a session based on the
 // agent config. work_dir overrides dir, while dir still carries rig identity.
 func resolveWorkDir(cityPath string, cfg *config.City, agent *config.Agent) (string, error) {
+	return resolveWorkDirForQualifiedName(cityPath, cfg, agent, "")
+}
+
+func resolveWorkDirForQualifiedName(cityPath string, cfg *config.City, agent *config.Agent, qualifiedName string) (string, error) {
 	cityName := filepath.Base(cityPath)
 	if cfg != nil && cfg.Workspace.Name != "" {
 		cityName = cfg.Workspace.Name
@@ -1388,7 +1397,28 @@ func resolveWorkDir(cityPath string, cfg *config.City, agent *config.Agent) (str
 	if cfg != nil {
 		rigs = cfg.Rigs
 	}
-	return resolveConfiguredWorkDir(cityPath, cityName, agent, rigs)
+	return resolveConfiguredWorkDir(cityPath, cityName, qualifiedName, agent, rigs)
+}
+
+func sessionWorkDirQualifiedName(cityPath string, cfg *config.City, agent *config.Agent, alias string) string {
+	if agent == nil {
+		return ""
+	}
+	alias = strings.TrimSpace(alias)
+	if alias == "" || !isMultiSessionCfgAgent(agent) {
+		return agent.QualifiedName()
+	}
+	if strings.Contains(alias, "/") {
+		return alias
+	}
+	var rigs []config.Rig
+	if cfg != nil {
+		rigs = cfg.Rigs
+	}
+	if rigName := configuredRigName(cityPath, agent, rigs); rigName != "" {
+		return rigName + "/" + alias
+	}
+	return alias
 }
 
 func shouldAttachNewSession(noAttach bool, transport string) bool {

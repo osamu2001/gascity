@@ -850,11 +850,14 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 	}
 }
 
-func resolveConfiguredWorkDir(cityPath, cityName string, a *config.Agent, rigs []config.Rig) (string, error) {
+func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
 	if a == nil {
 		return resolveAgentDir(cityPath, "")
 	}
-	workDir, err := workdirutil.ResolveWorkDirPathStrict(cityPath, cityName, a.QualifiedName(), *a, rigs)
+	if strings.TrimSpace(qualifiedName) == "" {
+		qualifiedName = a.QualifiedName()
+	}
+	workDir, err := workdirutil.ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName, *a, rigs)
 	if err != nil {
 		return "", err
 	}

@@ -118,7 +118,7 @@ func materializeSessionForTemplateWithOptions(
 		if err != nil {
 			return "", err
 		}
-		workDir, err := resolveWorkDir(cityPath, cfg, spec.Agent)
+		workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, spec.Agent, spec.Identity)
 		if err != nil {
 			return "", err
 		}
