@@ -1241,7 +1241,7 @@ func mergeEnv(base, override map[string]string) map[string]string {
 	if len(base) == 0 && len(override) == 0 {
 		return nil
 	}
-	merged := make(map[string]string, len(base)+len(override))
+	merged := make(map[string]string)
 	for k, v := range base {
 		merged[k] = v
 	}
