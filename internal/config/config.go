@@ -1181,6 +1181,11 @@ type DaemonConfig struct {
 	// cold-start ~60s) where the default of 5 starves the rest of the
 	// candidate queue for minutes. Nil (unset) defaults to 5. Values <= 0
 	// are treated as the default — set a positive integer to override.
+	//
+	// Tradeoff: the default of 5 also bounds the process-spawn burst after a
+	// controller restart (thundering-herd protection). Raising it trades
+	// restart burst for steady-state throughput; keep within what the host
+	// can absorb.
 	MaxWakesPerTick *int `toml:"max_wakes_per_tick,omitempty" jsonschema:"default=5"`
 }
 

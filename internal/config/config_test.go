@@ -2262,6 +2262,59 @@ name = "mayor"
 	}
 }
 
+// --- MaxWakesPerTick tests ---
+
+func TestDaemonConfig_MaxWakesPerTickOrDefault(t *testing.T) {
+	zero := 0
+	neg := -3
+	pos := 20
+	cases := []struct {
+		name  string
+		field *int
+		want  int
+	}{
+		{"nil returns default", nil, DefaultMaxWakesPerTick},
+		{"zero returns default", &zero, DefaultMaxWakesPerTick},
+		{"negative returns default", &neg, DefaultMaxWakesPerTick},
+		{"positive returns value", &pos, 20},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := DaemonConfig{MaxWakesPerTick: tc.field}
+			got := d.MaxWakesPerTickOrDefault()
+			if got != tc.want {
+				t.Errorf("MaxWakesPerTickOrDefault() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseMaxWakesPerTick(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+max_wakes_per_tick = 15
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.MaxWakesPerTick == nil {
+		t.Fatal("Daemon.MaxWakesPerTick is nil, want 15")
+	}
+	if *cfg.Daemon.MaxWakesPerTick != 15 {
+		t.Errorf("Daemon.MaxWakesPerTick = %d, want 15", *cfg.Daemon.MaxWakesPerTick)
+	}
+	if got := cfg.Daemon.MaxWakesPerTickOrDefault(); got != 15 {
+		t.Errorf("MaxWakesPerTickOrDefault() = %d, want 15", got)
+	}
+}
+
 // --- DrainTimeout tests ---
 
 func TestDrainTimeoutDefault(t *testing.T) {
