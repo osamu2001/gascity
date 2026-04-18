@@ -56,6 +56,35 @@ func TestResolveWorkDirPathUsesPoolInstanceBase(t *testing.T) {
 	}
 }
 
+func TestSessionQualifiedNameCanonicalizesBareAndQualifiedPoolAliases(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	agent := config.Agent{
+		Name:              "polecat",
+		Dir:               "demo",
+		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+	}
+
+	bare := SessionQualifiedName(cityPath, agent, rigs, "polecat-fenrir", "")
+	qualified := SessionQualifiedName(cityPath, agent, rigs, "demo/polecat-fenrir", "")
+	if bare != "demo/polecat-fenrir" {
+		t.Fatalf("SessionQualifiedName(bare) = %q, want %q", bare, "demo/polecat-fenrir")
+	}
+	if qualified != bare {
+		t.Fatalf("SessionQualifiedName(qualified) = %q, want %q", qualified, bare)
+	}
+}
+
+func TestSessionQualifiedNameKeepsSingletonTemplateIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	agent := config.Agent{Name: "witness", Dir: "demo", MaxActiveSessions: intPtr(1)}
+
+	if got := SessionQualifiedName(cityPath, agent, rigs, "demo/boot", ""); got != "demo/witness" {
+		t.Fatalf("SessionQualifiedName() = %q, want %q", got, "demo/witness")
+	}
+}
+
 func TestCityNameFallsBackToCityDirBase(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "city-root")
 	got := CityName(cityPath, &config.City{})

@@ -80,6 +80,32 @@ func ValidateExplicitName(name string) (string, error) {
 	return name, nil
 }
 
+// GenerateAdhocExplicitName produces a tmux-safe explicit session name for
+// multi-session templates that are materialized without a user alias.
+func GenerateAdhocExplicitName(base string) (string, error) {
+	token, err := GenerateSessionKey()
+	if err != nil {
+		return "", fmt.Errorf("generate pooled session identity: %w", err)
+	}
+	compact := strings.ReplaceAll(token, "-", "")
+	if len(compact) > 10 {
+		compact = compact[:10]
+	}
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "session"
+	}
+	suffix := "-adhoc-" + compact
+	maxBaseLen := explicitSessionNameMaxLen - len(suffix)
+	if maxBaseLen < 1 {
+		maxBaseLen = 1
+	}
+	if len(base) > maxBaseLen {
+		base = base[:maxBaseLen]
+	}
+	return ValidateExplicitName(base + suffix)
+}
+
 // ValidateAlias validates a human-chosen session alias. Empty means
 // "no alias".
 func ValidateAlias(alias string) (string, error) {

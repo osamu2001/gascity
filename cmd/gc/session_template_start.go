@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 var errTemplateTargetNotFound = errors.New("template target not found")
@@ -118,7 +119,8 @@ func materializeSessionForTemplateWithOptions(
 		if err != nil {
 			return "", err
 		}
-		workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, spec.Agent, spec.Identity)
+		workDirQualifiedName := workdirutil.SessionQualifiedName(cityPath, *spec.Agent, cfg.Rigs, spec.Identity, "")
+		workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, spec.Agent, workDirQualifiedName)
 		if err != nil {
 			return "", err
 		}
@@ -280,7 +282,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		cityPath,
 		cfg,
 		agentCfg,
-		sessionWorkDirQualifiedName(cityPath, cfg, agentCfg, "", explicitName),
+		workdirutil.SessionQualifiedName(cityPath, *agentCfg, cfg.Rigs, "", explicitName),
 	)
 	if err != nil {
 		return "", err

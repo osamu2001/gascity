@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 const (
@@ -202,6 +203,11 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 	}
 
 	resolved, workDir, transport, qualifiedTemplate, err := s.resolveSessionTemplate(spec.Agent.QualifiedName())
+	if err != nil {
+		return "", err
+	}
+	workDirQualifiedName := workdirutil.SessionQualifiedName(s.state.CityPath(), *spec.Agent, s.state.Config().Rigs, spec.Identity, "")
+	workDir, err = s.resolveSessionWorkDir(*spec.Agent, workDirQualifiedName)
 	if err != nil {
 		return "", err
 	}

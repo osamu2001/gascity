@@ -1415,6 +1415,7 @@ func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t
 		Agents: []config.Agent{{
 			Name:              "worker",
 			BindingName:       "ops",
+			WorkDir:           ".gc/worktrees/{{.AgentBase}}",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(2),
 			ScaleCheck:        "printf 1",
@@ -1444,6 +1445,10 @@ func TestBuildDesiredState_StoreBackedPoolUsesQualifiedInstanceNameForBindings(t
 	}
 	if got.Env["GC_AGENT"] != wantInstance {
 		t.Fatalf("GC_AGENT = %q, want %q", got.Env["GC_AGENT"], wantInstance)
+	}
+	wantWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "ops.worker-1")
+	if got.WorkDir != wantWorkDir {
+		t.Fatalf("WorkDir = %q, want %q", got.WorkDir, wantWorkDir)
 	}
 }
 

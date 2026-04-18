@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/spf13/cobra"
 )
 
@@ -174,6 +175,9 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if alias != "" {
+		alias = workdirutil.SessionQualifiedName(cityPath, found, cfg.Rigs, alias, "")
+	}
 	explicitName, err := sessionExplicitNameForNewSession(&found, alias)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -194,7 +198,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		cityPath,
 		cfg,
 		&found,
-		sessionWorkDirQualifiedName(cityPath, cfg, &found, alias, explicitName),
+		workdirutil.SessionQualifiedName(cityPath, found, cfg.Rigs, alias, explicitName),
 	)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1405,59 +1409,11 @@ func resolveWorkDirForQualifiedName(cityPath string, cfg *config.City, agent *co
 	return resolveConfiguredWorkDir(cityPath, cityName, qualifiedName, agent, rigs)
 }
 
-func sessionWorkDirQualifiedName(cityPath string, cfg *config.City, agent *config.Agent, alias, explicitName string) string {
-	if agent == nil {
-		return ""
-	}
-	alias = strings.TrimSpace(alias)
-	if !isMultiSessionCfgAgent(agent) {
-		return agent.QualifiedName()
-	}
-	identity := alias
-	if identity == "" {
-		identity = strings.TrimSpace(explicitName)
-	}
-	if identity == "" {
-		return agent.QualifiedName()
-	}
-	if strings.Contains(identity, "/") {
-		return identity
-	}
-	var rigs []config.Rig
-	if cfg != nil {
-		rigs = cfg.Rigs
-	}
-	if rigName := configuredRigName(cityPath, agent, rigs); rigName != "" {
-		return rigName + "/" + identity
-	}
-	return identity
-}
-
 func sessionExplicitNameForNewSession(agent *config.Agent, alias string) (string, error) {
 	if agent == nil || !isMultiSessionCfgAgent(agent) || strings.TrimSpace(alias) != "" {
 		return "", nil
 	}
-	token, err := session.GenerateSessionKey()
-	if err != nil {
-		return "", fmt.Errorf("generate pooled session identity: %w", err)
-	}
-	compact := strings.ReplaceAll(token, "-", "")
-	if len(compact) > 10 {
-		compact = compact[:10]
-	}
-	base := strings.TrimSpace(agent.Name)
-	if base == "" {
-		base = "session"
-	}
-	suffix := "-adhoc-" + compact
-	maxBaseLen := 64 - len(suffix)
-	if maxBaseLen < 1 {
-		maxBaseLen = 1
-	}
-	if len(base) > maxBaseLen {
-		base = base[:maxBaseLen]
-	}
-	return session.ValidateExplicitName(base + suffix)
+	return session.GenerateAdhocExplicitName(agent.Name)
 }
 
 func shouldAttachNewSession(noAttach bool, transport string) bool {

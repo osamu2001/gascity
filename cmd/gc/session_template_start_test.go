@@ -172,3 +172,46 @@ func TestEnsureSessionForTemplate_PoolTemplateWithoutAliasUsesGeneratedWorkDirId
 		seenWorkDir[workDir] = true
 	}
 }
+
+func TestEnsureSessionForTemplate_RebrandedSingletonKeepsTemplateWorkDirIdentity(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		Agents: []config.Agent{{
+			Name:              "witness",
+			Dir:               "demo",
+			StartCommand:      "true",
+			WorkDir:           ".gc/worktrees/{{.Rig}}/{{.AgentBase}}",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "boot",
+			Template: "witness",
+			Dir:      "demo",
+		}},
+	}
+	store := beads.NewMemStore()
+
+	sessionName, err := ensureSessionForTemplate(cityPath, cfg, store, "demo/boot", io.Discard)
+	if err != nil {
+		t.Fatalf("ensureSessionForTemplate = %v", err)
+	}
+	if sessionName == "" {
+		t.Fatal("session name should be populated")
+	}
+
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("session bead count = %d, want 1", len(all))
+	}
+	wantWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "demo", "witness")
+	if got := all[0].Metadata["work_dir"]; got != wantWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, wantWorkDir)
+	}
+}

@@ -242,6 +242,37 @@ func TestCmdSessionNew_PoolTemplateUsesAliasBackedWorkDirIdentity(t *testing.T) 
 	}
 }
 
+func TestCmdSessionNew_PoolTemplateCanonicalizesQualifiedAliasCollisions(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writePoolSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(first) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdSessionNew([]string{"demo/ant"}, "demo/ant-fenrir", "", "", true, &stdout, &stderr); code == 0 {
+		t.Fatal("cmdSessionNew(second) = 0, want alias conflict")
+	}
+	if !strings.Contains(stderr.String(), session.ErrSessionAliasExists.Error()) {
+		t.Fatalf("stderr = %q, want alias conflict", stderr.String())
+	}
+
+	all := sessionBeads(t, cityDir)
+	if len(all) != 1 {
+		t.Fatalf("session beads = %d, want 1", len(all))
+	}
+	if got := all[0].Metadata["alias"]; got != "demo/ant-fenrir" {
+		t.Fatalf("alias = %q, want canonical qualified alias", got)
+	}
+}
+
 func TestCmdSessionNew_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
