@@ -48,12 +48,22 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
 	return worker.NewFactory(worker.FactoryConfig{
-		Store:            store,
-		Provider:         sp,
-		CityPath:         cityPath,
-		SearchPaths:      searchPaths,
-		ResolveTransport: resolveTransport,
+		Store:               store,
+		Provider:            sp,
+		CityPath:            cityPath,
+		SearchPaths:         searchPaths,
+		ResolveTransport:    resolveTransport,
+		DecorateSessionSpec: workerSessionSpecDecoratorWithConfig(cityPath, cfg),
 	})
+}
+
+func workerSessionSpecDecoratorWithConfig(cityPath string, cfg *config.City) worker.SessionSpecDecorator {
+	if cfg == nil {
+		return nil
+	}
+	return func(info session.Info, sessionKind string, spec *worker.SessionSpec) {
+		applyResolvedWorkerRuntimeWithConfig(cityPath, cfg, info, sessionKind, spec)
+	}
 }
 
 func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config {
@@ -115,42 +125,11 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 }
 
 func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
-	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
-	if err != nil {
-		return nil, err
-	}
-	info, err := catalog.Get(id)
-	if err != nil {
-		return nil, err
-	}
-
-	sessionKind := ""
-	spec := worker.SessionSpec{
-		ID:       id,
-		Command:  info.Command,
-		Provider: info.Provider,
-		WorkDir:  info.WorkDir,
-		Resume: session.ProviderResume{
-			ResumeFlag:    info.ResumeFlag,
-			ResumeStyle:   info.ResumeStyle,
-			ResumeCommand: info.ResumeCommand,
-		},
-	}
-	if store != nil {
-		if bead, beadErr := store.Get(id); beadErr == nil {
-			sessionKind = strings.TrimSpace(bead.Metadata["mc_session_kind"])
-			if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
-				spec.Profile = worker.Profile(profile)
-			}
-		}
-	}
-	applyResolvedWorkerRuntimeWithConfig(cityPath, cfg, info, sessionKind, &spec)
-
 	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return factory.Session(spec)
+	return factory.SessionByID(id)
 }
 
 func workerHandleForSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (worker.Handle, error) {
@@ -158,33 +137,11 @@ func workerHandleForSessionTargetWithConfig(cityPath string, store beads.Store, 
 }
 
 func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.Handle, error) {
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return nil, session.ErrSessionNotFound
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return nil, err
 	}
-	if store != nil {
-		if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
-			return workerHandleForSessionWithConfig(cityPath, store, sp, cfg, id)
-		}
-		id, err := session.ResolveSessionID(store, target)
-		if err == nil {
-			return workerHandleForSessionWithConfig(cityPath, store, sp, cfg, id)
-		}
-		if sp != nil {
-			if sessionID, metaErr := sp.GetMeta(target, "GC_SESSION_ID"); metaErr == nil && strings.TrimSpace(sessionID) != "" {
-				return workerHandleForSessionWithConfig(cityPath, store, sp, cfg, strings.TrimSpace(sessionID))
-			}
-		}
-	}
-	if sp == nil {
-		return nil, session.ErrSessionNotFound
-	}
-	return worker.NewRuntimeHandle(worker.RuntimeHandleConfig{
-		Provider:     sp,
-		SessionName:  target,
-		ProviderName: target,
-		ProcessNames: append([]string(nil), processNames...),
-	})
+	return factory.HandleForTarget(target, processNames)
 }
 
 func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {

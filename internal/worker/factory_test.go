@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func TestFactorySessionAndCatalogShareWorkerBoundary(t *testing.T) {
@@ -111,5 +112,129 @@ func TestFactoryTranscriptMethodsUseConfiguredSearchPaths(t *testing.T) {
 	}
 	if meta == nil || meta.Model != "claude-opus-4-5-20251101" {
 		t.Fatalf("TailMeta(%q) = %#v, want model claude-opus-4-5-20251101", transcriptPath, meta)
+	}
+}
+
+func TestFactorySessionByIDDecoratesSessionSpec(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	manager := sessionpkg.NewManager(store, sp)
+
+	info, err := manager.CreateBeadOnly(
+		"worker",
+		"Probe",
+		"",
+		t.TempDir(),
+		"legacy-provider",
+		"",
+		nil,
+		sessionpkg.ProviderResume{SessionIDFlag: "--stale-session-id"},
+	)
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "mc_session_kind", "provider"); err != nil {
+		t.Fatalf("SetMetadata(mc_session_kind): %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "worker_profile", string(ProfileClaudeTmuxCLI)); err != nil {
+		t.Fatalf("SetMetadata(worker_profile): %v", err)
+	}
+
+	var gotSessionKind string
+	var gotProfile Profile
+	factory, err := NewFactory(FactoryConfig{
+		Store:    store,
+		Provider: sp,
+		DecorateSessionSpec: func(_ sessionpkg.Info, sessionKind string, spec *SessionSpec) {
+			gotSessionKind = sessionKind
+			gotProfile = spec.Profile
+			spec.Command = "/bin/echo"
+			spec.Provider = "stub"
+			spec.Resume = sessionpkg.ProviderResume{SessionIDFlag: "--session-id"}
+			spec.Hints = runtime.Config{
+				ReadyPromptPrefix: "stub-ready>",
+				ReadyDelayMs:      250,
+			}
+			spec.Env = map[string]string{"STUB_ENV": "present"}
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	handle, err := factory.SessionByID(info.ID)
+	if err != nil {
+		t.Fatalf("SessionByID(%q): %v", info.ID, err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if gotSessionKind != "provider" {
+		t.Fatalf("sessionKind = %q, want provider", gotSessionKind)
+	}
+	if gotProfile != ProfileClaudeTmuxCLI {
+		t.Fatalf("profile = %q, want %q", gotProfile, ProfileClaudeTmuxCLI)
+	}
+	start := sp.LastStartConfig(info.SessionName)
+	if start == nil {
+		t.Fatal("LastStartConfig() = nil")
+	}
+	wantArg := "--session-id " + info.SessionKey
+	if got := start.Command; got != "/bin/echo "+wantArg {
+		t.Fatalf("start command = %q, want %q", got, "/bin/echo "+wantArg)
+	}
+	if got := start.ReadyPromptPrefix; got != "stub-ready>" {
+		t.Fatalf("ReadyPromptPrefix = %q, want stub-ready>", got)
+	}
+	if got := start.ReadyDelayMs; got != 250 {
+		t.Fatalf("ReadyDelayMs = %d, want 250", got)
+	}
+	if got := start.Env["STUB_ENV"]; got != "present" {
+		t.Fatalf("Env[STUB_ENV] = %q, want present", got)
+	}
+}
+
+func TestFactoryHandleForTargetResolvesRuntimeSessionMeta(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	manager := sessionpkg.NewManager(store, sp)
+
+	info, err := manager.Create(
+		context.Background(),
+		"worker",
+		"Probe",
+		"",
+		t.TempDir(),
+		"stub",
+		nil,
+		sessionpkg.ProviderResume{},
+		runtime.Config{},
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := sp.SetMeta("legacy-runtime-name", "GC_SESSION_ID", info.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	factory, err := NewFactory(FactoryConfig{
+		Store:    store,
+		Provider: sp,
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	handle, err := factory.HandleForTarget("legacy-runtime-name", nil)
+	if err != nil {
+		t.Fatalf("HandleForTarget: %v", err)
+	}
+	if err := handle.Kill(context.Background()); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	last := sp.Calls[len(sp.Calls)-1]
+	if last.Method != "Stop" || last.Name != info.SessionName {
+		t.Fatalf("last runtime call = %#v, want Stop %q", last, info.SessionName)
 	}
 }

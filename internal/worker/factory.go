@@ -2,27 +2,36 @@ package worker
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
+// SessionSpecDecorator enriches a session-backed worker spec with caller-owned
+// resolution logic such as provider defaults or runtime hints.
+type SessionSpecDecorator func(info sessionpkg.Info, sessionKind string, spec *SessionSpec)
+
 // FactoryConfig constructs worker-owned session handles and catalogs without
 // leaking session.Manager setup into higher layers.
 type FactoryConfig struct {
-	Store            beads.Store
-	Provider         runtime.Provider
-	CityPath         string
-	SearchPaths      []string
-	ResolveTransport func(template string) string
+	Store               beads.Store
+	Provider            runtime.Provider
+	CityPath            string
+	SearchPaths         []string
+	ResolveTransport    func(template string) string
+	DecorateSessionSpec SessionSpecDecorator
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
 // the API server and gc CLI.
 type Factory struct {
-	manager     *sessionpkg.Manager
-	searchPaths []string
+	manager             *sessionpkg.Manager
+	store               beads.Store
+	provider            runtime.Provider
+	searchPaths         []string
+	decorateSessionSpec SessionSpecDecorator
 }
 
 // NewFactory constructs a Factory backed by a session.Manager configured for
@@ -37,18 +46,25 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	default:
 		manager = sessionpkg.NewManager(cfg.Store, cfg.Provider)
 	}
-	return NewFactoryFromManager(manager, cfg.SearchPaths)
+	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.DecorateSessionSpec)
 }
 
 // NewFactoryFromManager wraps an already-constructed session manager behind the
 // worker boundary. Primarily useful in tests.
 func NewFactoryFromManager(manager *sessionpkg.Manager, searchPaths []string) (*Factory, error) {
+	return newFactory(manager, nil, nil, searchPaths, nil)
+}
+
+func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime.Provider, searchPaths []string, decorate SessionSpecDecorator) (*Factory, error) {
 	if manager == nil {
 		return nil, fmt.Errorf("%w: manager is required", ErrHandleConfig)
 	}
 	return &Factory{
-		manager:     manager,
-		searchPaths: append([]string(nil), searchPaths...),
+		manager:             manager,
+		store:               store,
+		provider:            provider,
+		searchPaths:         append([]string(nil), searchPaths...),
+		decorateSessionSpec: decorate,
 	}, nil
 }
 
@@ -65,6 +81,71 @@ func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 		Manager:     f.manager,
 		SearchPaths: append([]string(nil), f.searchPaths...),
 		Session:     spec,
+	})
+}
+
+// SessionByID rebuilds a session-backed worker handle from persisted session
+// metadata and the factory's optional spec decorator.
+func (f *Factory) SessionByID(id string) (Handle, error) {
+	info, err := f.manager.Get(id)
+	if err != nil {
+		return nil, err
+	}
+
+	spec := SessionSpec{
+		ID:       id,
+		Command:  info.Command,
+		Provider: info.Provider,
+		WorkDir:  info.WorkDir,
+		Resume: sessionpkg.ProviderResume{
+			ResumeFlag:    info.ResumeFlag,
+			ResumeStyle:   info.ResumeStyle,
+			ResumeCommand: info.ResumeCommand,
+		},
+	}
+	sessionKind := ""
+	if f.store != nil {
+		if bead, beadErr := f.store.Get(id); beadErr == nil {
+			sessionKind = strings.TrimSpace(bead.Metadata["mc_session_kind"])
+			if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
+				spec.Profile = Profile(profile)
+			}
+		}
+	}
+	if f.decorateSessionSpec != nil {
+		f.decorateSessionSpec(info, sessionKind, &spec)
+	}
+	return f.Session(spec)
+}
+
+// HandleForTarget resolves a session target to a session-backed worker when
+// possible, falling back to a runtime-only handle for legacy live sessions.
+func (f *Factory) HandleForTarget(target string, processNames []string) (Handle, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, sessionpkg.ErrSessionNotFound
+	}
+	if f.store != nil {
+		if id, err := sessionpkg.ResolveSessionIDByExactID(f.store, target); err == nil {
+			return f.SessionByID(id)
+		}
+		if id, err := sessionpkg.ResolveSessionID(f.store, target); err == nil {
+			return f.SessionByID(id)
+		}
+		if f.provider != nil {
+			if sessionID, err := f.provider.GetMeta(target, "GC_SESSION_ID"); err == nil && strings.TrimSpace(sessionID) != "" {
+				return f.SessionByID(strings.TrimSpace(sessionID))
+			}
+		}
+	}
+	if f.provider == nil {
+		return nil, sessionpkg.ErrSessionNotFound
+	}
+	return NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     f.provider,
+		SessionName:  target,
+		ProviderName: target,
+		ProcessNames: append([]string(nil), processNames...),
 	})
 }
 
