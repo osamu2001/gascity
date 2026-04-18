@@ -108,8 +108,9 @@ func newSessionNewCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "new <template>",
 		Short: "Create a new chat session from an agent template",
-		Long: `Create a new persistent conversation from an agent template defined in
-city.toml. By default, attaches the terminal after creation.
+		Long: `Create a new persistent conversation from an agent template defined
+in the loaded city configuration. By default, attaches the terminal
+after creation.
 
 When --title-hint is provided without --title, the session title is
 auto-generated from the hint text: a short version is set immediately

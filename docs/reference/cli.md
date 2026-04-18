@@ -1954,8 +1954,9 @@ gc session logs mayor
 
 ## gc session new
 
-Create a new persistent conversation from an agent template defined in
-city.toml. By default, attaches the terminal after creation.
+Create a new persistent conversation from an agent template defined
+in the loaded city configuration. By default, attaches the terminal
+after creation.
 
 When --title-hint is provided without --title, the session title is
 auto-generated from the hint text: a short version is set immediately
@@ -2585,3 +2586,4 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
+
