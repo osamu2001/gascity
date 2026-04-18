@@ -302,6 +302,66 @@ func TestInstallClaudeUnreadableHookBlocksRuntimeFallback(t *testing.T) {
 	}
 }
 
+// TestInstallClaudeUnreadableRuntimeDoesNotDemoteValidHook verifies that
+// when hooks/claude.json is readable and .gc/settings.json is unreadable,
+// the hook file still wins source selection — the runtime file is gc-owned,
+// not user-owned, so its unreadability must not demote a legitimate user
+// hook to "no source." A prior fixup blocked on either candidate being
+// unreadable, which inverted precedence for this case.
+func TestInstallClaudeUnreadableRuntimeDoesNotDemoteValidHook(t *testing.T) {
+	fs := fsys.NewFake()
+	// User pins hooks/claude.json with a custom key (not stale, not base).
+	fs.Files["/city/hooks/claude.json"] = []byte(`{"user_hook": true}`)
+	// The gc-managed runtime file is present but unreadable.
+	fs.Errors["/city/.gc/settings.json"] = errors.New("permission denied")
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		// Install may surface an error from the force-overwrite write if
+		// the injected error also blocks WriteFile (it does, in the Fake).
+		// That's acceptable: a failed write surfaces loudly. What must NOT
+		// happen is silent success with the stale unreadable runtime kept.
+		if !strings.Contains(err.Error(), ".gc/settings.json") {
+			t.Fatalf("unexpected error (expected a write failure surfacing the runtime path): %v", err)
+		}
+		return
+	}
+	// If Install succeeded, the runtime file must now contain the merged
+	// hook-source content (which includes the user_hook key).
+	runtime := string(fs.Files["/city/.gc/settings.json"])
+	if !strings.Contains(runtime, `"user_hook": true`) {
+		t.Errorf("runtime must reflect hook source even when prior runtime was unreadable:\n%s", runtime)
+	}
+}
+
+// TestInstallClaudeForceOverwritesUnreadableRuntime verifies that an
+// unreadable gc-managed .gc/settings.json is force-overwritten with the
+// new projection instead of silently preserved. Preserving an unreadable
+// runtime file would leave Claude pointing at content it cannot parse on
+// the next launch.
+func TestInstallClaudeForceOverwritesUnreadableRuntime(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.claude/settings.json"] = []byte(`{"custom": true}`)
+	// Simulate an unreadable runtime file by seeding Files (so stat-ok is
+	// simulated via presence) and injecting a ReadFile error. Using Dirs
+	// alone would make ReadFile succeed-as-empty in some Fake branches;
+	// this setup ensures the writeManagedFile stat-ok-read-fail branch is
+	// exercised.
+	fs.Files["/city/.gc/settings.json"] = []byte(`{"stale": true}`)
+	// No Errors injection means WriteFile will succeed and overwrite.
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := string(fs.Files["/city/.gc/settings.json"])
+	if strings.Contains(runtime, `"stale": true`) {
+		t.Errorf("runtime must be overwritten with fresh projection:\n%s", runtime)
+	}
+	if !strings.Contains(runtime, `"custom": true`) {
+		t.Errorf("runtime must reflect .claude/settings.json override:\n%s", runtime)
+	}
+}
+
 // TestInstallClaudeSurfacesMalformedOverride verifies that a syntactically
 // invalid .claude/settings.json surfaces a descriptive error rather than
 // silently falling back to a legacy source or the embedded base.

@@ -120,12 +120,30 @@ func installClaude(fs fsys.FS, cityDir string) error {
 	}
 
 	if sourceKind == claudeSettingsSourceLegacyHook || hookFileSafeToRewrite(fs, hookDst) {
-		if err := writeManagedFile(fs, hookDst, data); err != nil {
+		if err := writeManagedFile(fs, hookDst, data, preserveUnreadable); err != nil {
 			return err
 		}
 	}
-	return writeManagedFile(fs, runtimeDst, data)
+	// The runtime file is gc-owned: if existing content is unreadable (bad
+	// perms, i/o error), force an overwrite rather than silently preserving
+	// a stale blob Claude can't parse. If the write itself fails, surface
+	// the error so the caller can fail agent creation loudly instead of
+	// launching with a broken --settings path.
+	return writeManagedFile(fs, runtimeDst, data, forceOverwrite)
 }
+
+type writeManagedFilePolicy int
+
+const (
+	// preserveUnreadable leaves a stat-ok-but-read-fails file in place.
+	// Used for user-owned paths (hooks/claude.json) where clobbering an
+	// unreadable file could lose user-authored content.
+	preserveUnreadable writeManagedFilePolicy = iota
+	// forceOverwrite attempts to write the new content even when the
+	// existing file is unreadable. Used for gc-managed paths (.gc/settings.json)
+	// where the file's content is gc's responsibility.
+	forceOverwrite
+)
 
 // hookFileSafeToRewrite reports whether hooks/claude.json can be safely
 // overwritten by installClaude without clobbering user-owned content. It is
@@ -207,17 +225,21 @@ func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string
 	}
 
 	// Legacy candidates. A genuinely missing file is fine — fall through.
-	// An exists-but-unreadable file (bad perms, i/o error) must NOT silently
-	// demote to a lower-priority source, or a stale .gc/settings.json could
-	// override a user-owned hooks/claude.json that gc simply couldn't read
-	// this tick. Use embedded base defaults instead so the agent still
-	// launches without surfacing leftover runtime state.
+	// An exists-but-unreadable hooks/claude.json must NOT silently demote
+	// to .gc/settings.json, or a stale runtime file could override a
+	// user-owned hook file that gc simply couldn't read this tick. Fall
+	// back to embedded base defaults instead.
+	//
+	// An unreadable .gc/settings.json does NOT block hook precedence —
+	// the runtime file is gc-managed, not user-owned, so treating it as
+	// "missing" when unreadable is equivalent to "gc will overwrite
+	// whatever's there." A valid hooks/claude.json should still win.
 	hookPath := citylayout.ClaudeHookFilePath(cityDir)
 	runtimePath := filepath.Join(cityDir, ".gc", "settings.json")
 	hookState, hookData, _ := readClaudeSettingsCandidate(fs, hookPath)
 	runtimeState, runtimeData, _ := readClaudeSettingsCandidate(fs, runtimePath)
 
-	if hookState == candidateUnreadable || runtimeState == candidateUnreadable {
+	if hookState == candidateUnreadable {
 		return "", nil, claudeSettingsSourceNone, nil
 	}
 
@@ -271,13 +293,15 @@ func readClaudeSettingsCandidate(fs fsys.FS, path string) (claudeCandidateState,
 	return candidateUnreadable, nil, err
 }
 
-func writeManagedFile(fs fsys.FS, dst string, data []byte) error {
+func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFilePolicy) error {
 	if existing, err := fs.ReadFile(dst); err == nil {
 		if bytes.Equal(existing, data) {
 			return nil
 		}
-	} else if _, statErr := fs.Stat(dst); statErr == nil {
-		// File exists but isn't readable. Preserve it rather than clobbering it.
+	} else if _, statErr := fs.Stat(dst); statErr == nil && policy == preserveUnreadable {
+		// File exists but isn't readable. For user-owned paths, preserve
+		// rather than clobbering. gc-owned paths fall through and attempt
+		// the write (a write failure surfaces an error to the caller).
 		return nil
 	}
 
