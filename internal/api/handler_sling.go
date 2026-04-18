@@ -50,7 +50,22 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Scope fields are consulted for target qualification before the other
+	// validation below, so trim them eagerly. The semantic checks happen
+	// further down once all other fields are known.
+	body.ScopeKind = strings.TrimSpace(body.ScopeKind)
+	body.ScopeRef = strings.TrimSpace(body.ScopeRef)
+
 	cfg := s.state.Config()
+
+	// UI dispatches carry scope_kind/scope_ref but not the CLI's ambient
+	// rig directory. Dashboard dispatches use body.Rig (from --rig=X).
+	// Apply the same rig-prefixing convention for either so a bare
+	// target resolves to the rig-scoped agent. Keeps formulas generic
+	// (bare assignees) while routing to the correct rig-local beads
+	// and worktree context.
+	body.Target = qualifySlingTarget(cfg, body.Target, slingRigContext(body))
+
 	agentCfg, ok := findAgent(cfg, body.Target)
 	if !ok {
 		writeError(w, http.StatusNotFound, "not_found", "target "+body.Target+" not found")
@@ -70,8 +85,6 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body.ScopeKind = strings.TrimSpace(body.ScopeKind)
-	body.ScopeRef = strings.TrimSpace(body.ScopeRef)
 	workflowLaunchOptions := body.AttachedBeadID != "" ||
 		len(body.Vars) > 0 ||
 		body.Title != "" ||
@@ -97,6 +110,36 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 	if body.ScopeKind != "" && body.ScopeKind != "city" && body.ScopeKind != "rig" {
 		writeError(w, http.StatusBadRequest, "invalid", "scope_kind must be 'city' or 'rig'")
 		return
+	}
+
+	// Reject contradictory rig inputs. When scope_kind=rig, the
+	// sling operation's effective rig must agree across every input
+	// that drives routing or storage, because downstream:
+	//   - findSlingStore picks the store from body.Rig → agentCfg.Dir → city
+	//   - FormulaOpts.ScopeRef flows from body.ScopeRef
+	// Silently accepting disagreement produces split-brain dispatches
+	// (beads land in one rig, formula scope metadata references
+	// another). This single guard covers three concrete classes:
+	//   (a) qualified target in a different rig than scope_ref
+	//       ("otherrig/worker" + scope_ref="myrig"): agentCfg.Dir="otherrig"
+	//   (b) bare name fell through to a city-scoped agent while the
+	//       caller requested rig scope ("mayor" + scope_ref="myrig"):
+	//       agentCfg.Dir=""
+	//   (c) body.Rig override disagreeing with scope_ref.
+	if body.ScopeKind == "rig" && body.ScopeRef != "" {
+		if agentCfg.Dir != body.ScopeRef {
+			msg := "scope_ref " + body.ScopeRef + " conflicts with resolved target rig " + agentCfg.Dir
+			if agentCfg.Dir == "" {
+				msg = "scope_ref " + body.ScopeRef + " requires a rig-scoped target; resolved target " + body.Target + " is city-scoped"
+			}
+			writeError(w, http.StatusBadRequest, "invalid", msg)
+			return
+		}
+		if body.Rig != "" && body.Rig != body.ScopeRef {
+			writeError(w, http.StatusBadRequest, "invalid",
+				"rig "+body.Rig+" conflicts with scope_ref "+body.ScopeRef)
+			return
+		}
 	}
 
 	resp, status, code, message := s.execSlingDirect(r.Context(), body, agentCfg)
@@ -269,11 +312,71 @@ func mergeEnvForSling(extra map[string]string) []string {
 }
 
 // apiAgentResolver implements sling.AgentResolver for the API context.
-// Uses exact qualified name matching (no ambient rig context).
+// Mirrors the CLI's resolveAgentIdentity rig-context behavior (step 1)
+// so formula child steps with bare assignees route to the same rig as
+// the top-level target when dispatched through the API (e.g. gasworks-gui
+// UI).
+//
+// Intentional divergence from cmd/gc/cmd_agent.go:resolveAgentIdentity:
+//
+//   - Step 3 (unambiguous bare-name fallback across all rigs) is
+//     deliberately not implemented here. UI/API dispatches always carry
+//     scope_kind+scope_ref when they want rig routing; without that
+//     context, routing to a single rig-scoped agent by bare name would
+//     be ambiguous in any multi-rig city. A bare name with no rig
+//     context falls through to findAgent's qualified-or-city-scoped
+//     lookup, which also retains findAgent's V2 BindingName pool-prefix
+//     handling that agentutil.ResolveAgent does not currently implement.
+//
+//   - Unifying CLI and API onto agentutil.ResolveAgent is a follow-up;
+//     doing it safely requires porting findAgent's V2 BindingName logic
+//     into agentutil first. TestApiVsAgentutilResolverParity below
+//     captures the current behavioral contract this resolver guarantees.
 type apiAgentResolver struct{}
 
-func (apiAgentResolver) ResolveAgent(cfg *config.City, name, _ string) (config.Agent, bool) {
+func (apiAgentResolver) ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool) {
+	// Step 1: ambient rig match — if the caller supplied a rig context and
+	// the name is bare, prefer the rig-scoped agent.
+	if rigContext != "" && !strings.Contains(name, "/") {
+		if a, ok := findAgent(cfg, rigContext+"/"+name); ok {
+			return a, true
+		}
+	}
+	// Step 2: literal lookup (qualified or city-scoped, plus V2
+	// BindingName pool-member synthesis inside findAgent).
 	return findAgent(cfg, name)
+}
+
+// qualifySlingTarget prepends a rig directory to a bare-name target
+// when the caller supplies a non-empty rigContext. Returns the target
+// unchanged if already qualified or if the qualified form does not
+// resolve (the caller's final findAgent call will then surface a clean
+// 404). This lets the API carry rig intent via scope_ref (UI path) or
+// body.Rig (dashboard/--rig CLI path) without every caller composing
+// the "<rig>/<name>" string manually.
+func qualifySlingTarget(cfg *config.City, target, rigContext string) string {
+	if rigContext == "" || strings.Contains(target, "/") {
+		return target
+	}
+	qualified := rigContext + "/" + target
+	if _, ok := findAgent(cfg, qualified); ok {
+		return qualified
+	}
+	return target
+}
+
+// slingRigContext derives the effective rig context for target
+// qualification. scope_ref takes precedence (explicit UI intent); when
+// absent, body.Rig is used as the implicit rig for legacy dashboard
+// dispatches that pass --rig= without scope_kind/scope_ref.
+func slingRigContext(body slingBody) string {
+	if body.ScopeKind == "rig" && body.ScopeRef != "" {
+		return body.ScopeRef
+	}
+	if body.ScopeKind == "" && body.Rig != "" {
+		return body.Rig
+	}
+	return ""
 }
 
 // apiBranchResolver implements sling.BranchResolver for the API context.
