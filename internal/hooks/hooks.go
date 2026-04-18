@@ -200,7 +200,21 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 	if err != nil {
 		return nil, claudeSettingsSourceNone, err
 	}
+
+	if sourceKind == claudeSettingsSourceNone {
+		// No override found. Return embedded base as-is.
+		return base, claudeSettingsSourceNone, nil
+	}
 	if len(overrideData) == 0 {
+		// An override source was located but its content is empty. For the
+		// preferred source (.claude/settings.json), that contradicts the
+		// strict contract — an intentionally-empty file is indistinguishable
+		// from a truncated write and must not silently degrade to defaults.
+		// For legacy sources, an empty file is unusual but not worth failing
+		// the entire agent over; fall back to embedded base.
+		if sourceKind == claudeSettingsSourceCityDotClaude {
+			return nil, claudeSettingsSourceNone, fmt.Errorf("empty Claude settings from %s (file present but zero bytes)", overridePath)
+		}
 		return base, claudeSettingsSourceNone, nil
 	}
 

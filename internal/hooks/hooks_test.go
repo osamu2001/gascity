@@ -3,6 +3,8 @@ package hooks
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -333,32 +335,85 @@ func TestInstallClaudeUnreadableRuntimeDoesNotDemoteValidHook(t *testing.T) {
 	}
 }
 
-// TestInstallClaudeForceOverwritesUnreadableRuntime verifies that an
-// unreadable gc-managed .gc/settings.json is force-overwritten with the
-// new projection instead of silently preserved. Preserving an unreadable
-// runtime file would leave Claude pointing at content it cannot parse on
-// the next launch.
-func TestInstallClaudeForceOverwritesUnreadableRuntime(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/.claude/settings.json"] = []byte(`{"custom": true}`)
-	// Simulate an unreadable runtime file by seeding Files (so stat-ok is
-	// simulated via presence) and injecting a ReadFile error. Using Dirs
-	// alone would make ReadFile succeed-as-empty in some Fake branches;
-	// this setup ensures the writeManagedFile stat-ok-read-fail branch is
-	// exercised.
-	fs.Files["/city/.gc/settings.json"] = []byte(`{"stale": true}`)
-	// No Errors injection means WriteFile will succeed and overwrite.
+// TestInstallClaudeForceOverwritesUnreadableRuntimeOSFS verifies the
+// force-overwrite policy against a real filesystem. The gc-managed
+// .gc/settings.json is seeded write-only (mode 0o200): stat succeeds,
+// read fails, but WriteFile still succeeds. Under the old preserve
+// policy Install would silently return without writing; under the new
+// force-overwrite policy it attempts the write and succeeds. The Fake
+// cannot express stat-ok/read-fail (its Errors map is symmetric across
+// ReadFile, Stat, and WriteFile), so real OSFS is the only way to lock
+// this branch.
+//
+// Skipped as root (root bypasses unix permission checks).
+func TestInstallClaudeForceOverwritesUnreadableRuntimeOSFS(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses unix permission checks; cannot simulate stat-ok/read-fail")
+	}
+	cityDir := t.TempDir()
+	claudeDir := filepath.Join(cityDir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{"custom": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runtimePath := filepath.Join(gcDir, "settings.json")
+	if err := os.WriteFile(runtimePath, []byte(`{"stale": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Write-only mode: Stat succeeds, ReadFile fails, WriteFile succeeds.
+	// This is the only permission bitmask that can distinguish preserve-on-
+	// unreadable from force-overwrite through observable behavior.
+	if err := os.Chmod(runtimePath, 0o200); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(runtimePath, 0o644) })
 
-	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
-		t.Fatalf("Install: %v", err)
+	if err := Install(fsys.OSFS{}, cityDir, cityDir, []string{"claude"}); err != nil {
+		t.Fatalf("Install with unreadable-but-writable runtime: %v", err)
 	}
 
-	runtime := string(fs.Files["/city/.gc/settings.json"])
+	// Restore read so we can verify the content was actually rewritten.
+	if err := os.Chmod(runtimePath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(runtimePath)
+	if err != nil {
+		t.Fatalf("reading runtime after chmod: %v", err)
+	}
+	runtime := string(data)
 	if strings.Contains(runtime, `"stale": true`) {
-		t.Errorf("runtime must be overwritten with fresh projection:\n%s", runtime)
+		t.Errorf("runtime must be overwritten, not preserved:\n%s", runtime)
 	}
 	if !strings.Contains(runtime, `"custom": true`) {
 		t.Errorf("runtime must reflect .claude/settings.json override:\n%s", runtime)
+	}
+}
+
+// TestInstallClaudeSurfacesEmptyPreferredOverride verifies that a
+// zero-byte .claude/settings.json is treated as malformed and surfaces a
+// descriptive error rather than silently degrading to embedded defaults.
+// A truncated or mid-edit file that happens to be zero bytes is
+// indistinguishable from a valid "empty config" intent — strict behavior
+// is to fail loudly so the user notices the truncation.
+func TestInstallClaudeSurfacesEmptyPreferredOverride(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.claude/settings.json"] = []byte{}
+
+	err := Install(fs, "/city", "/work", []string{"claude"})
+	if err == nil {
+		t.Fatal("Install must surface empty .claude/settings.json as an error")
+	}
+	if !strings.Contains(err.Error(), ".claude/settings.json") {
+		t.Errorf("error must name the offending path: %v", err)
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error must indicate emptiness: %v", err)
 	}
 }
 
