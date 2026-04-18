@@ -932,20 +932,25 @@ func sweepUndesiredPoolSessionBeads(
 		if sp != nil && sp.IsRunning(bead.Metadata["session_name"]) {
 			continue
 		}
-		// Don't sweep beads that haven't had their tmux started yet — their
-		// work assignment window hasn't opened. Mirrors the reconciler's
-		// sessionStartRequested signals (`state=creating` +
-		// `pending_create_claim`). Without this, a pool's freshly-created
-		// session bead gets swept on the same tick it's created (no work
-		// assigned → GCSweepSessionBeads closes it), spinning the pool in a
-		// rapid create→sweep→recreate loop. The `staleCreatingStateTimeout`
-		// bound matches sessionStartRequested's symmetric age guard: a bead
-		// genuinely wedged in `creating` past the timeout must remain
-		// sweepable so other reconcilers can recover or replace it.
-		if bead.Metadata["state"] == "creating" || strings.TrimSpace(bead.Metadata["pending_create_claim"]) == "true" {
-			if bead.CreatedAt.IsZero() || time.Since(bead.CreatedAt) < staleCreatingStateTimeout {
-				continue
-			}
+		// Don't sweep beads that the reconciler still considers "start
+		// requested" — their work assignment window hasn't opened. Mirrors
+		// sessionStartRequested (session_reconcile.go) exactly so the two
+		// loops agree about ownership:
+		//   - pending_create_claim=true: in-flight create claim, protected
+		//     regardless of age until the lifecycle clears it.
+		//   - state=creating: protected until staleCreatingState would
+		//     return true (i.e., until staleCreatingStateTimeout has
+		//     elapsed; zero CreatedAt is treated as stale, matching
+		//     staleCreatingState in session_reconcile.go).
+		// Without this, a pool's freshly-created session bead gets swept
+		// on the same tick it's created (no work assigned →
+		// GCSweepSessionBeads closes it), spinning the pool in a rapid
+		// create→sweep→recreate loop.
+		if strings.TrimSpace(bead.Metadata["pending_create_claim"]) == "true" {
+			continue
+		}
+		if strings.TrimSpace(bead.Metadata["state"]) == "creating" && !isStaleCreating(bead.CreatedAt) {
+			continue
 		}
 		// Age grace period for the post-creating, pre-wake window. After
 		// session_lifecycle_parallel flips state from "creating" to
@@ -968,16 +973,15 @@ func sweepUndesiredPoolSessionBeads(
 		//     increment these before clearing last_woke_at)
 		// Beads that actually drained/stopped keep state values like
 		// "drained"/"asleep"/"failed-create" and remain sweepable.
-		// staleCreatingStateTimeout (1m) mirrors sessionStartRequested's
-		// symmetric age guard.
-		if bead.Metadata["state"] == "active" &&
+		// The age bound mirrors staleCreatingState: a zero CreatedAt is
+		// treated as stale (sweepable) so malformed beads can be recovered.
+		if strings.TrimSpace(bead.Metadata["state"]) == "active" &&
 			strings.TrimSpace(bead.Metadata["last_woke_at"]) == "" &&
-			bead.Metadata["state_reason"] == "creation_complete" &&
+			strings.TrimSpace(bead.Metadata["state_reason"]) == "creation_complete" &&
 			isZeroOrEmpty(bead.Metadata["wake_attempts"]) &&
-			isZeroOrEmpty(bead.Metadata["churn_count"]) {
-			if !bead.CreatedAt.IsZero() && time.Since(bead.CreatedAt) < staleCreatingStateTimeout {
-				continue
-			}
+			isZeroOrEmpty(bead.Metadata["churn_count"]) &&
+			!isStaleCreating(bead.CreatedAt) {
+			continue
 		}
 		template := normalizedSessionTemplate(bead, cfg)
 		agentCfg := findAgentByTemplate(cfg, template)
@@ -990,12 +994,25 @@ func sweepUndesiredPoolSessionBeads(
 }
 
 // isZeroOrEmpty reports whether a metadata counter is absent or explicitly "0".
-// Non-numeric values return false so unexpected content fails closed (the
-// post-create protection is only granted when we're certain no prior
-// crash/churn cycle cleared last_woke_at).
+// Unexpected (non-zero, non-empty) content returns false, so the protective
+// post-create guard declines to apply and the bead remains sweepable — the
+// guard is only granted when we're certain no prior crash/churn cycle cleared
+// last_woke_at.
 func isZeroOrEmpty(v string) bool {
 	v = strings.TrimSpace(v)
 	return v == "" || v == "0"
+}
+
+// isStaleCreating mirrors staleCreatingState in session_reconcile.go without
+// requiring a clock.Clock dependency: a zero CreatedAt is treated as stale,
+// and otherwise the bead is stale once staleCreatingStateTimeout has elapsed.
+// Keeping this shape identical to the reconciler's predicate means the sweep
+// and the reconciler agree about which in-flight create beads are still alive.
+func isStaleCreating(createdAt time.Time) bool {
+	if createdAt.IsZero() {
+		return true
+	}
+	return time.Since(createdAt) >= staleCreatingStateTimeout
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
