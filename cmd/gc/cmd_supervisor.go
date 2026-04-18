@@ -1360,25 +1360,15 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		return fmt.Errorf("validate services: %w", err)
 	}
 
-	// Materialize the gc-beads-bd script.
-	if _, err := MaterializeBeadsBdScript(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': materializing gc-beads-bd: %v\n", cityName, err) //nolint:errcheck
-		// Non-fatal.
-	}
-
 	// Materialize builtin packs (system packs are auto-included via LoadWithIncludes).
+	// gc-beads-bd now ships inside the bd pack's assets/scripts/ and is
+	// materialized alongside the rest of the pack content.
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin packs: %v\n", cityName, err) //nolint:errcheck
 		// Non-fatal.
 	}
 
-	// Materialize builtin prompts and formulas.
-	if err := materializeBuiltinPrompts(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin prompts: %v\n", cityName, err) //nolint:errcheck
-	}
-	if err := materializeBuiltinFormulas(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin formulas: %v\n", cityName, err) //nolint:errcheck
-	}
+	// Built-in prompts and formulas now arrive via the core bootstrap pack.
 	ensureInitArtifacts(cityPath, cfg, stderr, "gc supervisor")
 
 	// Resolve rig paths and start bead store lifecycle.
@@ -1397,15 +1387,8 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		// Non-fatal.
 	}
 
-	// Materialize system formulas into the city formulas/ directory.
-	if err := runStep("materializing_system_formulas", func() error {
-		_, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
-		return sysErr
-	}); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': system formulas: %v\n", cityName, err) //nolint:errcheck
-	}
-
 	// Resolve formula symlinks.
+	// System formulas/orders now arrive via the core bootstrap pack.
 	if progress != nil {
 		progress("resolving_formulas")
 	}

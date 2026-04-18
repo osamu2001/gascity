@@ -423,24 +423,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 
-	// Materialize the gc-beads-bd script so the exec: provider can use it.
-	if _, err := MaterializeBeadsBdScript(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: materializing gc-beads-bd: %v\n", err) //nolint:errcheck // best-effort stderr
-		// Non-fatal: only needed if provider = "bd".
-	}
-
-	// Materialize builtin packs (bd + dolt) so doctor checks and commands are available.
+	// Materialize builtin packs (bd + dolt) so doctor checks, commands,
+	// and the bd pack's gc-beads-bd script are available.
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: materializing builtin packs: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal: only needed if provider = "bd".
 	}
-	// Materialize builtin prompts and formulas to stay in sync with binary.
-	if err := materializeBuiltinPrompts(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: builtin prompts: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
-	if err := materializeBuiltinFormulas(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: builtin formulas: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
+	// Built-in prompts and formulas now arrive via the core bootstrap pack.
 	ensureInitArtifacts(cityPath, cfg, stderr, "gc start")
 
 	// Resolve rig paths and run the full bead store lifecycle:
@@ -460,12 +449,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		// Non-fatal warning — server may recover by the time agents need it.
 	}
 
-	// Materialize system formulas into the city formulas/ directory.
-	if _, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath); sysErr != nil {
-		fmt.Fprintf(stderr, "gc start: system formulas: %v\n", sysErr) //nolint:errcheck // best-effort stderr
-	}
-
 	// Materialize formula symlinks before agent startup.
+	// System formulas/orders now arrive via the core bootstrap pack.
 	if len(cfg.FormulaLayers.City) > 0 {
 		if err := ResolveFormulas(cityPath, cfg.FormulaLayers.City); err != nil {
 			fmt.Fprintf(stderr, "gc start: city formulas: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -723,15 +708,18 @@ func claudeSettingsSource(cityPath string) (src, rel string) {
 	return "", ""
 }
 
-// stageHookFiles adds hook files installed by hooks.Install() to the
-// copy_files list so container providers (K8s) can stage them into pods.
-// Docker doesn't need this (bind-mount), but the extra entries are harmless.
-// Avoids duplicating .gc/settings.json if settingsArgs already added it.
+// stageHookFiles adds hook files to the copy_files list so container
+// providers (K8s) can stage them into pods. Docker doesn't need this
+// (bind-mount), but the extra entries are harmless.
+//
+// Claude's city-level .gc/settings.json is staged here because settingsArgs
+// points --settings at the city-root path. All other provider hook files
+// ship via the core pack overlay and flow through PackOverlayDirs staging,
+// so they are not handled here.
 func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []runtime.CopyEntry {
 	// Compute the relative path from cityPath to workDir so that
 	// container-side RelDst places files under the agent's WorkingDir
 	// (/workspace/<relWorkDir>/), not always at /workspace/.
-	// When workDir == cityPath, relWorkDir is "." and path.Join collapses it.
 	relWorkDir := "."
 	if workDir != cityPath {
 		if r, err := filepath.Rel(cityPath, workDir); err == nil {
@@ -739,25 +727,6 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 		}
 	}
 
-	// workDir-based hooks: gemini, codex, opencode, copilot, pi, omp.
-	// Use path.Join for RelDst (container-target, always forward slashes).
-	for _, rel := range []string{
-		path.Join(".gemini", "settings.json"),
-		path.Join(".codex", "hooks.json"),
-		path.Join(".opencode", "plugins", "gascity.js"),
-		path.Join(".github", "hooks", "gascity.json"),
-		path.Join(".github", "copilot-instructions.md"),
-		path.Join(".pi", "extensions", "gc-hooks.js"),
-		path.Join(".omp", "hooks", "gc-hook.ts"),
-	} {
-		abs := filepath.Join(workDir, rel)
-		if _, err := os.Stat(abs); err == nil {
-			copyFiles = append(copyFiles, runtime.CopyEntry{
-				Src: abs, RelDst: path.Join(relWorkDir, rel),
-				Probed: true, ContentHash: runtime.HashPathContent(abs),
-			})
-		}
-	}
 	// Stage Claude skills directory (if materialized).
 	skillsDir := filepath.Join(workDir, ".claude", "skills")
 	if info, err := os.Stat(skillsDir); err == nil && info.IsDir() {

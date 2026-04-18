@@ -374,11 +374,19 @@ func initPromptTemplatePath(templatePath string) (string, bool) {
 	return filepath.Join("agents", base, "prompt.template.md"), true
 }
 
+// rewriteInitPromptTemplates rewrites the mayor agent's legacy prompt_template
+// from "prompts/mayor.md" to the V2 "agents/mayor/prompt.template.md" path
+// that writeInitAgentPrompts actually scaffolds. Other agents are left alone:
+// we only ship a scaffold for mayor, so rewriting e.g. "prompts/worker.md"
+// would silently point the config at a file that never gets created.
 func rewriteInitPromptTemplates(cfg *config.City) {
 	if cfg == nil {
 		return
 	}
 	for i := range cfg.Agents {
+		if cfg.Agents[i].Name != "mayor" {
+			continue
+		}
 		if next, ok := initPromptTemplatePath(cfg.Agents[i].PromptTemplate); ok {
 			cfg.Agents[i].PromptTemplate = next
 		}
@@ -466,17 +474,13 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 		return code
 	}
 
-	// Write default formulas.
-	if code := writeDefaultFormulas(fs, cityPath, stderr); code != 0 {
-		return code
-	}
+	// Default formulas/orders now arrive via the core bootstrap pack.
 	if err := writeInitPackToml(fs, cityPath, cityName); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	// Materialize system formulas into formulas/ and resolve symlinks so bd finds them immediately after init.
-	MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath) //nolint:errcheck // best-effort
+	// Resolve formulas symlinks so bd finds them immediately after init.
 	formulasInitDir := filepath.Join(cityPath, citylayout.FormulasRoot)
 	if rfErr := ResolveFormulas(cityPath, []string{formulasInitDir}); rfErr != nil {
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
@@ -592,14 +596,8 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		return code
 	}
 
-	// Write default formula files.
-	logInitProgress(stdout, 4, "Writing default formulas")
-	if code := writeDefaultFormulas(fs, cityPath, stderr); code != 0 {
-		return code
-	}
-
-	// Materialize system formulas into formulas/ and resolve symlinks so bd finds them immediately after init.
-	MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath) //nolint:errcheck // best-effort
+	// Default formulas/orders now arrive via the core bootstrap pack.
+	// Resolve formulas symlinks so bd finds them immediately after init.
 	formulasDir := filepath.Join(cityPath, citylayout.FormulasRoot)
 	if err := ResolveFormulas(cityPath, []string{formulasDir}); err != nil {
 		fmt.Fprintf(stderr, "gc init: resolving formulas: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -692,10 +690,10 @@ func installClaudeHooks(fs fsys.FS, cityPath string, stderr io.Writer) int {
 	return 0
 }
 
-// writeInitAgentPrompts creates the agents/ directory and writes only the
-// default prompt scaffolds referenced by the init template's explicit agents.
-// This keeps a freshly initialized city aligned with the city.toml it writes
-// instead of silently creating additional convention-discoverable agents.
+// writeInitAgentPrompts writes the mayor scaffold prompt into the V2
+// agents/mayor/ directory when the init template includes a mayor agent.
+// Other implicit agents use prompts shipped by the core bootstrap pack at
+// runtime, so they don't need init-time scaffolding.
 func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer) int {
 	if err := fs.MkdirAll(filepath.Join(cityPath, "agents"), 0o755); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -704,19 +702,16 @@ func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr
 	if cfg == nil {
 		return 0
 	}
-	seen := make(map[string]bool, len(cfg.Agents))
 	for _, agent := range cfg.Agents {
-		dst, ok := initPromptTemplatePath(agent.PromptTemplate)
-		if !ok || seen[dst] {
+		if agent.Name != "mayor" {
 			continue
 		}
-		seen[dst] = true
-		data, err := defaultPrompts.ReadFile(agent.PromptTemplate)
+		data, err := defaultPrompts.ReadFile("prompts/mayor.md")
 		if err != nil {
-			fmt.Fprintf(stderr, "gc init: reading embedded %s: %v\n", agent.PromptTemplate, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc init: reading embedded mayor prompt: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		dst = filepath.Join(cityPath, dst)
+		dst := filepath.Join(cityPath, "agents", "mayor", "prompt.template.md")
 		if err := fs.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -725,6 +720,7 @@ func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr
 			fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		return 0
 	}
 	return 0
 }
@@ -861,6 +857,15 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 
 	// Create runtime scaffold.
 	if err := ensureCityScaffold(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Ensure V2 convention directories (formulas, orders, prompts, etc.)
+	// exist even when the copied template doesn't ship them. Compose
+	// references these paths unconditionally, so tests that stat the
+	// computed formula layers expect them to resolve.
+	if err := ensureInitConventionDirs(fs, cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
