@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -119,7 +120,13 @@ func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), `gc handoff "context cycle"`, `gc prime --hook`, 1)
+	// Build a realistic stale fixture: the embedded file stores the command
+	// as JSON, so the literal bytes contain escaped quotes. Matching that
+	// shape is what claudeFileNeedsUpgrade expects.
+	stale := strings.Replace(string(current), `gc handoff \"context cycle\"`, `gc prime --hook`, 1)
+	if stale == string(current) {
+		t.Fatal("stale fixture did not diverge from current embedded config — check stale pattern")
+	}
 	fs.Files["/city/hooks/claude.json"] = []byte(stale)
 	fs.Files["/city/.gc/settings.json"] = []byte(stale)
 
@@ -213,16 +220,19 @@ func TestInstallClaudePreservesUserOwnedHookFile(t *testing.T) {
 }
 
 // TestInstallClaudeTolerantToUnreadableLegacyCandidate verifies that a
-// stat-ok-but-read-fails non-chosen candidate (simulated via a directory at
-// the hook-file path) does not block installation when .claude/settings.json
-// is a valid higher-priority source. Previously readClaudeSettingsCandidate
-// returned a hard error for stat-ok-but-unreadable, aborting resolution.
+// non-chosen legacy candidate whose ReadFile fails (simulated by injecting
+// a read error) does not block installation when .claude/settings.json is
+// a valid higher-priority source. Previously readClaudeSettingsCandidate
+// returned a hard error for any existing-but-unreadable candidate,
+// aborting resolution even when the preferred source was perfectly fine.
 func TestInstallClaudeTolerantToUnreadableLegacyCandidate(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/.claude/settings.json"] = []byte(`{"custom": true}`)
-	// Put a directory at the hook-file path so Stat succeeds but ReadFile
-	// errors (Fake returns ErrNotExist because the path is not in Files).
-	fs.Dirs["/city/hooks/claude.json"] = true
+	// Inject a read error on the legacy hook path so any attempt to read
+	// it fails. This models a permission-denied or i/o-error file that
+	// would otherwise have made readClaudeSettingsCandidate abort source
+	// selection.
+	fs.Errors["/city/hooks/claude.json"] = errors.New("permission denied")
 
 	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
 		t.Fatalf("Install must tolerate unreadable non-chosen legacy candidate: %v", err)
@@ -231,6 +241,37 @@ func TestInstallClaudeTolerantToUnreadableLegacyCandidate(t *testing.T) {
 	runtime := string(fs.Files["/city/.gc/settings.json"])
 	if !strings.Contains(runtime, `"custom": true`) {
 		t.Errorf("runtime settings missing .claude override:\n%s", runtime)
+	}
+}
+
+// TestInstallClaudePinnedHookFileOutranksRuntime verifies that when a user
+// pins hooks/claude.json to content that happens to match the embedded
+// defaults byte-for-byte, it still wins over .gc/settings.json per the
+// documented precedence. Earlier versions disqualified any
+// bytes-equal-base hook file, silently letting a stale .gc/settings.json
+// override the user's chosen source.
+func TestInstallClaudePinnedHookFileOutranksRuntime(t *testing.T) {
+	fs := fsys.NewFake()
+	base, err := readEmbedded("config/claude.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	// User has pinned their hook file to exactly the embedded defaults
+	// and separately has a stale .gc/settings.json with a custom key that
+	// they intended to remove when they pinned the hook file.
+	fs.Files["/city/hooks/claude.json"] = base
+	fs.Files["/city/.gc/settings.json"] = []byte(`{"stale_override": true}`)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := string(fs.Files["/city/.gc/settings.json"])
+	if strings.Contains(runtime, `"stale_override": true`) {
+		t.Errorf("runtime must reflect pinned hook source, not stale runtime override:\n%s", runtime)
+	}
+	if !strings.Contains(runtime, "SessionStart") {
+		t.Errorf("runtime must contain embedded default hooks:\n%s", runtime)
 	}
 }
 

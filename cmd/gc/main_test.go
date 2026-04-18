@@ -1776,6 +1776,45 @@ func TestSettingsArgsMissingFile(t *testing.T) {
 	}
 }
 
+// TestEnsureClaudeSettingsArgsPropagatesMalformedOverride verifies that a
+// malformed .claude/settings.json surfaces as an error from
+// ensureClaudeSettingsArgs rather than silently returning a --settings arg
+// that points at stale bytes from a prior tick. resolveTemplate relies on
+// this so a bad override fails agent creation loudly; a best-effort caller
+// like buildResumeCommand may choose to log-and-continue.
+func TestEnsureClaudeSettingsArgsPropagatesMalformedOverride(t *testing.T) {
+	dir := t.TempDir()
+	claudeDir := filepath.Join(dir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{not valid json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ensureClaudeSettingsArgs(fsys.OSFS{}, dir, "claude", io.Discard)
+	if err == nil {
+		t.Fatalf("expected propagated error for malformed override; got arg=%q", got)
+	}
+	if got != "" {
+		t.Errorf("arg must be empty when projection fails; got %q", got)
+	}
+}
+
+// TestEnsureClaudeSettingsArgsNoOpForNonClaude verifies the helper is a
+// no-op for non-Claude providers — projection never runs and no error is
+// returned regardless of filesystem state.
+func TestEnsureClaudeSettingsArgsNoOpForNonClaude(t *testing.T) {
+	dir := t.TempDir()
+	got, err := ensureClaudeSettingsArgs(fsys.OSFS{}, dir, "codex", io.Discard)
+	if err != nil {
+		t.Fatalf("non-Claude provider must return nil error; got %v", err)
+	}
+	if got != "" {
+		t.Errorf("non-Claude provider must return empty arg; got %q", got)
+	}
+}
+
 // --- runWizard ---
 
 func TestRunWizardDefaults(t *testing.T) {

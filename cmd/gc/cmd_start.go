@@ -697,13 +697,20 @@ func settingsArgs(cityPath, providerName string) string {
 // "--settings <path>" arg for the resolved Claude command. This is the
 // single chokepoint that guarantees every Claude launch path — reconciler
 // or session attach/submit — sees the projected file before settingsArgs
-// probes for it. Returns empty for non-Claude providers.
+// probes for it. Returns empty string and nil error for non-Claude providers.
+//
+// Returns a non-nil error when projection fails. Strict callers
+// (resolveTemplate) should propagate so that a malformed preferred override
+// fails loudly at agent creation rather than silently running with stale
+// bytes from a prior tick. Best-effort callers (buildResumeCommand) may
+// choose to log-and-continue so a `gc session attach` still succeeds when
+// projection is transiently broken.
 //
 // fs may be nil; in that case OSFS is used. stderr may be nil; in that
-// case projection errors are discarded.
-func ensureClaudeSettingsArgs(fs fsys.FS, cityPath, providerName string, stderr io.Writer) string {
+// case projection errors are only returned, not written.
+func ensureClaudeSettingsArgs(fs fsys.FS, cityPath, providerName string, stderr io.Writer) (string, error) {
 	if providerName != "claude" || cityPath == "" {
-		return ""
+		return "", nil
 	}
 	if fs == nil {
 		fs = fsys.OSFS{}
@@ -711,12 +718,11 @@ func ensureClaudeSettingsArgs(fs fsys.FS, cityPath, providerName string, stderr 
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	if code := installClaudeHooks(fs, cityPath, stderr); code != 0 {
-		// installClaudeHooks already reported the error; fall through so
-		// --settings still reflects whatever managed file (if any) is on
-		// disk from a prior tick.
+	if err := hooks.Install(fs, cityPath, cityPath, []string{"claude"}); err != nil {
+		fmt.Fprintf(stderr, "claude hooks: %v\n", err) //nolint:errcheck // best-effort stderr
+		return "", fmt.Errorf("projecting Claude settings: %w", err)
 	}
-	return settingsArgs(cityPath, providerName)
+	return settingsArgs(cityPath, providerName), nil
 }
 
 func claudeSettingsSource(cityPath string) (src, rel string) {

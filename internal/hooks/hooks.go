@@ -7,7 +7,9 @@ package hooks
 import (
 	"bytes"
 	"embed"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -127,20 +129,20 @@ func installClaude(fs fsys.FS, cityDir string) error {
 
 // hookFileSafeToRewrite reports whether hooks/claude.json can be safely
 // overwritten by installClaude without clobbering user-owned content. It is
-// safe when the file does not exist (fresh install) or when its bytes match
-// a known stale auto-generated pattern that predates the current embedded
-// defaults (proactive upgrade of leftover state). Any other content — even
-// bytes identical to the embedded base — is treated as user-owned to avoid
-// surprising a user who pinned their hook file by hand.
+// safe when the file does not exist (fresh install seed) or when its bytes
+// match a known stale auto-generated pattern (proactive upgrade of leftover
+// state). Any other content — including existing-but-unreadable files,
+// content equal to the embedded base, or user-authored content — is
+// preserved.
 func hookFileSafeToRewrite(fs fsys.FS, hookDst string) bool {
 	data, err := fs.ReadFile(hookDst)
-	if err != nil {
-		// Missing or unreadable: fresh install (or broken state we can't
-		// reason about). Either way, writeManagedFile's existing guards
-		// decide what to do.
-		return true
+	if err == nil {
+		return claudeFileNeedsUpgrade(data)
 	}
-	return claudeFileNeedsUpgrade(data)
+	// Only a genuine "not found" means we can safely seed. Any other read
+	// error (permission, i/o) is an existing file in an unknown state —
+	// preserve it rather than risk clobbering user content.
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func readEmbedded(embedPath string) ([]byte, error) {
@@ -209,8 +211,15 @@ func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string
 	_, hookData, hookExists, _ := readClaudeSettingsCandidate(fs, hookPath, false)
 	_, runtimeData, runtimeExists, _ := readClaudeSettingsCandidate(fs, runtimePath, false)
 
+	// hooks/claude.json is authoritative when it exists, is not a known
+	// stale auto-generated file, and differs from the managed runtime file
+	// (the redundant-mirror case). We deliberately do NOT disqualify a
+	// hook file whose bytes equal the embedded base: a user may pin
+	// hooks/claude.json to exactly the embedded defaults as their
+	// authoritative source and still expect it to outrank .gc/settings.json
+	// per the documented precedence. Use stale-pattern detection alone to
+	// decide whether the hook file is gc-generated vs user-authored.
 	if hookExists &&
-		!bytes.Equal(hookData, base) &&
 		(!runtimeExists || !bytes.Equal(hookData, runtimeData)) &&
 		!claudeFileNeedsUpgrade(hookData) {
 		return hookPath, hookData, claudeSettingsSourceLegacyHook, nil
@@ -267,6 +276,11 @@ func claudeFileNeedsUpgrade(existing []byte) bool {
 	if err != nil {
 		return false
 	}
-	stale := strings.Replace(string(current), `gc handoff "context cycle"`, `gc prime --hook`, 1)
+	// The pattern uses JSON-escaped quotes to match how the string appears
+	// in the embedded file bytes. Without the escapes, strings.Replace
+	// finds nothing and stale == current — which silently flags every
+	// base-equal file as "needs upgrade" and masks any precedence logic
+	// that depends on this predicate.
+	stale := strings.Replace(string(current), `gc handoff \"context cycle\"`, `gc prime --hook`, 1)
 	return string(existing) == stale
 }

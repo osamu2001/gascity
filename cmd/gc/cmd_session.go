@@ -802,8 +802,21 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 		if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 			command = command + " " + shellquote.Join(defaultArgs)
 		}
-		if sa := ensureClaudeSettingsArgs(fsys.OSFS{}, cityPath, resolved.Name, stderr); sa != "" {
+		// buildResumeCommand is best-effort: log projection failures and
+		// continue so `gc session attach` still starts the agent with
+		// whatever --settings file (if any) is already on disk. The strict
+		// path is resolveTemplate at reconciler time.
+		sa, saErr := ensureClaudeSettingsArgs(fsys.OSFS{}, cityPath, resolved.Name, stderr)
+		if saErr == nil && sa != "" {
 			command = command + " " + sa
+		} else if saErr != nil {
+			// Fall back to probing whatever exists on disk. settingsArgs
+			// returns "" if nothing is projected yet, so Claude launches
+			// without --settings rather than with stale content from the
+			// failed projection.
+			if probe := settingsArgs(cityPath, resolved.Name); probe != "" {
+				command = command + " " + probe
+			}
 		}
 		resolvedInfo.Command = command
 		resolvedInfo.Provider = resolved.Name
