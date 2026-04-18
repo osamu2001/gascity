@@ -184,7 +184,11 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
 	cfg := s.state.Config()
 
 	q := r.URL.Query()
@@ -192,7 +196,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	templateFilter := q.Get("template")
 	wantPeek := q.Get("peek") == "true"
 
-	sessions, err := mgr.List(stateFilter, templateFilter)
+	sessions, err := catalog.List(stateFilter, templateFilter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -237,7 +241,11 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
 	cfg := s.state.Config()
 
 	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
@@ -245,7 +253,7 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, err)
 		return
 	}
-	info, err := mgr.Get(id)
+	info, err := catalog.Get(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -419,8 +427,12 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to return the updated session, consistent with PATCH.
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	info, err := catalog.Get(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -494,6 +506,108 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 			}
 		}
 	}
+}
+
+// handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.
+func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+
+	var body map[string]any
+	if decErr := decodeBody(r, &body); decErr != nil {
+		writeError(w, http.StatusBadRequest, "invalid", decErr.Error())
+		return
+	}
+
+	// Reject any field other than "title" or "alias".
+	for key := range body {
+		if key != "title" && key != "alias" {
+			writeError(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("field %q is immutable on sessions; only 'title' and 'alias' can be patched", key))
+			return
+		}
+	}
+
+	var titlePtr *string
+	if rawTitle, ok := body["title"]; ok {
+		title, isString := rawTitle.(string)
+		if !isString || title == "" {
+			writeError(w, http.StatusBadRequest, "invalid", "title must be a non-empty string")
+			return
+		}
+		titlePtr = &title
+	}
+
+	var aliasPtr *string
+	if rawAlias, ok := body["alias"]; ok {
+		alias, isString := rawAlias.(string)
+		if !isString {
+			writeError(w, http.StatusBadRequest, "invalid", "alias must be a string")
+			return
+		}
+		aliasPtr = &alias
+	}
+	if titlePtr == nil && aliasPtr == nil {
+		writeError(w, http.StatusBadRequest, "invalid", "at least one of 'title' or 'alias' is required")
+		return
+	}
+
+	b, err := store.Get(id)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if !session.IsSessionBeadOrRepairable(b) {
+		writeError(w, http.StatusBadRequest, "invalid", id+" is not a session")
+		return
+	}
+	session.RepairEmptyType(store, &b)
+
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	updateFn := func() error {
+		return catalog.UpdatePresentation(id, titlePtr, aliasPtr)
+	}
+	if aliasPtr != nil {
+		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
+			writeError(w, http.StatusForbidden, "forbidden", "alias is controller-managed for this session")
+			return
+		}
+		if err := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); err != nil {
+				return err
+			}
+			return updateFn()
+		}); err != nil {
+			writeSessionManagerError(w, err)
+			return
+		}
+	} else if err := updateFn(); err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+
+	// Re-fetch to get updated state.
+	info, err := catalog.Get(id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	updated, _ := store.Get(id)
+	presp := sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != "")
+	writeJSON(w, http.StatusOK, presp)
 }
 
 // resolveProviderForTemplate resolves the provider for an agent template,
