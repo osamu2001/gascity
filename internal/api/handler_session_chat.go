@@ -1239,7 +1239,7 @@ func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info sessio
 	writeSSE(w, "activity", 2, actData)
 }
 
-func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle *worker.SessionHandle, initial *worker.HistorySnapshot, req worker.HistoryRequest) {
+func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle worker.Handle, initial *worker.HistorySnapshot, req worker.HistoryRequest) {
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
@@ -1358,7 +1358,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 	}
 }
 
-func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.ResponseWriter, info session.Info, handle *worker.SessionHandle, initial *worker.HistorySnapshot) {
+func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.ResponseWriter, info session.Info, handle worker.Handle, initial *worker.HistorySnapshot) {
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
@@ -1443,7 +1443,11 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 	}
 }
 
-func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.ResponseWriter, info session.Info, logPath string) {
+func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, send sse.Sender, info session.Info, logPath string) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 

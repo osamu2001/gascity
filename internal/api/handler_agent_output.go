@@ -48,13 +48,11 @@ func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tai
 	if provider == "" && cfg != nil {
 		provider = strings.TrimSpace(cfg.Workspace.Provider)
 	}
-
-	searchPaths := s.sessionLogSearchPaths
-	if searchPaths == nil {
-		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	factory, err := s.workerFactory(s.state.CityBeadStore())
+	if err != nil {
+		return nil, err
 	}
-	adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
-	path := adapter.DiscoverTranscript(provider, workDir, "")
+	path := factory.DiscoverTranscript(provider, workDir, "")
 	if path == "" {
 		return nil, nil
 	}
@@ -64,7 +62,7 @@ func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tai
 		tail = tailInput
 	}
 
-	transcript, err := adapter.ReadTranscript(worker.TranscriptRequest{
+	transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
 		Provider:        provider,
 		TranscriptPath:  path,
 		TailCompactions: tail,
@@ -384,15 +382,14 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 	if provider == "" {
 		provider = strings.TrimSpace(cfg.Workspace.Provider)
 	}
-	searchPaths := s.sessionLogSearchPaths
-	if searchPaths == nil {
-		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
-	}
-	adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
-
 	var logPath string
 	if workDir != "" {
-		logPath = adapter.DiscoverTranscript(provider, workDir, "")
+		factory, err := s.workerFactory(s.state.CityBeadStore())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		logPath = factory.DiscoverTranscript(provider, workDir, "")
 	}
 
 	handle := s.agentWorkerHandle(name, cfg)
@@ -486,7 +483,11 @@ func (s *Server) streamSessionLog(ctx context.Context, send sse.Sender, name str
 		}
 
 		// Use tail=1 (last compaction segment) to limit parsing scope.
-		transcript, err := worker.SessionLogAdapter{}.ReadTranscript(worker.TranscriptRequest{
+		factory, err := s.workerFactory(s.state.CityBeadStore())
+		if err != nil {
+			return
+		}
+		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
 			Provider:        provider,
 			TranscriptPath:  logPath,
 			TailCompactions: 1,

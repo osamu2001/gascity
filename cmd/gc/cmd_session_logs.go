@@ -89,7 +89,11 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 }
 
 func resolveSessionLogPath(searchPaths []string, logCtx sessionLogContext) string {
-	return worker.SessionLogAdapter{SearchPaths: searchPaths}.DiscoverTranscript(logCtx.provider, logCtx.workDir, logCtx.sessionKey)
+	factory, err := worker.NewFactory(worker.FactoryConfig{SearchPaths: searchPaths})
+	if err != nil {
+		return ""
+	}
+	return factory.DiscoverTranscript(logCtx.provider, logCtx.workDir, logCtx.sessionKey)
 }
 
 func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store beads.Store, identifier string, searchPaths []string) (string, string, bool) {
@@ -184,8 +188,13 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 		fmt.Fprintln(stderr, "gc session logs: --tail must be >= 0") //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	factory, err := worker.NewFactory(worker.FactoryConfig{})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
-	sess, readErr := readSessionFile(provider, path, tail)
+	sess, readErr := readSessionFile(factory, provider, path, tail)
 	if readErr != nil {
 		fmt.Fprintf(stderr, "gc session logs: %v\n", readErr) //nolint:errcheck // best-effort stderr
 		return 1
@@ -205,7 +214,7 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 	// follow loop don't replay messages that were intentionally excluded by
 	// the initial tail window.
 	if tail > 0 {
-		full, err := readSessionFile(provider, path, 0)
+		full, err := readSessionFile(factory, provider, path, 0)
 		if err == nil {
 			for _, msg := range full.Messages {
 				seen[msg.UUID] = true
@@ -221,7 +230,7 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 	for {
 		time.Sleep(2 * time.Second)
 
-		sess, readErr = readSessionFile(provider, path, 0)
+		sess, readErr = readSessionFile(factory, provider, path, 0)
 		if readErr != nil {
 			consecErrors++
 			if consecErrors >= maxConsecErrors {
@@ -242,8 +251,8 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 	}
 }
 
-func readSessionFile(provider, path string, tail int) (*worker.TranscriptSession, error) {
-	result, err := worker.SessionLogAdapter{}.ReadTranscript(worker.TranscriptRequest{
+func readSessionFile(factory *worker.Factory, provider, path string, tail int) (*worker.TranscriptSession, error) {
+	result, err := factory.ReadTranscript(worker.TranscriptRequest{
 		Provider:        provider,
 		TranscriptPath:  path,
 		TailCompactions: tail,
