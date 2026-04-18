@@ -14,10 +14,10 @@ import (
 
 func TestEnsureBootstrapPopulatesCacheAndWritesImplicitFile(t *testing.T) {
 	assetsRoot := t.TempDir()
-	writeBootstrapPackAsset(t, assetsRoot, "packs/import", `
+	writeBootstrapPackAsset(t, assetsRoot, "packs/registry", `
 [pack]
-name = "import"
-version = "0.2.0"
+name = "registry"
+version = "0.1.0"
 schema = 1
 
 [[agent]]
@@ -31,10 +31,10 @@ scope = "city"
 
 	old := BootstrapPacks
 	BootstrapPacks = []Entry{{
-		Name:     "import",
-		Source:   "github.com/gastownhall/gc-import",
-		Version:  "0.2.0",
-		AssetDir: "packs/import",
+		Name:     "registry",
+		Source:   "github.com/gastownhall/gc-registry",
+		Version:  "0.1.0",
+		AssetDir: "packs/registry",
 	}}
 	t.Cleanup(func() { BootstrapPacks = old })
 
@@ -48,10 +48,10 @@ scope = "city"
 		t.Fatalf("reading implicit-import.toml: %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, `[imports."import"]`) {
-		t.Fatalf("implicit-import.toml missing import entry:\n%s", text)
+	if !strings.Contains(text, `[imports."registry"]`) {
+		t.Fatalf("implicit-import.toml missing registry entry:\n%s", text)
 	}
-	if !strings.Contains(text, `version = "0.2.0"`) {
+	if !strings.Contains(text, `version = "0.1.0"`) {
 		t.Fatalf("implicit-import.toml missing version:\n%s", text)
 	}
 
@@ -59,13 +59,21 @@ scope = "city"
 	if err != nil {
 		t.Fatalf("readImplicitFile: %v", err)
 	}
-	entry := entries["import"]
+	entry := entries["registry"]
 	cacheDir := config.GlobalRepoCachePath(gcHome, entry.Source, entry.Commit)
 	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err != nil {
 		t.Fatalf("bootstrap cache missing pack.toml: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(cacheDir, ".git")); !os.IsNotExist(err) {
 		t.Fatalf("bootstrap cache should not contain .git, stat err = %v", err)
+	}
+}
+
+func TestBootstrapPacksDoNotIncludeLegacyImportPack(t *testing.T) {
+	for _, entry := range BootstrapPacks {
+		if entry.Name == "import" {
+			t.Fatalf("BootstrapPacks should not include legacy import pack: %#v", entry)
+		}
 	}
 }
 
@@ -253,20 +261,19 @@ func TestEnsureBootstrapEmbedsCorePackSkills(t *testing.T) {
 		t.Fatalf("core pack.toml missing name:\n%s", packToml)
 	}
 }
-
 func TestEnsureBootstrapAllowsConcurrentCallers(t *testing.T) {
 	assetsRoot := t.TempDir()
-	writeBootstrapPackAsset(t, assetsRoot, "packs/import", `
+	writeBootstrapPackAsset(t, assetsRoot, "packs/registry", `
 [pack]
-name = "import"
-version = "0.2.0"
+name = "registry"
+version = "0.1.0"
 schema = 1
 `)
-	commandsDir := filepath.Join(assetsRoot, "packs", "import", "commands")
+	commandsDir := filepath.Join(assetsRoot, "packs", "registry", "commands")
 	if err := os.MkdirAll(commandsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(commandsDir, "add.py"), []byte("print('hi')\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(commandsDir, "sync.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -276,10 +283,10 @@ schema = 1
 
 	old := BootstrapPacks
 	BootstrapPacks = []Entry{{
-		Name:     "import",
-		Source:   "github.com/gastownhall/gc-import",
-		Version:  "0.2.0",
-		AssetDir: "packs/import",
+		Name:     "registry",
+		Source:   "github.com/gastownhall/gc-registry",
+		Version:  "0.1.0",
+		AssetDir: "packs/registry",
 	}}
 	t.Cleanup(func() { BootstrapPacks = old })
 
@@ -311,13 +318,13 @@ schema = 1
 	if err != nil {
 		t.Fatalf("readImplicitFile: %v", err)
 	}
-	entry, ok := entries["import"]
+	entry, ok := entries["registry"]
 	if !ok {
-		t.Fatalf("missing import entry after concurrent bootstrap: %v", entries)
+		t.Fatalf("missing registry entry after concurrent bootstrap: %v", entries)
 	}
 
 	cacheDir := config.GlobalRepoCachePath(gcHome, entry.Source, entry.Commit)
-	for _, rel := range []string{"pack.toml", "commands/add.py"} {
+	for _, rel := range []string{"pack.toml", "commands/sync.sh"} {
 		if _, err := os.Stat(filepath.Join(cacheDir, filepath.FromSlash(rel))); err != nil {
 			t.Fatalf("bootstrap cache missing %s after concurrent bootstrap: %v", rel, err)
 		}
@@ -341,9 +348,9 @@ schema = 1
 func TestEnsureBootstrapFailsWhenAssetMissing(t *testing.T) {
 	old := BootstrapPacks
 	BootstrapPacks = []Entry{{
-		Name:     "import",
-		Source:   "github.com/gastownhall/gc-import",
-		Version:  "0.2.0",
+		Name:     "registry",
+		Source:   "github.com/gastownhall/gc-registry",
+		Version:  "0.1.0",
 		AssetDir: "packs/missing",
 	}}
 	t.Cleanup(func() { BootstrapPacks = old })
@@ -355,11 +362,11 @@ func TestEnsureBootstrapFailsWhenAssetMissing(t *testing.T) {
 
 func TestEnsureBootstrapFailsWhenPackTomlMissing(t *testing.T) {
 	assetsRoot := t.TempDir()
-	path := filepath.Join(assetsRoot, "packs", "import", "commands")
+	path := filepath.Join(assetsRoot, "packs", "registry", "commands")
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(path, "add.py"), []byte("print('hi')\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(path, "sync.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -369,10 +376,10 @@ func TestEnsureBootstrapFailsWhenPackTomlMissing(t *testing.T) {
 
 	old := BootstrapPacks
 	BootstrapPacks = []Entry{{
-		Name:     "import",
-		Source:   "github.com/gastownhall/gc-import",
-		Version:  "0.2.0",
-		AssetDir: "packs/import",
+		Name:     "registry",
+		Source:   "github.com/gastownhall/gc-registry",
+		Version:  "0.1.0",
+		AssetDir: "packs/registry",
 	}}
 	t.Cleanup(func() { BootstrapPacks = old })
 

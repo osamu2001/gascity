@@ -32,8 +32,8 @@ type Entry struct {
 }
 
 // BootstrapPacks is the hardcoded set of implicit packs bootstrapped by gc init.
+// Built-in gc import is authoritative and is not bootstrapped as a pack.
 var BootstrapPacks = []Entry{
-	{Name: "import", Source: "github.com/gastownhall/gc-import", Version: "0.2.0", AssetDir: "packs/import"},
 	{Name: "registry", Source: "github.com/gastownhall/gc-registry", Version: "0.1.0", AssetDir: "packs/registry"},
 	{Name: "core", Source: "github.com/gastownhall/gc-core", Version: "0.1.0", AssetDir: "packs/core"},
 }
