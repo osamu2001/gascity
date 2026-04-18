@@ -146,12 +146,10 @@ type = "task"
 	}
 
 	// Enable graph workflow features.
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
+	formula.EnableV2ForTest(t)
 	prevGraphApply := molecule.IsGraphApplyEnabled()
-	formula.SetFormulaV2Enabled(true)
 	molecule.SetGraphApplyEnabled(true)
 	t.Cleanup(func() {
-		formula.SetFormulaV2Enabled(prevFormulaV2)
 		molecule.SetGraphApplyEnabled(prevGraphApply)
 	})
 

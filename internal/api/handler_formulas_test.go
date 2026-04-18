@@ -552,9 +552,7 @@ func (s failPerRootChildLookupStore) List(query beads.ListQuery) ([]beads.Bead, 
 }
 
 func TestFormulaPreviewAcceptsTypedVarsBody(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formula.EnableV2ForTest(t)
 
 	state := newFakeState(t)
 	// api.New(state) calls syncFeatureFlags(state.Config()), which pulls
