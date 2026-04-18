@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -148,14 +149,26 @@ func TestEnsureSessionForTemplate_PoolTemplateWithoutAliasUsesGeneratedWorkDirId
 	if len(all) != 2 {
 		t.Fatalf("session bead count = %d, want 2", len(all))
 	}
+	seenWorkDir := make(map[string]bool, len(all))
 	for _, bead := range all {
 		sessionName := bead.Metadata["session_name"]
 		if sessionName == "" {
 			t.Fatal("session_name should be populated")
 		}
-		wantWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", sessionName)
-		if got := bead.Metadata["work_dir"]; got != wantWorkDir {
-			t.Fatalf("work_dir(%q) = %q, want %q", sessionName, got, wantWorkDir)
+		workDir := bead.Metadata["work_dir"]
+		if filepath.Dir(workDir) != filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants") {
+			t.Fatalf("work_dir(%q) parent = %q, want %q", sessionName, filepath.Dir(workDir), filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants"))
 		}
+		base := filepath.Base(workDir)
+		if base == "ant" {
+			t.Fatalf("work_dir(%q) base = %q, want unique generated identity", sessionName, base)
+		}
+		if !strings.HasPrefix(base, "ant-adhoc-") {
+			t.Fatalf("work_dir(%q) base = %q, want ant-adhoc-*", sessionName, base)
+		}
+		if seenWorkDir[workDir] {
+			t.Fatalf("duplicate work_dir %q for aliasless pooled sessions", workDir)
+		}
+		seenWorkDir[workDir] = true
 	}
 }

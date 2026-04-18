@@ -278,14 +278,21 @@ func TestCmdSessionNew_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *t
 			t.Fatalf("duplicate session_name %q for aliasless pooled sessions", sessionName)
 		}
 		seenSessionName[sessionName] = true
-		wantWorkDir := filepath.Join(cityDir, ".gc", "worktrees", "demo", "ants", sessionName)
-		if got := bead.Metadata["work_dir"]; got != wantWorkDir {
-			t.Fatalf("work_dir(%q) = %q, want %q", sessionName, got, wantWorkDir)
+		workDir := bead.Metadata["work_dir"]
+		if filepath.Dir(workDir) != filepath.Join(cityDir, ".gc", "worktrees", "demo", "ants") {
+			t.Fatalf("work_dir(%q) parent = %q, want %q", sessionName, filepath.Dir(workDir), filepath.Join(cityDir, ".gc", "worktrees", "demo", "ants"))
 		}
-		if seenWorkDir[wantWorkDir] {
-			t.Fatalf("duplicate work_dir %q for aliasless pooled sessions", wantWorkDir)
+		base := filepath.Base(workDir)
+		if base == "ant" {
+			t.Fatalf("work_dir(%q) base = %q, want unique generated identity", sessionName, base)
 		}
-		seenWorkDir[wantWorkDir] = true
+		if !strings.HasPrefix(base, "ant-adhoc-") {
+			t.Fatalf("work_dir(%q) base = %q, want ant-adhoc-*", sessionName, base)
+		}
+		if seenWorkDir[workDir] {
+			t.Fatalf("duplicate work_dir %q for aliasless pooled sessions", workDir)
+		}
+		seenWorkDir[workDir] = true
 	}
 }
 
