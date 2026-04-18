@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -617,7 +616,7 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 	}
 	searchPaths := s.sessionLogSearchPaths
 	if searchPaths == nil {
-		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
 	adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
 	provider := strings.TrimSpace(agentCfg.Provider)

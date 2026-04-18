@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -63,19 +62,19 @@ type sessionRespondRequest struct {
 }
 
 type sessionTranscriptResponse struct {
-	ID         string                     `json:"id"`
-	Template   string                     `json:"template"`
-	Format     string                     `json:"format"`
-	Turns      []outputTurn               `json:"turns"`
-	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+	ID         string                       `json:"id"`
+	Template   string                       `json:"template"`
+	Format     string                       `json:"format"`
+	Turns      []outputTurn                 `json:"turns"`
+	Pagination *worker.TranscriptPagination `json:"pagination,omitempty"`
 }
 
 type sessionRawTranscriptResponse struct {
-	ID         string                     `json:"id"`
-	Template   string                     `json:"template"`
-	Format     string                     `json:"format"`
-	Messages   []json.RawMessage          `json:"messages"`
-	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+	ID         string                       `json:"id"`
+	Template   string                       `json:"template"`
+	Format     string                       `json:"format"`
+	Messages   []json.RawMessage            `json:"messages"`
+	Pagination *worker.TranscriptPagination `json:"pagination,omitempty"`
 }
 
 // SessionStreamMessageEvent carries normalized conversation turns on the
@@ -106,9 +105,9 @@ func (s *Server) sessionLogPaths() []string {
 	}
 	cfg := s.state.Config()
 	if cfg == nil {
-		return sessionlog.DefaultSearchPaths()
+		return worker.DefaultSearchPaths()
 	}
-	return sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	return worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 }
 
 func sessionCreateHints(resolved *config.ResolvedProvider) runtime.Config {
@@ -1479,7 +1478,7 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.Respo
 		lastSize = stat.Size()
 
 		// Compute activity early (used after message emission).
-		activity := sessionlog.InferActivityFromEntries(sess.Messages)
+		activity := worker.InferTranscriptActivity(sess.Messages)
 
 		// Keep raw bytes end-to-end. Previously we Unmarshaled entry.Raw
 		// into `any` and remarshaled in wrapRawFrames — that round-trip
@@ -1631,7 +1630,7 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, send sse.Sender
 		lastSize = stat.Size()
 
 		// Compute activity early (used after turn emission).
-		activity := sessionlog.InferActivityFromEntries(sess.Messages)
+		activity := worker.InferTranscriptActivity(sess.Messages)
 
 		turns := make([]outputTurn, 0, len(sess.Messages))
 		uuids := make([]string, 0, len(sess.Messages))

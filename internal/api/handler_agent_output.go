@@ -14,7 +14,6 @@ import (
 
 	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -28,10 +27,10 @@ type outputTurn struct {
 
 // agentOutputResponse is the response for GET /v0/agent/{name}/output.
 type agentOutputResponse struct {
-	Agent      string                     `json:"agent"`
-	Format     string                     `json:"format"` // "conversation" or "text"
-	Turns      []outputTurn               `json:"turns"`
-	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+	Agent      string                       `json:"agent"`
+	Format     string                       `json:"format"` // "conversation" or "text"
+	Turns      []outputTurn                 `json:"turns"`
+	Pagination *worker.TranscriptPagination `json:"pagination,omitempty"`
 }
 
 // trySessionLogOutputHuma is the Huma-compatible variant of trySessionLogOutput.
@@ -52,7 +51,7 @@ func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tai
 
 	searchPaths := s.sessionLogSearchPaths
 	if searchPaths == nil {
-		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
 	adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
 	path := adapter.DiscoverTranscript(provider, workDir, "")
@@ -169,8 +168,8 @@ func (s *Server) resolveAgentWorkDir(a config.Agent, qualifiedName string) strin
 	)
 }
 
-// entryToTurn converts a sessionlog Entry to a human-readable outputTurn.
-func entryToTurn(e *sessionlog.Entry) outputTurn {
+// entryToTurn converts a provider transcript entry to a human-readable output turn.
+func entryToTurn(e *worker.TranscriptEntry) outputTurn {
 	turn := outputTurn{
 		Role: e.Type,
 	}
@@ -348,7 +347,7 @@ func extractToolResultText(raw json.RawMessage) string {
 		return s
 	}
 	// Try array of content blocks.
-	var blocks []sessionlog.ContentBlock
+	var blocks []worker.TranscriptContentBlock
 	if json.Unmarshal(raw, &blocks) == nil {
 		var parts []string
 		for _, b := range blocks {
@@ -387,7 +386,7 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 	}
 	searchPaths := s.sessionLogSearchPaths
 	if searchPaths == nil {
-		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
 	adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
 
@@ -653,7 +652,7 @@ func unwrapDoubleEncoded(raw []byte) string {
 	if err := json.Unmarshal(raw, &inner); err == nil {
 		raw = []byte(inner)
 	}
-	var mc sessionlog.MessageContent
+	var mc worker.TranscriptMessageContent
 	if err := json.Unmarshal(raw, &mc); err != nil {
 		return ""
 	}
@@ -663,7 +662,7 @@ func unwrapDoubleEncoded(raw []byte) string {
 		return s
 	}
 	// Try array of content blocks.
-	var blocks []sessionlog.ContentBlock
+	var blocks []worker.TranscriptContentBlock
 	if err := json.Unmarshal(mc.Content, &blocks); err == nil {
 		var parts []string
 		for _, b := range blocks {
