@@ -156,18 +156,32 @@ func TestEnsureBootstrapEmbedsImportPackRuntimeFiles(t *testing.T) {
 	entry := entries["import"]
 	cacheDir := config.GlobalRepoCachePath(gcHome, entry.Source, entry.Commit)
 
-	for _, rel := range []string{"pack.toml", "commands/add.py", "lib/implicit.py"} {
+	for _, rel := range []string{"pack.toml", "commands/add/add.py", "commands/add/command.toml", "lib/implicit.py"} {
 		if _, err := os.Stat(filepath.Join(cacheDir, filepath.FromSlash(rel))); err != nil {
 			t.Fatalf("embedded import asset %s missing from cache: %v", rel, err)
 		}
 	}
 
-	info, err := os.Stat(filepath.Join(cacheDir, "doctor", "check-python.sh"))
+	info, err := os.Stat(filepath.Join(cacheDir, "doctor", "python3.11", "run.sh"))
 	if err != nil {
 		t.Fatalf("embedded doctor script missing from cache: %v", err)
 	}
 	if info.Mode().Perm()&0o111 == 0 {
-		t.Fatalf("doctor/check-python.sh should be executable, mode = %o", info.Mode().Perm())
+		t.Fatalf("doctor/python3.11/run.sh should be executable, mode = %o", info.Mode().Perm())
+	}
+
+	// Python command entrypoints need the exec bit too — V2 discovery
+	// invokes the resolved run path directly, relying on the shebang.
+	// Without +x the kernel rejects execve with "permission denied".
+	for _, name := range []string{"add", "remove", "install", "upgrade", "list"} {
+		rel := filepath.Join("commands", name, name+".py")
+		pyInfo, err := os.Stat(filepath.Join(cacheDir, rel))
+		if err != nil {
+			t.Fatalf("embedded %s missing from cache: %v", rel, err)
+		}
+		if pyInfo.Mode().Perm()&0o111 == 0 {
+			t.Errorf("%s should be executable, mode = %o", rel, pyInfo.Mode().Perm())
+		}
 	}
 }
 
