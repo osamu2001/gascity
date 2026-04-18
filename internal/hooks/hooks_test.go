@@ -118,7 +118,7 @@ func TestInstallClaude(t *testing.T) {
 
 func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 	fs := fsys.NewFake()
-	current, err := readEmbedded("config/claude.json")
+	current, err := readEmbedded()
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestInstallClaudeTolerantToUnreadableLegacyCandidate(t *testing.T) {
 // override the user's chosen source.
 func TestInstallClaudePinnedHookFileOutranksRuntime(t *testing.T) {
 	fs := fsys.NewFake()
-	base, err := readEmbedded("config/claude.json")
+	base, err := readEmbedded()
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}

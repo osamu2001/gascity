@@ -163,7 +163,12 @@ func hookFileSafeToRewrite(fs fsys.FS, hookDst string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-func readEmbedded(embedPath string) ([]byte, error) {
+// readEmbedded returns the embedded Claude defaults (config/claude.json).
+// The path is fixed — the embed directive only captures that one file —
+// so the parameter would be dead weight (and tripped up the unparam
+// linter). All callers read the same file.
+func readEmbedded() ([]byte, error) {
+	const embedPath = "config/claude.json"
 	data, err := configFS.ReadFile(embedPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded %s: %w", embedPath, err)
@@ -191,7 +196,7 @@ const (
 // for users whose source is hooks/claude.json or .gc/settings.json, not
 // just users on .claude/settings.json.
 func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSourceKind, error) {
-	base, err := readEmbedded("config/claude.json")
+	base, err := readEmbedded()
 	if err != nil {
 		return nil, claudeSettingsSourceNone, err
 	}
@@ -351,7 +356,7 @@ func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFi
 }
 
 func claudeFileNeedsUpgrade(existing []byte) bool {
-	current, err := readEmbedded("config/claude.json")
+	current, err := readEmbedded()
 	if err != nil {
 		return false
 	}
