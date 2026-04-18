@@ -2170,6 +2170,147 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 	}
 }
 
+func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title: "ants-ant-1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"session_name": "ants-ant-1",
+			"provider":     "claude",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	tp := TemplateParams{
+		Command: "claude",
+		// Shape matches setTemplateEnvIdentity output (GC_ALIAS+GC_AGENT stamped)
+		// plus an unrelated template key to verify the merge preserves it.
+		Env:                map[string]string{"GC_ALIAS": "ants-ant-1", "GC_AGENT": "ants-ant-1", "TEMPLATE_KEY": "keep"},
+		WorkDir:            t.TempDir(),
+		SessionName:        "ants-ant-1",
+		InstanceName:       "ants-ant-1",
+		PoolSlot:           1,
+		EnvIdentityStamped: true,
+		ResolvedProvider:   &config.ResolvedProvider{Name: "claude", PromptMode: "none"},
+		TemplateName:       "ants",
+	}
+
+	prepared, err := prepareStartCandidate(
+		startCandidate{session: &bead, tp: tp},
+		&config.City{},
+		store,
+		clock.Real{},
+	)
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	if got := prepared.cfg.Env["GC_ALIAS"]; got != "ants-ant-1" {
+		t.Fatalf("GC_ALIAS = %q, want %q (template value must survive merge when bead alias is empty)", got, "ants-ant-1")
+	}
+	if got := prepared.cfg.Env["GC_AGENT"]; got != "ants-ant-1" {
+		t.Fatalf("GC_AGENT = %q, want %q (companion identity key must also survive)", got, "ants-ant-1")
+	}
+	if got := prepared.cfg.Env["TEMPLATE_KEY"]; got != "keep" {
+		t.Fatalf("TEMPLATE_KEY = %q, want %q (unrelated template env must survive merge)", got, "keep")
+	}
+}
+
+func TestPrepareStartCandidate_EmptyAliasEverywhereKeepsEmptyForTmuxScrub(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title: "s-gc-test",
+		Type:  "task",
+		Metadata: map[string]string{
+			"session_name": "s-gc-test",
+			"provider":     "claude",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	tp := TemplateParams{
+		Command: "claude",
+		// Shape matches resolveTemplate output: GC_ALIAS is unconditionally
+		// seeded with qualifiedName on every session, pool or not. The guard
+		// must distinguish identity-stamped templates from the resolver's
+		// default stamping so that the empty runtime value still wins here
+		// and tmux emits `env -u GC_ALIAS`.
+		Env:              map[string]string{"GC_ALIAS": "s-gc-test", "GC_AGENT": "s-gc-test", "BASE": "1"},
+		WorkDir:          t.TempDir(),
+		SessionName:      "s-gc-test",
+		InstanceName:     "s-gc-test",
+		ResolvedProvider: &config.ResolvedProvider{Name: "claude", PromptMode: "none"},
+		TemplateName:     "s",
+		// EnvIdentityStamped is false — setTemplateEnvIdentity was not called.
+	}
+
+	prepared, err := prepareStartCandidate(
+		startCandidate{session: &bead, tp: tp},
+		&config.City{},
+		store,
+		clock.Real{},
+	)
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	got, ok := prepared.cfg.Env["GC_ALIAS"]
+	if !ok {
+		t.Fatalf("GC_ALIAS should be present with empty value so tmux emits `env -u GC_ALIAS`; got absent")
+	}
+	if got != "" {
+		t.Fatalf("GC_ALIAS = %q, want empty (tmux env -u scrub)", got)
+	}
+}
+
+func TestPrepareStartCandidate_NonEmptyBeadAliasOverridesTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title: "mayor",
+		Type:  "task",
+		Metadata: map[string]string{
+			"session_name": "s-mayor",
+			"provider":     "claude",
+			"alias":        "mayor",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	tp := TemplateParams{
+		Command:          "claude",
+		Env:              map[string]string{"GC_ALIAS": "stale-from-template"},
+		WorkDir:          t.TempDir(),
+		SessionName:      "s-mayor",
+		InstanceName:     "mayor",
+		ResolvedProvider: &config.ResolvedProvider{Name: "claude", PromptMode: "none"},
+		TemplateName:     "mayor",
+	}
+
+	prepared, err := prepareStartCandidate(
+		startCandidate{session: &bead, tp: tp},
+		&config.City{},
+		store,
+		clock.Real{},
+	)
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	if got := prepared.cfg.Env["GC_ALIAS"]; got != "mayor" {
+		t.Fatalf("GC_ALIAS = %q, want %q (runtime alias must override stale template value)", got, "mayor")
+	}
+}
+
 func TestConfirmPendingStart(t *testing.T) {
 	// commitStartResultTraced must transition freshly-spawned pool
 	// session beads from the pending states ("", creating, asleep,
