@@ -242,6 +242,53 @@ func TestCmdSessionNew_PoolTemplateUsesAliasBackedWorkDirIdentity(t *testing.T) 
 	}
 }
 
+func TestCmdSessionNew_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writePoolSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	for i := 0; i < 2; i++ {
+		stdout.Reset()
+		stderr.Reset()
+		if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, &stdout, &stderr); code != 0 {
+			t.Fatalf("cmdSessionNew(aliasless #%d) = %d, want 0; stderr=%s", i+1, code, stderr.String())
+		}
+	}
+
+	all := sessionBeads(t, cityDir)
+	if len(all) != 2 {
+		t.Fatalf("session beads = %d, want 2", len(all))
+	}
+
+	seenSessionName := make(map[string]bool, len(all))
+	seenWorkDir := make(map[string]bool, len(all))
+	for _, bead := range all {
+		if got := bead.Metadata["alias"]; got != "" {
+			t.Fatalf("alias = %q, want empty for aliasless pooled session", got)
+		}
+		sessionName := bead.Metadata["session_name"]
+		if sessionName == "" {
+			t.Fatal("session_name should be populated for aliasless pooled session")
+		}
+		if seenSessionName[sessionName] {
+			t.Fatalf("duplicate session_name %q for aliasless pooled sessions", sessionName)
+		}
+		seenSessionName[sessionName] = true
+		wantWorkDir := filepath.Join(cityDir, ".gc", "worktrees", "demo", "ants", sessionName)
+		if got := bead.Metadata["work_dir"]; got != wantWorkDir {
+			t.Fatalf("work_dir(%q) = %q, want %q", sessionName, got, wantWorkDir)
+		}
+		if seenWorkDir[wantWorkDir] {
+			t.Fatalf("duplicate work_dir %q for aliasless pooled sessions", wantWorkDir)
+		}
+		seenWorkDir[wantWorkDir] = true
+	}
+}
+
 // NOTE: session kill is tested via internal/session.Manager.Kill which
 // delegates to Provider.Stop. The CLI layer (cmdSessionKill) is a thin
 // wrapper that resolves the session ID and calls mgr.Kill, so it does

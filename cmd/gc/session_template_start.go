@@ -272,7 +272,16 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	if err != nil {
 		return "", err
 	}
-	workDir, err := resolveWorkDir(cityPath, cfg, agentCfg)
+	explicitName, err := sessionExplicitNameForNewSession(agentCfg, "")
+	if err != nil {
+		return "", err
+	}
+	workDir, err := resolveWorkDirForQualifiedName(
+		cityPath,
+		cfg,
+		agentCfg,
+		sessionWorkDirQualifiedName(cityPath, cfg, agentCfg, "", explicitName),
+	)
 	if err != nil {
 		return "", err
 	}

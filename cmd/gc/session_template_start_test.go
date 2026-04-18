@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"path/filepath"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -107,5 +108,54 @@ func TestEnsureSessionForTemplate_ReopensClosedNamedSessionWithCleanMetadata(t *
 	}
 	if reopened.Metadata["pending_create_claim"] != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", reopened.Metadata["pending_create_claim"])
+	}
+}
+
+func TestEnsureSessionForTemplate_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		Agents: []config.Agent{{
+			Name:              "ant",
+			Dir:               "demo",
+			StartCommand:      "true",
+			WorkDir:           ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(4),
+		}},
+	}
+	store := beads.NewMemStore()
+
+	firstName, err := ensureSessionForTemplate(cityPath, cfg, store, "demo/ant", io.Discard)
+	if err != nil {
+		t.Fatalf("ensureSessionForTemplate(first) = %v", err)
+	}
+	secondName, err := ensureSessionForTemplate(cityPath, cfg, store, "demo/ant", io.Discard)
+	if err != nil {
+		t.Fatalf("ensureSessionForTemplate(second) = %v", err)
+	}
+	if firstName == secondName {
+		t.Fatalf("session names should be unique, got %q for both", firstName)
+	}
+
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("session bead count = %d, want 2", len(all))
+	}
+	for _, bead := range all {
+		sessionName := bead.Metadata["session_name"]
+		if sessionName == "" {
+			t.Fatal("session_name should be populated")
+		}
+		wantWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", sessionName)
+		if got := bead.Metadata["work_dir"]; got != wantWorkDir {
+			t.Fatalf("work_dir(%q) = %q, want %q", sessionName, got, wantWorkDir)
+		}
 	}
 }
