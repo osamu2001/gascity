@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -930,6 +931,32 @@ func sweepUndesiredPoolSessionBeads(
 		}
 		if sp != nil && sp.IsRunning(bead.Metadata["session_name"]) {
 			continue
+		}
+		// Don't sweep beads that haven't had their tmux started yet — their
+		// work assignment window hasn't opened. Mirrors the same guard in
+		// reapStaleSessionBeads. Without this, a pool's freshly-created
+		// session bead gets swept on the same tick it's created (no work
+		// assigned → GCSweepSessionBeads closes it), spinning the pool in a
+		// rapid create→sweep→recreate loop.
+		if bead.Metadata["state"] == "creating" || strings.TrimSpace(bead.Metadata["pending_create_claim"]) == "true" {
+			continue
+		}
+		// Age grace period for the post-creating, pre-wake window. After
+		// session_lifecycle_parallel flips state from "creating" to
+		// "active" + state_reason=creation_complete, there's still a gap
+		// before the wake pipeline records last_woke_at. Sweeping that
+		// window produces the same spin as sweeping during creation —
+		// we observed pool sessions with state=active, last_woke=empty
+		// getting closed with close_reason=stale-session before wake ever
+		// landed. Beads that actually drained/stopped keep state values
+		// like "drained"/"asleep"/"failed-create" and are still eligible
+		// for sweep; only pin the active-but-never-woke transient window.
+		// staleCreatingStateTimeout (1m) matches reapStaleSessionBeads'
+		// symmetric age guard.
+		if bead.Metadata["state"] == "active" && strings.TrimSpace(bead.Metadata["last_woke_at"]) == "" {
+			if !bead.CreatedAt.IsZero() && time.Since(bead.CreatedAt) < staleCreatingStateTimeout {
+				continue
+			}
 		}
 		template := normalizedSessionTemplate(bead, cfg)
 		agentCfg := findAgentByTemplate(cfg, template)

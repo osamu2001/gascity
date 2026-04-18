@@ -95,6 +95,149 @@ func TestCityRuntimeRequestDeferredDrainFollowUpTick_PokesOnce(t *testing.T) {
 	}
 }
 
+// Pool session beads in the "creating" window (tmux not yet up, work not yet
+// assigned) must not be swept. Otherwise the sweep runs on the same tick the
+// pool creates the bead, observes zero assigned work, and closes it — the
+// pool re-spawns on the next tick, same fate, and the pool spins forever
+// without a session reaching the ready state.
+func TestSweepUndesiredPoolSessionBeads_SkipsCreatingState(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "creating",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		nil,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		runtime.NewFake(),
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 — creating state must be preserved", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("bead in creating state was swept closed: %+v", got)
+	}
+}
+
+// Age grace period: pool session beads that have moved past "creating" but
+// are still younger than staleCreatingStateTimeout must not be swept. The
+// tmux wake pipeline and work assignment happen across multiple ticks after
+// state=creation_complete is set; sweeping in that window causes the same
+// spin as sweeping during creation.
+func TestSweepUndesiredPoolSessionBeads_SkipsRecentlyCreated(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-recent",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			// Post-creating: state/state_reason are advanced but last_woke
+			// hasn't landed yet. The real-world state observed as being
+			// swept incorrectly.
+			"state":              "active",
+			"state_reason":       "creation_complete",
+			"continuation_epoch": "1",
+			"generation":         "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		nil,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		runtime.NewFake(),
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 — bead within staleCreatingStateTimeout window must survive", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("recently-created post-creating bead was swept: %+v", got)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_SkipsPendingCreateClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pending_create_claim": "true",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		nil,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		runtime.NewFake(),
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 — pending_create_claim must be preserved", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("bead with pending_create_claim was swept closed: %+v", got)
+	}
+}
+
 func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
