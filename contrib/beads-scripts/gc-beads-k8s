@@ -206,7 +206,8 @@ case "$op" in
       if [ -n "$CUSTOM_TYPES" ]; then
         run_bd config set types.custom "$CUSTOM_TYPES" >/dev/null 2>&1 || true
       else
-        custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec}"
+        # Must match the init-branch default below and doctor.RequiredCustomTypes.
+        custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence}"
         run_bd config set types.custom "$custom_types" >/dev/null 2>&1 || true
       fi
       exit 0

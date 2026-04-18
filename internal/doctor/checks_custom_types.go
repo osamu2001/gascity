@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -105,45 +106,68 @@ func (c *CustomTypesCheck) Fix(_ *CheckContext) error {
 		return nil
 	}
 	// Read the current list so we can preserve user-added types.
+	// If we cannot read it, return the error rather than overwriting —
+	// silently dropping user types is worse than failing loud.
 	current, err := getCustomTypes(c.Dir)
 	if err != nil {
-		// If we cannot read the current list, fall back to writing just the
-		// required list. This is a degraded but safe path.
-		return setCustomTypes(c.Dir, strings.Join(RequiredCustomTypes, ","))
+		return fmt.Errorf("reading current custom types: %w", err)
 	}
+	merged := mergeCustomTypes(current, RequiredCustomTypes)
+	return setCustomTypes(c.Dir, strings.Join(merged, ","))
+}
 
-	// Build the merged list: start with the current (preserved) types,
-	// then append any missing required types.
-	currentSet := make(map[string]bool, len(current))
-	var merged []string
+// mergeCustomTypes returns the union of current and required, in order:
+// current entries first (preserving user order), then any required entries
+// not already present. Empty/whitespace-only entries are dropped and
+// duplicates are removed.
+func mergeCustomTypes(current, required []string) []string {
+	seen := make(map[string]bool, len(current)+len(required))
+	merged := make([]string, 0, len(current)+len(required))
 	for _, t := range current {
 		trimmed := strings.TrimSpace(t)
 		if trimmed == "" {
 			continue
 		}
-		if !currentSet[trimmed] {
-			currentSet[trimmed] = true
-			merged = append(merged, trimmed)
+		if seen[trimmed] {
+			continue
 		}
+		seen[trimmed] = true
+		merged = append(merged, trimmed)
 	}
-	for _, req := range RequiredCustomTypes {
-		if !currentSet[req] {
-			currentSet[req] = true
-			merged = append(merged, req)
+	for _, req := range required {
+		if seen[req] {
+			continue
 		}
+		seen[req] = true
+		merged = append(merged, req)
 	}
-	return setCustomTypes(c.Dir, strings.Join(merged, ","))
+	return merged
 }
 
 // getCustomTypes reads the current types.custom config from a bd store.
+// Uses --json so an unset key returns an empty string value rather than
+// the human-readable "types.custom (not set)" sentinel (which would
+// otherwise be persisted as a fake custom type when Fix() merges).
 func getCustomTypes(dir string) ([]string, error) {
-	cmd := exec.Command("bd", "config", "get", "types.custom")
+	cmd := exec.Command("bd", "config", "get", "--json", "types.custom")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
-	raw := strings.TrimSpace(string(out))
+	return parseCustomTypesJSON(out)
+}
+
+// parseCustomTypesJSON decodes the output of `bd config get --json types.custom`
+// into a list of types. Empty values yield nil (not []string{""}).
+func parseCustomTypesJSON(out []byte) ([]string, error) {
+	var parsed struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return nil, fmt.Errorf("parsing bd config get output: %w", err)
+	}
+	raw := strings.TrimSpace(parsed.Value)
 	if raw == "" {
 		return nil, nil
 	}
