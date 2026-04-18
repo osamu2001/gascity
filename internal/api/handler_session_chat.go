@@ -369,7 +369,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	if kind == "agent" && alias != "" {
+	if kind == "agent" && alias != "" && agentSupportsMultipleSessions(agentCfg) {
 		alias = workdirutil.SessionQualifiedName(s.state.CityPath(), agentCfg, s.state.Config().Rigs, alias, "")
 	}
 	if kind == "agent" {

@@ -175,7 +175,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if alias != "" {
+	if alias != "" && isMultiSessionCfgAgent(&found) {
 		alias = workdirutil.SessionQualifiedName(cityPath, found, cfg.Rigs, alias, "")
 	}
 	explicitName, err := sessionExplicitNameForNewSession(&found, alias)
