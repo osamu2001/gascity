@@ -333,12 +333,13 @@ func TestMetadataPatchApplyReturnsMergedCopy(t *testing.T) {
 func TestCommitStartedPatchBuildsAtomicStartMetadata(t *testing.T) {
 	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
 	patch := CommitStartedPatch(CommitStartedPatchInput{
-		CoreHash:         "core-hash",
-		LiveHash:         "live-hash",
-		CoreBreakdown:    `{"command":"core-hash"}`,
-		ConfirmState:     true,
-		ClearSleepReason: true,
-		Now:              now,
+		CoreHash:                "core-hash",
+		LiveHash:                "live-hash",
+		CoreBreakdown:           `{"command":"core-hash"}`,
+		ConfirmState:            true,
+		ClearSleepReason:        true,
+		ClearPendingCreateClaim: true,
+		Now:                     now,
 	})
 
 	want := MetadataPatch{
@@ -350,9 +351,34 @@ func TestCommitStartedPatchBuildsAtomicStartMetadata(t *testing.T) {
 		"state_reason":         "creation_complete",
 		"creation_complete_at": now.Format(time.RFC3339),
 		"sleep_reason":         "",
+		"pending_create_claim": "",
 	}
 	if !reflect.DeepEqual(patch, want) {
 		t.Fatalf("patch = %#v, want %#v", patch, want)
+	}
+}
+
+// Callers that set ClearPendingCreateClaim must see the claim cleared in the
+// same batch as state/state_reason/creation_complete_at so the sweep never
+// observes a transient state where the claim is gone but the post-create
+// marker isn't set yet.
+func TestCommitStartedPatchClearsPendingCreateClaimAtomicallyWithStateTransition(t *testing.T) {
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	patch := CommitStartedPatch(CommitStartedPatchInput{
+		CoreHash:                "c",
+		LiveHash:                "l",
+		ConfirmState:            true,
+		ClearPendingCreateClaim: true,
+		Now:                     now,
+	})
+	required := []string{"state", "state_reason", "creation_complete_at", "pending_create_claim"}
+	for _, key := range required {
+		if _, ok := patch[key]; !ok {
+			t.Fatalf("patch missing %q — sweep-visibility atomicity broken: %#v", key, patch)
+		}
+	}
+	if patch["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", patch["pending_create_claim"])
 	}
 }
 

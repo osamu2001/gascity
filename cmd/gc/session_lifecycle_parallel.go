@@ -608,24 +608,25 @@ func commitStartResultTraced(
 		Actor:   "gc",
 		Subject: tp.DisplayName(),
 	})
-	if err := clearPendingCreateClaim(session, store); err != nil {
-		fmt.Fprintf(stderr, "session reconciler: clearing pending create claim for %s: %v\n", name, err) //nolint:errcheck
-	}
 	coreBreakdown := ""
 	if bdj, err := json.Marshal(result.prepared.coreBreakdown); err == nil {
 		coreBreakdown = string(bdj)
 	}
 	// Transition creating/asleep/drained beads to active once the runtime
 	// spawn has confirmed. Folded into this metadata batch so the state
-	// write is atomic with the hash writes and avoids a second round-trip
-	// per spawn. See confirmPendingStart for the state gate.
+	// write is atomic with the hash writes, the pending_create_claim
+	// clear, and the creation_complete_at marker. This prevents the sweep
+	// from observing a transient state where the claim is gone but the
+	// post-create marker hasn't landed yet. See confirmPendingStart for
+	// the state gate.
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
-		CoreHash:         result.prepared.coreHash,
-		LiveHash:         result.prepared.liveHash,
-		CoreBreakdown:    coreBreakdown,
-		ConfirmState:     confirmPendingStart(session.Metadata["state"]),
-		ClearSleepReason: session.Metadata["sleep_reason"] != "",
-		Now:              clk.Now(),
+		CoreHash:                result.prepared.coreHash,
+		LiveHash:                result.prepared.liveHash,
+		CoreBreakdown:           coreBreakdown,
+		ConfirmState:            confirmPendingStart(session.Metadata["state"]),
+		ClearSleepReason:        session.Metadata["sleep_reason"] != "",
+		ClearPendingCreateClaim: shouldRollbackPendingCreate(session),
+		Now:                     clk.Now(),
 	})
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
@@ -691,9 +692,6 @@ func recoverRunningPendingCreate(
 		}
 		return false
 	}
-	if err := clearPendingCreateClaim(session, store); err != nil {
-		return false
-	}
 	coreBreakdown := ""
 	if bdj, err := json.Marshal(prepared.coreBreakdown); err == nil {
 		coreBreakdown = string(bdj)
@@ -708,8 +706,9 @@ func recoverRunningPendingCreate(
 		CoreBreakdown: coreBreakdown,
 		ConfirmState: confirmPendingStart(session.Metadata["state"]) ||
 			sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) == sessionpkg.StateAwake,
-		ClearSleepReason: session.Metadata["sleep_reason"] != "",
-		Now:              now,
+		ClearSleepReason:        session.Metadata["sleep_reason"] != "",
+		ClearPendingCreateClaim: shouldRollbackPendingCreate(session),
+		Now:                     now,
 	})
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		if trace != nil {
