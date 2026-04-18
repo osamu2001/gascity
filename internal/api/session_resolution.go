@@ -407,49 +407,11 @@ func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store
 }
 
 func (s *Server) workerHandleForSession(store beads.Store, id string) (worker.Handle, error) {
-	catalog, err := s.workerSessionCatalog(store)
-	if err != nil {
-		return nil, err
-	}
-	info, err := catalog.Get(id)
-	if err != nil {
-		return nil, err
-	}
-
-	spec := worker.SessionSpec{
-		ID:       id,
-		Provider: info.Provider,
-		WorkDir:  info.WorkDir,
-		Resume: session.ProviderResume{
-			ResumeFlag:    info.ResumeFlag,
-			ResumeStyle:   info.ResumeStyle,
-			ResumeCommand: info.ResumeCommand,
-		},
-	}
-	if store != nil {
-		if bead, beadErr := store.Get(id); beadErr == nil {
-			if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
-				spec.Profile = worker.Profile(profile)
-			}
-		}
-	}
-	if resolved, workDir := s.resolveSessionRuntime(info); resolved != nil {
-		spec.Provider = firstNonEmptyString(resolved.Name, spec.Provider)
-		spec.WorkDir = firstNonEmptyString(spec.WorkDir, workDir)
-		spec.Hints = sessionResumeHints(resolved, spec.WorkDir)
-		spec.Resume = session.ProviderResume{
-			ResumeFlag:    resolved.ResumeFlag,
-			ResumeStyle:   resolved.ResumeStyle,
-			ResumeCommand: resolved.ResumeCommand,
-			SessionIDFlag: resolved.SessionIDFlag,
-		}
-	}
-
 	factory, err := s.workerFactory(store)
 	if err != nil {
 		return nil, err
 	}
-	return factory.Session(spec)
+	return factory.SessionByID(id)
 }
 
 func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) (worker.Handle, error) {
@@ -457,26 +419,18 @@ func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) 
 	if target == "" {
 		return nil, session.ErrSessionNotFound
 	}
+	factory, err := s.workerFactory(store)
+	if err != nil {
+		return nil, err
+	}
 	if store != nil {
 		if id, err := s.resolveSessionIDWithConfig(store, target); err == nil {
-			return s.workerHandleForSession(store, id)
+			return factory.SessionByID(id)
 		} else if !errors.Is(err, session.ErrSessionNotFound) {
 			return nil, err
 		}
 	}
-	sp := s.state.SessionProvider()
-	if sp == nil {
-		return nil, session.ErrSessionNotFound
-	}
-	sessionID, err := sp.GetMeta(target, "GC_SESSION_ID")
-	if store != nil && err == nil && strings.TrimSpace(sessionID) != "" {
-		return s.workerHandleForSession(store, strings.TrimSpace(sessionID))
-	}
-	return worker.NewRuntimeHandle(worker.RuntimeHandleConfig{
-		Provider:     sp,
-		SessionName:  target,
-		ProviderName: target,
-	})
+	return factory.HandleForTarget(target, nil)
 }
 
 func (s *Server) newWorkerSessionHandle(store beads.Store, spec worker.SessionSpec) (worker.Handle, error) {
