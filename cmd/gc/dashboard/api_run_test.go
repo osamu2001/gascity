@@ -125,6 +125,55 @@ func TestAPIHandlerRunExecutesShowViaAPI(t *testing.T) {
 	}
 }
 
+func TestAPIHandlerRunExecutesSlingViaAPIWithForce(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/sling" {
+			t.Fatalf("path = %q, want /v0/sling", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if got := body["bead"]; got != "BL-42" {
+			t.Fatalf("bead = %#v, want BL-42", got)
+		}
+		if got := body["target"]; got != "myrig/worker" {
+			t.Fatalf("target = %#v, want myrig/worker", got)
+		}
+		if got := body["formula"]; got != "graph-work" {
+			t.Fatalf("formula = %#v, want graph-work", got)
+		}
+		if got := body["force"]; got != true {
+			t.Fatalf("force = %#v, want true", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"slung","workflow_id":"wf-1","root_bead_id":"wf-1","mode":"attached"}`))
+	}))
+	defer srv.Close()
+
+	h := NewAPIHandler("/tmp/city", "test-city", srv.URL, "", 5*time.Second, 10*time.Second, "csrf-token")
+	req := httptest.NewRequest(http.MethodPost, "/api/run", strings.NewReader(`{"command":"sling BL-42 myrig/worker --force --formula=graph-work","confirmed":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Dashboard-Token", "csrf-token")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp CommandResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("success = false, error=%q", resp.Error)
+	}
+	if !strings.Contains(resp.Output, `"workflow_id": "wf-1"`) {
+		t.Fatalf("output %q missing workflow payload", resp.Output)
+	}
+}
+
 func TestAPIHandlerRunShowFailsClosedWhenAPIUnavailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)

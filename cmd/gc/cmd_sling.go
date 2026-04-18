@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -20,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/spf13/cobra"
 )
@@ -97,10 +99,7 @@ Examples:
 				return errExit
 			}
 			code := cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, stdout, stderr)
-			if code != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(code)
 		},
 	}
 	cmd.Flags().BoolVarP(&formula, "formula", "f", false, "treat argument as formula name")
@@ -323,6 +322,20 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		Runner:   runner,
 		Store:    store,
 		StoreRef: storeRef,
+		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
+			stores, err := openSourceWorkflowStores(cfg, cityPath, "")
+			if err != nil {
+				return nil, err
+			}
+			out := make([]sling.SourceWorkflowStore, 0, len(stores))
+			for _, storeView := range stores {
+				out = append(out, sling.SourceWorkflowStore{
+					Store:    storeView.store,
+					StoreRef: workflowStoreRefForDir(storeView.path, cityPath, cityName, cfg),
+				})
+			}
+			return out, nil
+		},
 	}
 
 	return doSlingBatch(opts, deps, store, stdout, stderr)
@@ -553,14 +566,19 @@ func printBatchSlingResult(result sling.SlingResult, stdout, stderr io.Writer) {
 		case child.Failed:
 			fmt.Fprintf(stderr, "  Failed %s: %s\n", child.BeadID, child.FailReason) //nolint:errcheck
 		case child.Routed:
-			if child.WispRootID != "" {
+			switch {
+			case child.WorkflowID != "":
+				fmt.Fprintf(stdout, "  Attached workflow %s (formula %q) to %s\n", child.WorkflowID, child.FormulaName, child.BeadID) //nolint:errcheck
+			case child.WispRootID != "":
 				label := "formula"
 				if result.Method == "batch-default-on" {
 					label = "default formula"
 				}
 				fmt.Fprintf(stdout, "  Attached wisp %s (%s %q) → %s\n", child.WispRootID, label, child.FormulaName, child.BeadID) //nolint:errcheck
 			}
-			fmt.Fprintf(stdout, "  Slung %s → %s\n", child.BeadID, result.Target) //nolint:errcheck
+			if child.WorkflowID == "" {
+				fmt.Fprintf(stdout, "  Slung %s → %s\n", child.BeadID, result.Target) //nolint:errcheck
+			}
 		}
 	}
 
@@ -598,6 +616,11 @@ func doSling(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, stderr
 	// even when the operation fails -- they provide context for the error.
 	printSlingWarnings(result, stderr)
 	if err != nil {
+		var conflictErr *sourceworkflow.ConflictError
+		if errors.As(err, &conflictErr) {
+			printSourceWorkflowConflict(stderr, conflictErr, deps.StoreRef)
+			return 3
+		}
 		fmt.Fprintln(stderr, err) //nolint:errcheck
 		return 1
 	}
@@ -646,6 +669,11 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdo
 		printSlingResult(result, stdout, stderr)
 	}
 	if err != nil {
+		var conflictErr *sourceworkflow.ConflictError
+		if errors.As(err, &conflictErr) {
+			printSourceWorkflowConflict(stderr, conflictErr, deps.StoreRef)
+			return 3
+		}
 		fmt.Fprintln(stderr, err) //nolint:errcheck
 		return 1
 	}
@@ -671,6 +699,32 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdo
 		doSlingNudge(result.NudgeAgent, deps.CityName, deps.CityPath, deps.Cfg, deps.SP, deps.Store, stdout, stderr)
 	}
 	return 0
+}
+
+func sourceWorkflowCleanupCommand(sourceBeadID, storeRef string) string {
+	args := []string{"gc workflow delete-source", sourceBeadID}
+	if storeRef = strings.TrimSpace(storeRef); storeRef != "" {
+		args = append(args, "--store-ref", storeRef)
+	}
+	args = append(args, "--apply")
+	return strings.Join(args, " ")
+}
+
+func printSourceWorkflowConflict(stderr io.Writer, conflictErr *sourceworkflow.ConflictError, storeRef string) {
+	if conflictErr == nil {
+		return
+	}
+	fmt.Fprintf(
+		stderr,
+		"gc sling: source bead %s already has live workflow(s): %s\n",
+		conflictErr.SourceBeadID,
+		strings.Join(conflictErr.WorkflowIDs, ","),
+	) //nolint:errcheck
+	fmt.Fprintf(
+		stderr,
+		"gc sling: use --force to override, or %s to clean up\n",
+		sourceWorkflowCleanupCommand(conflictErr.SourceBeadID, storeRef),
+	) //nolint:errcheck
 }
 
 // buildSlingFormulaVars merges caller-provided vars with the runtime context

@@ -7,6 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // BeadFromGetters tries multiple BeadQuerier implementations and returns
@@ -137,9 +138,35 @@ func HasMoleculeChildren(q BeadQuerier, beadID string, store beads.Store) bool {
 	return label != ""
 }
 
-// CheckNoMoleculeChildren returns an error if the bead already has an attached
-// molecule or wisp child that is still open. Auto-burn messages go to result.AutoBurned.
-func CheckNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, result *SlingResult) error {
+func closeAttachedBead(store beads.Store, attached beads.Bead) error {
+	if store == nil {
+		return fmt.Errorf("store unavailable")
+	}
+	if IsWorkflowAttachment(attached) {
+		_, err := sourceworkflow.CloseWorkflowSubtree(store, attached.ID)
+		return err
+	}
+	return store.Close(attached.ID)
+}
+
+func clearAttachmentMetadata(store beads.Store, parent beads.Bead, attached beads.Bead) error {
+	if store == nil || strings.TrimSpace(parent.ID) == "" || strings.TrimSpace(attached.ID) == "" {
+		return nil
+	}
+	if strings.TrimSpace(parent.Metadata["workflow_id"]) == attached.ID {
+		if err := store.SetMetadata(parent.ID, "workflow_id", ""); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(parent.Metadata["molecule_id"]) == attached.ID {
+		if err := store.SetMetadata(parent.ID, "molecule_id", ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, result *SlingResult, allowLiveWorkflow bool) error {
 	parent, ok := BeadFromGetters(beadID, q, store)
 	if !ok {
 		return nil
@@ -161,8 +188,20 @@ func CheckNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, re
 		if attached.Status == "closed" {
 			continue
 		}
+		if IsWorkflowAttachment(attached) {
+			if allowLiveWorkflow {
+				continue
+			}
+			return &sourceworkflow.ConflictError{
+				SourceBeadID: beadID,
+				WorkflowIDs:  []string{attached.ID},
+			}
+		}
 		if parentUnassigned && store != nil {
-			if burnErr := store.Close(attached.ID); burnErr == nil {
+			if burnErr := closeAttachedBead(store, attached); burnErr == nil {
+				if clearErr := clearAttachmentMetadata(store, parent, attached); clearErr != nil {
+					return clearErr
+				}
 				result.AutoBurned = append(result.AutoBurned, attached.ID)
 				continue
 			}
@@ -172,9 +211,27 @@ func CheckNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, re
 	return nil
 }
 
+// CheckNoMoleculeChildren returns an error if the bead already has an attached
+// molecule or wisp child that is still open. Auto-burn messages go to result.AutoBurned.
+func CheckNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, result *SlingResult) error {
+	return checkNoMoleculeChildren(q, beadID, store, result, false)
+}
+
 // CheckBatchNoMoleculeChildren checks all open children for existing molecule
 // attachments before any wisps are created.
 func CheckBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store beads.Store, result *SlingResult) error {
+	return checkBatchNoMoleculeChildren(q, open, store, result, false)
+}
+
+func CheckNoMoleculeChildrenAllowLiveWorkflow(q BeadQuerier, beadID string, store beads.Store, result *SlingResult) error {
+	return checkNoMoleculeChildren(q, beadID, store, result, true)
+}
+
+func CheckBatchNoMoleculeChildrenAllowLiveWorkflow(q BeadChildQuerier, open []beads.Bead, store beads.Store, result *SlingResult) error {
+	return checkBatchNoMoleculeChildren(q, open, store, result, true)
+}
+
+func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store beads.Store, result *SlingResult, allowLiveWorkflow bool) error {
 	var problems []string
 	for _, child := range open {
 		attachments, err := CollectAttachedBeads(child, store, q)
@@ -186,8 +243,18 @@ func CheckBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store b
 			if attached.Status == "closed" {
 				continue
 			}
+			if IsWorkflowAttachment(attached) {
+				if allowLiveWorkflow {
+					continue
+				}
+				problems = append(problems, fmt.Sprintf("%s (has %s %s)", child.ID, AttachmentLabel(attached), attached.ID))
+				continue
+			}
 			if childUnassigned && store != nil {
-				if burnErr := store.Close(attached.ID); burnErr == nil {
+				if burnErr := closeAttachedBead(store, attached); burnErr == nil {
+					if clearErr := clearAttachmentMetadata(store, child, attached); clearErr != nil {
+						return clearErr
+					}
 					result.AutoBurned = append(result.AutoBurned, attached.ID)
 					continue
 				}

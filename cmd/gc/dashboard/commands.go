@@ -83,7 +83,6 @@ var AllowedCommands = map[string]CommandMeta{
 
 // BlockedPatterns are regex patterns for commands that should never run from the dashboard.
 var BlockedPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`--force`),
 	regexp.MustCompile(`--hard`),
 	regexp.MustCompile(`\brm\b`),
 	regexp.MustCompile(`\bdelete\b`),
