@@ -557,7 +557,7 @@ func TestSweepUndesiredPoolSessionBeads_SkipsPendingCreateClaim(t *testing.T) {
 
 // pending_create_claim is an authoritative ownership flag for the lifecycle
 // reconciler (sessionStartRequested in session_reconcile.go). The sweep must
-// honour that contract regardless of age — expiring it here would let the
+// honor that contract regardless of age — expiring it here would let the
 // sweep close a bead the reconciler still considers live.
 func TestSweepUndesiredPoolSessionBeads_SkipsStalePendingCreateClaim(t *testing.T) {
 	store := beads.NewMemStore()
