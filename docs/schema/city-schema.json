@@ -1056,7 +1056,7 @@
         },
         "max_wakes_per_tick": {
           "type": "integer",
-          "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Raise this on cities with slow cold-starts (e.g. opus\ncold-start ~60s) where the default of 5 starves the rest of the\ncandidate queue for minutes. Nil (unset) defaults to 5. Values \u003c= 0\nare treated as the default — set a positive integer to override.",
+          "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Raise this on cities with slow cold-starts (e.g. opus\ncold-start ~60s) where the default of 5 starves the rest of the\ncandidate queue for minutes. Nil (unset) defaults to 5. Values \u003c= 0\nare treated as the default — set a positive integer to override.\n\nTradeoff: the default of 5 also bounds the process-spawn burst after a\ncontroller restart (thundering-herd protection). Raising it trades\nrestart burst for steady-state throughput; keep within what the host\ncan absorb.",
           "default": 5
         }
       },
