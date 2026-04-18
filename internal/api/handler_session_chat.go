@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 var errSessionTemplateNotFound = errors.New("session template not found")
@@ -148,44 +149,40 @@ func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvid
 
 func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config) {
 	cmd := session.BuildResumeCommand(info)
-
-	buildResolved := func(resolved *config.ResolvedProvider, workDir string) (string, runtime.Config) {
-		if resolved == nil {
-			return cmd, runtime.Config{WorkDir: workDir}
-		}
-		resolvedInfo := info
-		resolvedInfo.Command = resolved.CommandString()
-		resolvedInfo.Provider = resolved.Name
-		resolvedInfo.ResumeFlag = resolved.ResumeFlag
-		resolvedInfo.ResumeStyle = resolved.ResumeStyle
-		resolvedInfo.ResumeCommand = resolved.ResumeCommand
-		return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir)
+	resolved, workDir := s.resolveSessionRuntime(info)
+	if resolved == nil {
+		return cmd, runtime.Config{WorkDir: info.WorkDir}
 	}
+	resolvedInfo := info
+	resolvedInfo.Command = resolved.CommandString()
+	resolvedInfo.Provider = resolved.Name
+	resolvedInfo.ResumeFlag = resolved.ResumeFlag
+	resolvedInfo.ResumeStyle = resolved.ResumeStyle
+	resolvedInfo.ResumeCommand = resolved.ResumeCommand
+	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir)
+}
 
-	// Check persisted kind to avoid agent/provider name collisions.
-	// If kind is "provider", skip the agent template lookup entirely.
+func (s *Server) resolveSessionRuntime(info session.Info) (*config.ResolvedProvider, string) {
 	kind := s.sessionKind(info.ID)
-
 	if kind != "provider" {
 		resolved, workDir, _, _, err := s.resolveSessionTemplate(info.Template)
 		if err == nil {
 			if info.WorkDir != "" {
 				workDir = info.WorkDir
 			}
-			return buildResolved(resolved, workDir)
+			return resolved, workDir
 		}
 	}
 
-	// Provider path (explicit kind=provider, or agent template not found).
 	resolved, err := s.resolveBareProvider(info.Template)
 	if err != nil {
-		return cmd, runtime.Config{WorkDir: info.WorkDir}
+		return nil, ""
 	}
 	workDir := info.WorkDir
 	if workDir == "" {
 		workDir = s.state.CityPath()
 	}
-	return buildResolved(resolved, workDir)
+	return resolved, workDir
 }
 
 // sessionKind reads the persisted mc_session_kind from bead metadata.
@@ -233,7 +230,452 @@ func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectI
 	}
 }
 
-func (s *Server) emitClosedSessionSnapshot(send sse.Sender, info session.Info, logPath string) {
+func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+
+	mgr := s.sessionManager(store)
+	info, err := mgr.Get(id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+
+	path, err := mgr.TranscriptPath(id, s.sessionLogPaths())
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+
+	wantRaw := r.URL.Query().Get("format") == "raw"
+
+	if path != "" {
+		tail := 0
+		if v := r.URL.Query().Get("tail"); v != "" {
+			if n, convErr := strconv.Atoi(v); convErr == nil && n >= 0 {
+				tail = n
+			}
+		}
+		before := r.URL.Query().Get("before")
+
+		if wantRaw {
+			// Raw format uses ReadFileRaw (no display-type filtering) so
+			// all entry types are returned — consistent with the raw
+			// stream and snapshot paths.
+			var rawSess *sessionlog.Session
+			if before != "" {
+				rawSess, err = sessionlog.ReadProviderFileRawOlder(info.Provider, path, tail, before)
+			} else {
+				rawSess, err = sessionlog.ReadProviderFileRaw(info.Provider, path, tail)
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
+				return
+			}
+			msgs := make([]json.RawMessage, 0, len(rawSess.Messages))
+			for _, entry := range rawSess.Messages {
+				if len(entry.Raw) > 0 {
+					msgs = append(msgs, entry.Raw)
+				}
+			}
+			writeJSON(w, http.StatusOK, sessionRawTranscriptResponse{
+				ID:         info.ID,
+				Template:   info.Template,
+				Format:     "raw",
+				Messages:   msgs,
+				Pagination: rawSess.Pagination,
+			})
+			return
+		}
+
+		var sess *sessionlog.Session
+		if before != "" {
+			sess, err = sessionlog.ReadProviderFileOlder(info.Provider, path, tail, before)
+		} else {
+			sess, err = sessionlog.ReadProviderFile(info.Provider, path, tail)
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
+			return
+		}
+
+		turns := make([]outputTurn, 0, len(sess.Messages))
+		for _, entry := range sess.Messages {
+			turn := entryToTurn(entry)
+			if turn.Text == "" {
+				continue
+			}
+			turns = append(turns, turn)
+		}
+		writeJSON(w, http.StatusOK, sessionTranscriptResponse{
+			ID:         info.ID,
+			Template:   info.Template,
+			Format:     "conversation",
+			Turns:      turns,
+			Pagination: sess.Pagination,
+		})
+		return
+	}
+
+	if wantRaw {
+		writeJSON(w, http.StatusOK, sessionRawTranscriptResponse{
+			ID:       info.ID,
+			Template: info.Template,
+			Format:   "raw",
+			Messages: []json.RawMessage{},
+		})
+		return
+	}
+
+	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
+		output, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
+		if peekErr != nil {
+			writeError(w, http.StatusInternalServerError, "internal", peekErr.Error())
+			return
+		}
+		turns := []outputTurn{}
+		if output != "" {
+			turns = append(turns, outputTurn{Role: "output", Text: output})
+		}
+		writeJSON(w, http.StatusOK, sessionTranscriptResponse{
+			ID:       info.ID,
+			Template: info.Template,
+			Format:   "text",
+			Turns:    turns,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, sessionTranscriptResponse{
+		ID:       info.ID,
+		Template: info.Template,
+		Format:   "conversation",
+		Turns:    []outputTurn{},
+	})
+}
+
+func (s *Server) handleSessionSubmit(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	var body sessionSubmitRequest
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	if strings.TrimSpace(body.Message) == "" {
+		writeError(w, http.StatusBadRequest, "invalid", "message is required")
+		return
+	}
+	if body.Intent == "" {
+		body.Intent = session.SubmitIntentDefault
+	}
+	switch body.Intent {
+	case session.SubmitIntentDefault, session.SubmitIntentFollowUp, session.SubmitIntentInterruptNow:
+	default:
+		writeError(w, http.StatusBadRequest, "invalid", fmt.Sprintf("intent must be one of %q, %q, or %q", session.SubmitIntentDefault, session.SubmitIntentFollowUp, session.SubmitIntentInterruptNow))
+		return
+	}
+
+	idemKey := scopedIdemKey(r, r.Header.Get("Idempotency-Key"))
+	var bodyHash string
+	if idemKey != "" {
+		bodyHash = hashBody(body)
+		if s.idem.handleIdempotent(w, idemKey, bodyHash) {
+			return
+		}
+	}
+
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeResolveError(w, err)
+		return
+	}
+
+	outcome, err := s.submitMessageToSession(r.Context(), store, id, body.Message, body.Intent)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeSessionManagerError(w, err)
+		return
+	}
+
+	resp := map[string]any{
+		"status": "accepted",
+		"id":     id,
+		"queued": outcome.Queued,
+		"intent": string(body.Intent),
+	}
+	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
+	writeJSON(w, http.StatusAccepted, resp)
+}
+
+func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	var body sessionMessageRequest
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	if strings.TrimSpace(body.Message) == "" {
+		writeError(w, http.StatusBadRequest, "invalid", "message is required")
+		return
+	}
+
+	idemKey := scopedIdemKey(r, r.Header.Get("Idempotency-Key"))
+	var bodyHash string
+	if idemKey != "" {
+		bodyHash = hashBody(body)
+		if s.idem.handleIdempotent(w, idemKey, bodyHash) {
+			return
+		}
+	}
+
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeResolveError(w, err)
+		return
+	}
+
+	if err := s.sendUserMessageToSession(r.Context(), store, id, body.Message); err != nil {
+		s.idem.unreserve(idemKey)
+		writeSessionManagerError(w, err)
+		return
+	}
+
+	resp := map[string]string{"status": "accepted", "id": id}
+	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
+	writeJSON(w, http.StatusAccepted, resp)
+}
+
+func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+
+	mgr := s.sessionManager(store)
+	if err := mgr.Kill(id); err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
+}
+
+func (s *Server) handleSessionStop(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	if err := handle.Interrupt(r.Context(), worker.InterruptRequest{}); err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
+}
+
+func (s *Server) handleSessionPending(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+
+	mgr := s.sessionManager(store)
+	pending, supported, err := mgr.Pending(id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionPendingResponse{
+		Supported: supported,
+		Pending:   pending,
+	})
+}
+
+func (s *Server) handleSessionRespond(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+
+	var body sessionRespondRequest
+	if err := decodeBody(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	if body.Action == "" {
+		writeError(w, http.StatusBadRequest, "invalid", "action is required")
+		return
+	}
+
+	idemKey := scopedIdemKey(r, r.Header.Get("Idempotency-Key"))
+	var bodyHash string
+	if idemKey != "" {
+		bodyHash = hashBody(body)
+		if s.idem.handleIdempotent(w, idemKey, bodyHash) {
+			return
+		}
+	}
+
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeSessionManagerError(w, err)
+		return
+	}
+	if err := handle.Respond(r.Context(), worker.InteractionResponse{
+		RequestID: body.RequestID,
+		Action:    body.Action,
+		Text:      body.Text,
+		Metadata:  body.Metadata,
+	}); err != nil {
+		s.idem.unreserve(idemKey)
+		writeSessionManagerError(w, err)
+		return
+	}
+
+	resp := map[string]string{"status": "accepted", "id": id}
+	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
+	writeJSON(w, http.StatusAccepted, resp)
+}
+
+func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+
+	mgr := s.sessionManager(store)
+	info, err := mgr.Get(id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	path, err := mgr.TranscriptPath(id, s.sessionLogPaths())
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+
+	sp := s.state.SessionProvider()
+	running := info.State == session.StateActive && sp.IsRunning(info.SessionName)
+	if path == "" && !running {
+		writeError(w, http.StatusNotFound, "not_found", "session "+id+" has no live output")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	if info.State != "" {
+		w.Header().Set("GC-Session-State", string(info.State))
+	}
+	if !running {
+		w.Header().Set("GC-Session-Status", "stopped")
+	}
+	w.WriteHeader(http.StatusOK)
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		_ = err
+	}
+
+	ctx := r.Context()
+	format := r.URL.Query().Get("format")
+	if info.Closed {
+		if format == "raw" {
+			s.emitClosedSessionSnapshotRaw(w, info, path)
+		} else {
+			s.emitClosedSessionSnapshot(w, info, path)
+		}
+		return
+	}
+	switch {
+	case path != "":
+		if format == "raw" {
+			s.streamSessionTranscriptLogRaw(ctx, w, info, path)
+		} else {
+			s.streamSessionTranscriptLog(ctx, w, info, path)
+		}
+	case format == "raw":
+		// No log file yet. If the session is running, poll tmux pane content
+		// and wrap it as a fake raw JSONL assistant message so MC's existing
+		// rendering pipeline shows terminal output (e.g. OAuth prompts).
+		if running {
+			s.streamSessionPeekRaw(ctx, w, info)
+		} else {
+			data, _ := json.Marshal(sessionRawTranscriptResponse{
+				ID:       info.ID,
+				Template: info.Template,
+				Format:   "raw",
+				Messages: []json.RawMessage{},
+			})
+			writeSSE(w, "message", 1, data)
+		}
+		return
+	default:
+		s.streamSessionPeek(ctx, w, info)
+	}
+}
+
+func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.Info, logPath string) {
 	if logPath == "" {
 		return
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const (
@@ -116,76 +117,6 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 	}
 	retired := make([]beads.Bead, 0)
 	now := time.Now().UTC()
-	for _, b := range all {
-		if b.Status == "closed" || !apiIsNamedSessionBead(b) || apiNamedSessionIdentity(b) != spec.Identity || apiNamedSessionContinuityEligible(b) {
-			continue
-		}
-		if session.LifecycleIdentityReleased(b.Status, b.Metadata) {
-			retired = append(retired, b)
-			continue
-		}
-		if sessionName := strings.TrimSpace(b.Metadata["session_name"]); sessionName != "" && s.state.SessionProvider() != nil {
-			_ = s.state.SessionProvider().Stop(sessionName)
-		}
-		patch := session.RetireNamedSessionPatch(now, "continuity-ineligible-replacement", spec.Identity)
-		patch["alias_history"] = ""
-		if err := store.SetMetadataBatch(b.ID, patch); err != nil {
-			return nil, fmt.Errorf("retiring continuity-ineligible named session identifiers on %s: %w", b.ID, err)
-		}
-		retired = append(retired, b)
-	}
-	return retired, nil
-}
-
-func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Context, store beads.Store, retired []beads.Bead, replacementID string) error {
-	if store == nil || strings.TrimSpace(replacementID) == "" {
-		return nil
-	}
-	now := time.Now().UTC()
-	for _, b := range retired {
-		if err := reassignOpenWorkAssignedToSession(store, b.ID, replacementID); err != nil {
-			return err
-		}
-		if err := session.ReassignWaits(store, b.ID, replacementID); err != nil {
-			return fmt.Errorf("reassign waits from retired session %s to %s: %w", b.ID, replacementID, err)
-		}
-		if err := extmsg.ReassignSessionBindings(ctx, store, b.ID, replacementID, now); err != nil {
-			return fmt.Errorf("reassign external message bindings from retired session %s to %s: %w", b.ID, replacementID, err)
-		}
-	}
-	return nil
-}
-
-func reassignOpenWorkAssignedToSession(store beads.Store, oldID, newID string) error {
-	if store == nil || strings.TrimSpace(oldID) == "" || strings.TrimSpace(newID) == "" {
-		return nil
-	}
-	for _, status := range []string{"open", "in_progress"} {
-		work, err := store.List(beads.ListQuery{Assignee: oldID, Status: status})
-		if err != nil {
-			return fmt.Errorf("listing work assigned to retired session %s: %w", oldID, err)
-		}
-		for _, item := range work {
-			if session.IsSessionBeadOrRepairable(item) {
-				continue
-			}
-			if err := store.Update(item.ID, beads.UpdateOpts{Assignee: &newID}); err != nil {
-				return fmt.Errorf("reassign work %s from retired session %s to %s: %w", item.ID, oldID, newID, err)
-			}
-		}
-	}
-	return nil
-}
-
-func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.Store, spec apiNamedSessionSpec) error {
-	if store == nil {
-		return nil, nil
-	}
-	all, err := store.List(beads.ListQuery{Label: session.LabelSession})
-	if err != nil {
-		return nil, fmt.Errorf("listing sessions: %w", err)
-	}
-	retired := make([]beads.Bead, 0)
 	for _, b := range all {
 		if b.Status == "closed" || !apiIsNamedSessionBead(b) || apiNamedSessionIdentity(b) != spec.Identity || apiNamedSessionContinuityEligible(b) {
 			continue
@@ -439,29 +370,29 @@ func (s *Server) resolveSessionIDMaterializingNamedWithContext(ctx context.Conte
 }
 
 func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent) (session.SubmitOutcome, error) {
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return session.SubmitOutcome{}, err
 	}
-	resumeCommand, hints := s.buildSessionResume(info)
-	return mgr.Submit(ctx, id, message, resumeCommand, hints, intent)
+	result, err := handle.Message(ctx, worker.MessageRequest{
+		Text:     message,
+		Delivery: workerDeliveryIntent(intent),
+	})
+	if err != nil {
+		return session.SubmitOutcome{}, err
+	}
+	return session.SubmitOutcome{Queued: result.Queued}, nil
 }
 
 // sendBackgroundMessageToSession preserves the default provider nudge semantics
 // for system-driven messages that should respect wait-idle behavior when the
 // runtime supports it.
 func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return err
 	}
-	resumeCommand, hints := s.buildSessionResume(info)
-	if err := mgr.Send(ctx, id, message, resumeCommand, hints); err != nil {
-		return err
-	}
-	return nil
+	return handle.Nudge(ctx, worker.NudgeRequest{Text: message})
 }
 
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for
@@ -469,4 +400,67 @@ func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads
 func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
 	_, err := s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault)
 	return err
+}
+
+func (s *Server) workerHandleForSession(store beads.Store, id string) (*worker.SessionHandle, error) {
+	mgr := s.sessionManager(store)
+	info, err := mgr.Get(id)
+	if err != nil {
+		return nil, err
+	}
+
+	spec := worker.SessionSpec{
+		ID:       id,
+		Provider: info.Provider,
+		WorkDir:  info.WorkDir,
+		Resume: session.ProviderResume{
+			ResumeFlag:    info.ResumeFlag,
+			ResumeStyle:   info.ResumeStyle,
+			ResumeCommand: info.ResumeCommand,
+		},
+	}
+	if store != nil {
+		if bead, beadErr := store.Get(id); beadErr == nil {
+			if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
+				spec.Profile = worker.Profile(profile)
+			}
+		}
+	}
+	if resolved, workDir := s.resolveSessionRuntime(info); resolved != nil {
+		spec.Provider = firstNonEmptyString(resolved.Name, spec.Provider)
+		spec.WorkDir = firstNonEmptyString(spec.WorkDir, workDir)
+		spec.Hints = sessionResumeHints(resolved, spec.WorkDir)
+		spec.Resume = session.ProviderResume{
+			ResumeFlag:    resolved.ResumeFlag,
+			ResumeStyle:   resolved.ResumeStyle,
+			ResumeCommand: resolved.ResumeCommand,
+			SessionIDFlag: resolved.SessionIDFlag,
+		}
+	}
+
+	return worker.NewSessionHandle(worker.SessionHandleConfig{
+		Manager:     mgr,
+		SearchPaths: s.sessionLogPaths(),
+		Session:     spec,
+	})
+}
+
+func workerDeliveryIntent(intent session.SubmitIntent) worker.DeliveryIntent {
+	switch intent {
+	case session.SubmitIntentFollowUp:
+		return worker.DeliveryIntentFollowUp
+	case session.SubmitIntentInterruptNow:
+		return worker.DeliveryIntentInterruptNow
+	default:
+		return worker.DeliveryIntentDefault
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // outputTurn is a single conversation turn in the unified output response.
@@ -49,7 +50,7 @@ func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tai
 	if searchPaths == nil {
 		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
-	path := sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
+	path := workertranscript.DiscoverPath(searchPaths, provider, workDir, "")
 	if path == "" {
 		return nil, nil
 	}
@@ -180,6 +181,69 @@ func extractToolResultText(raw json.RawMessage) string {
 
 // outputStreamPollInterval controls how often the stream checks for new output.
 const outputStreamPollInterval = 2 * time.Second
+
+// handleAgentOutputStream streams agent output as SSE events.
+// New turns are sent as they appear; keepalives are sent every 15s.
+//
+// SSE event format:
+//
+//	event: turn
+//	data: {"turns": [...]}
+func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request, name string) {
+	cfg := s.state.Config()
+	agentCfg, ok := findAgent(cfg, name)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not found")
+		return
+	}
+
+	// Try session log streaming first, fall back to peek polling.
+	workDir := s.resolveAgentWorkDir(agentCfg, name)
+	provider := strings.TrimSpace(agentCfg.Provider)
+	if provider == "" {
+		provider = strings.TrimSpace(cfg.Workspace.Provider)
+	}
+	searchPaths := s.sessionLogSearchPaths
+	if searchPaths == nil {
+		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	}
+
+	var logPath string
+	if workDir != "" {
+		logPath = workertranscript.DiscoverPath(searchPaths, provider, workDir, "")
+	}
+
+	// Check if agent is running.
+	sp := s.state.SessionProvider()
+	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
+	running := sp.IsRunning(sessionName)
+
+	// If no session log and agent isn't running, return 404 before committing SSE headers.
+	if logPath == "" && !running {
+		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not running")
+		return
+	}
+
+	// Commit SSE headers. Include agent status so clients can distinguish
+	// live streaming from historical replay.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	if !running {
+		w.Header().Set("GC-Agent-Status", "stopped")
+	}
+	w.WriteHeader(http.StatusOK)
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		_ = err
+	}
+
+	ctx := r.Context()
+	if logPath != "" {
+		s.streamSessionLog(ctx, w, name, logPath)
+	} else {
+		s.streamPeekOutput(ctx, w, name, cfg)
+	}
+}
 
 // streamSessionLog polls a session log file and emits new turns as SSE events.
 // Uses file size tracking to skip re-reads when the file hasn't grown, and

@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // sessionResponse is the JSON representation of a chat session.
@@ -207,11 +208,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		// Prefer session-key lookup to avoid cross-reading another session's transcript.
 		// Cache the resolved file path — session files don't move once created.
 		var sessionFile string
-		if info.SessionKey != "" {
-			sessionFile = sessionlog.FindSessionFileByID(searchPaths, workDir, info.SessionKey)
-		} else {
-			sessionFile = sessionlog.FindSessionFileForProvider(searchPaths, info.Provider, workDir)
-		}
+		sessionFile = workertranscript.DiscoverPath(searchPaths, info.Provider, workDir, info.SessionKey)
 		if sessionFile != "" {
 			if meta, err := sessionlog.ExtractTailMeta(sessionFile); err == nil && meta != nil {
 				resp.Model = meta.Model
