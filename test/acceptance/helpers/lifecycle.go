@@ -1,6 +1,7 @@
 package acceptancehelpers
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -143,26 +144,71 @@ func (c *City) WaitForReport(name string, timeout time.Duration) map[string]stri
 }
 
 // dumpDiagnostics prints useful debugging info when a report wait fails.
+// Each external command is bounded by diagTimeout so a wedged diagnostic
+// (e.g. an unresponsive supervisor under gc status) cannot convert a
+// ~60s report-wait failure into an indefinite CI stall.
 func (c *City) dumpDiagnostics(name string) {
 	c.t.Helper()
 	c.t.Logf("=== DIAGNOSTICS for %q in %s ===", name, c.Dir)
-	// Check .gc dir contents.
-	if out, err := exec.Command("bash", "-c", "find "+c.Dir+"/.gc -maxdepth 4 -type f 2>/dev/null | head -40").CombinedOutput(); err == nil {
-		c.t.Logf(".gc files:\n%s", out)
+
+	const diagTimeout = 10 * time.Second
+
+	// List .gc dir contents. Direct exec (no shell), so paths with spaces
+	// or glob metacharacters in TMPDIR don't break the diagnostic itself.
+	ctx, cancel := context.WithTimeout(context.Background(), diagTimeout)
+	if out, err := exec.CommandContext(ctx, "find", filepath.Join(c.Dir, ".gc"), "-maxdepth", "4", "-type", "f").CombinedOutput(); err == nil {
+		lines := strings.SplitN(string(out), "\n", 41)
+		if len(lines) > 40 {
+			lines = lines[:40]
+		}
+		c.t.Logf(".gc files:\n%s", strings.Join(lines, "\n"))
 	}
-	// Try gc status.
-	if out, err := c.GC("status", "--city", c.Dir); err == nil {
-		c.t.Logf("gc status:\n%s", out)
+	cancel()
+
+	// gc status. RunGC takes no context, so bound it via a goroutine timer.
+	statusCh := make(chan string, 1)
+	go func() {
+		out, err := c.GC("status", "--city", c.Dir)
+		if err != nil {
+			statusCh <- ""
+			return
+		}
+		statusCh <- out
+	}()
+	select {
+	case out := <-statusCh:
+		if out != "" {
+			c.t.Logf("gc status:\n%s", out)
+		}
+	case <-time.After(diagTimeout):
+		c.t.Logf("gc status: timed out after %s", diagTimeout)
 	}
-	// Dump recent supervisor log.
+
+	// Supervisor log tail.
 	if gcHome := c.Env.vars["GC_HOME"]; gcHome != "" {
-		if out, err := exec.Command("tail", "-n", "200", filepath.Join(gcHome, "supervisor.log")).CombinedOutput(); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), diagTimeout)
+		if out, err := exec.CommandContext(ctx, "tail", "-n", "200", filepath.Join(gcHome, "supervisor.log")).CombinedOutput(); err == nil {
 			c.t.Logf("supervisor.log tail:\n%s", out)
 		}
+		cancel()
 	}
-	// Dump any logs under .gc
-	if out, err := exec.Command("bash", "-c", "for f in "+c.Dir+"/.gc/*.log "+c.Dir+"/.gc/runtime/*.log; do echo \"--- $f ---\"; tail -n 100 \"$f\" 2>/dev/null; done").CombinedOutput(); err == nil {
-		c.t.Logf("city logs:\n%s", out)
+
+	// City logs: glob in Go + direct exec, to avoid shell interpolation
+	// and so each tail is individually time-bounded.
+	var logs []string
+	for _, pat := range []string{
+		filepath.Join(c.Dir, ".gc", "*.log"),
+		filepath.Join(c.Dir, ".gc", "runtime", "*.log"),
+	} {
+		matches, _ := filepath.Glob(pat)
+		logs = append(logs, matches...)
+	}
+	for _, f := range logs {
+		ctx, cancel := context.WithTimeout(context.Background(), diagTimeout)
+		if out, err := exec.CommandContext(ctx, "tail", "-n", "100", f).CombinedOutput(); err == nil {
+			c.t.Logf("--- %s ---\n%s", f, out)
+		}
+		cancel()
 	}
 }
 
@@ -218,9 +264,13 @@ func (c *City) WriteE2EConfig(agents []E2EAgent) {
 		// template is just config and never runs until work arrives. Drain-ack
 		// still transitions the session to the sticky "drained" state, so
 		// mode=always does not prevent the drain-ack tests from observing a
-		// stopped session.
+		// stopped session. Mirror a.Dir so rig-scoped agents resolve to the
+		// correct TemplateQualifiedName.
 		if !a.Suspended && a.Pool == nil {
 			fmt.Fprintf(&b, "\n[[named_session]]\ntemplate = %q\nmode = \"always\"\n", a.Name)
+			if a.Dir != "" {
+				fmt.Fprintf(&b, "dir = %q\n", a.Dir)
+			}
 		}
 	}
 
