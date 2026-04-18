@@ -357,7 +357,19 @@ func TestReconcileSessionBeads_DrainAckWithAssignedOpenWorkSleepsInsteadOfDraini
 	}
 }
 
-func TestReconcileSessionBeads_DrainAckPartialOwnershipSnapshotFailsClosed(t *testing.T) {
+// TestReconcileSessionBeads_DrainAckIgnoresStaleOwnershipSnapshot is the
+// regression guard for the stuck-pool-worker bug on ga-ttn5z. The drain-ack
+// handler used to take `hasAssignedWork` from an `ownershipWorkBeads`
+// snapshot captured earlier in the tick. Pool workers close their own
+// work bead with `bd close` BEFORE calling `gc runtime drain-ack`, so
+// the snapshot still reported the now-closed bead as open+assigned.
+// That falsely flipped the session into CompleteDrainPatch (state=asleep,
+// sleep_reason=idle) instead of AcknowledgeDrainPatch (state=drained),
+// which hid the bead from the close gate and stranded new queue work on
+// a ghost slot. Fix: drain-ack re-queries the live store, ignoring the
+// stale snapshot. This test exercises that path by passing a snapshot
+// that lies ("bead assigned, open") while the store says otherwise.
+func TestReconcileSessionBeads_DrainAckIgnoresStaleOwnershipSnapshot(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
@@ -366,12 +378,24 @@ func TestReconcileSessionBeads_DrainAckPartialOwnershipSnapshotFailsClosed(t *te
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
 
+	// Stale snapshot: claims an assigned open bead exists, but the live
+	// store has no such record (the agent already closed it before
+	// calling drain-ack).
+	stale := beads.Bead{
+		ID:       "stale-work",
+		Title:    "already closed",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	}
+	staleSnapshot := []beads.Bead{stale}
+
 	dops := newFakeDrainOps()
 	if err := dops.setDrainAck("worker"); err != nil {
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	woken := reconcileSessionBeadsAtPath(
+	reconcileSessionBeadsAtPath(
 		context.Background(),
 		"",
 		[]beads.Bead{session},
@@ -382,11 +406,11 @@ func TestReconcileSessionBeads_DrainAckPartialOwnershipSnapshotFailsClosed(t *te
 		env.store,
 		dops,
 		nil,
-		[]beads.Bead{},
+		staleSnapshot, // lies about assigned work
 		nil,
 		env.dt,
 		nil,
-		true,
+		false,
 		nil,
 		"",
 		nil,
@@ -397,24 +421,80 @@ func TestReconcileSessionBeads_DrainAckPartialOwnershipSnapshotFailsClosed(t *te
 		&env.stdout,
 		&env.stderr,
 	)
-	if woken != 0 {
-		t.Fatalf("woken = %d, want 0", woken)
-	}
 
 	got, err := env.store.Get(session.ID)
 	if err != nil {
 		t.Fatalf("Get(%s): %v", session.ID, err)
 	}
-	if got.Status == "closed" {
-		t.Fatalf("session bead closed unexpectedly: metadata=%v", got.Metadata)
-	}
-	if got.Metadata["state"] != "asleep" {
-		t.Fatalf("state = %q, want asleep when ownership snapshot is partial", got.Metadata["state"])
-	}
-	if got.Metadata["sleep_reason"] != "ownership_snapshot_partial" {
-		t.Fatalf("sleep_reason = %q, want ownership_snapshot_partial when ownership snapshot is partial", got.Metadata["sleep_reason"])
+	if got.Metadata["state"] != "drained" {
+		t.Fatalf("state = %q, want drained — live store query must override the stale snapshot that claimed assigned work", got.Metadata["state"])
 	}
 }
+
+// TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot is the other half
+// of the fix: even if a pool bead somehow lands in state=asleep +
+// sleep_reason=idle (from the old buggy drain-ack path OR any other
+// route), the close gate must still free the slot so the supervisor can
+// spawn a fresh worker for pending queue work. Before the fix the close
+// gate only fired for state=drained, so idle-asleep pool beads sat open
+// indefinitely and blocked new spawns.
+func TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", false) // NOT running
+	session := env.createSessionBead("worker", "worker")
+	// Simulate the post-drain-ack-ghost state: asleep + sleep_reason=idle
+	// + pool-managed, but the runtime has exited and no work is assigned.
+	env.setSessionMetadata(&session, map[string]string{
+		"state":              "asleep",
+		"sleep_reason":       "idle",
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		newFakeDrainOps(),
+		nil,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed — asleep-idle pool beads must free their slot", got.Status)
+	}
+}
+
+// (Removed: TestReconcileSessionBeads_DrainAckPartialOwnershipSnapshotFailsClosed
+// guarded the old snapshot-backed fail-closed path — the sleep_reason
+// "ownership_snapshot_partial" branch. Drain-ack now re-queries the store
+// live so the pre-close ownership snapshot can no longer leak into the
+// decision. Live store errors still fail closed, but the path that
+// produced the ownership_snapshot_partial reason is gone.)
 
 func TestReconcileSessionBeads_DrainAckResumeModePreservesSessionIdentity(t *testing.T) {
 	env := newReconcilerTestEnv()

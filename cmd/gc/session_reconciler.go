@@ -410,14 +410,22 @@ func reconcileSessionBeadsTraced(
 							Subject: tp.DisplayName(),
 							Message: "drain acknowledged by agent",
 						})
-						hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkWithSnapshot(store, *session, ownershipWorkBeads, ownershipWorkIndex, storeQueryPartial)
+						// Drain-ack lands here right after the agent ran
+						// `bd close` on its last unit of work. The cached
+						// `ownershipWorkBeads` snapshot taken earlier in
+						// this tick predates that close, so it still shows
+						// the bead as open+assigned and falsely flipped
+						// pool workers into CompleteDrainPatch
+						// (state=asleep + sleep_reason=idle) instead of
+						// AcknowledgeDrainPatch (state=drained). That hid
+						// the bead from the close gate and stranded new
+						// queue work on a ghost slot. Re-query the store
+						// so the decision reflects reality.
+						hasAssignedWork, assignedErr := sessionHasOpenAssignedWork(store, *session)
 						sleepReason := "idle"
 						if assignedErr != nil {
 							fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 							hasAssignedWork = true
-							if errors.Is(assignedErr, errOwnershipSnapshotPartial) {
-								sleepReason = "ownership_snapshot_partial"
-							}
 						}
 						batch := sessionpkg.AcknowledgeDrainPatch(session.Metadata["wake_mode"] == "fresh")
 						if hasAssignedWork {
@@ -859,16 +867,25 @@ func reconcileSessionBeadsTraced(
 			}
 		}
 
+		// Pool-managed sessions whose runtime has exited and whose bead is in
+		// a terminal sleep state (drained, or asleep from a normal idle drain)
+		// must free their slot so a fresh worker can spawn for new queue work.
+		// Anything else (wait-hold, pending interaction, named/singleton) is
+		// preserved. The stale `ownershipWorkBeads` snapshot taken earlier in
+		// the tick predates the agent's own `bd close` of its last unit of
+		// work, so we re-query the live store here and at the drain-ack
+		// handler above — never trust a stale snapshot for a decision that
+		// closes a bead.
 		hasAssignedWork := false
-		if !shouldWake && !target.alive && isDrainedSessionBead(*target.session) {
+		if !shouldWake && !target.alive && isPoolSessionSlotFreeable(*target.session) {
 			var assignedErr error
-			hasAssignedWork, assignedErr = sessionHasOpenAssignedWorkWithSnapshot(store, *target.session, ownershipWorkBeads, ownershipWorkIndex, storeQueryPartial)
+			hasAssignedWork, assignedErr = sessionHasOpenAssignedWork(store, *target.session)
 			if assignedErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: checking assigned work for drained %s: %v\n", target.session.Metadata["session_name"], assignedErr) //nolint:errcheck
 				hasAssignedWork = true
 			}
 		}
-		if !shouldWake && !target.alive && isDrainedSessionBead(*target.session) && !hasAssignedWork && isPoolManagedSessionBead(*target.session) {
+		if !shouldWake && !target.alive && isPoolSessionSlotFreeable(*target.session) && !hasAssignedWork && isPoolManagedSessionBead(*target.session) {
 			// Only pool-managed sessions are disposable after a completed drain.
 			// Singleton/named controller-managed identities must keep the same
 			// bead so later wake/restart happens in place instead of minting a
