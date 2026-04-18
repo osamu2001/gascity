@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -89,6 +91,69 @@ func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tai
 		Turns:      turns,
 		Pagination: sess.Pagination,
 	}, nil
+}
+
+// handleAgentOutput returns unified conversation output for an agent.
+// Tries structured session logs first, falls back to Peek().
+func (s *Server) handleAgentOutput(w http.ResponseWriter, r *http.Request, name string) {
+	cfg := s.state.Config()
+	agentCfg, ok := findAgent(cfg, name)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not found")
+		return
+	}
+
+	resp, err := s.trySessionLogOutput(r, name, agentCfg)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
+		return
+	}
+	if resp != nil {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	s.peekFallbackOutput(r.Context(), w, name, s.agentWorkerHandle(name, cfg))
+}
+
+// trySessionLogOutput is the legacy HTTP wrapper around the shared Huma
+// transcript reader.
+func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg config.Agent) (*agentOutputResponse, error) {
+	tailInput := 0
+	tailProvided := false
+	if rawTail := r.URL.Query().Get("tail"); rawTail != "" {
+		tailProvided = true
+		if parsedTail, err := strconv.Atoi(rawTail); err == nil && parsedTail >= 0 {
+			tailInput = parsedTail
+		}
+	}
+	return s.trySessionLogOutputHuma(name, agentCfg, tailInput, tailProvided, r.URL.Query().Get("before"))
+}
+
+// peekFallbackOutput returns raw terminal text wrapped as a single turn.
+func (s *Server) peekFallbackOutput(ctx context.Context, w http.ResponseWriter, name string, handle worker.Handle) {
+	running, err := workerHandleRunning(ctx, handle)
+	if err != nil || !running {
+		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not running")
+		return
+	}
+
+	output, err := handle.Peek(ctx, 100)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+
+	turns := []outputTurn{}
+	if output != "" {
+		turns = append(turns, outputTurn{Role: "output", Text: output})
+	}
+
+	writeJSON(w, http.StatusOK, agentOutputResponse{
+		Agent:  name,
+		Format: "text",
+		Turns:  turns,
+	})
 }
 
 // resolveAgentWorkDir returns the absolute working directory for an agent,
@@ -331,10 +396,8 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 		logPath = adapter.DiscoverTranscript(provider, workDir, "")
 	}
 
-	// Check if agent is running.
-	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-	running := sp.IsRunning(sessionName)
+	handle := s.agentWorkerHandle(name, cfg)
+	running, _ := workerHandleRunning(r.Context(), handle)
 
 	// If no session log and agent isn't running, return 404 before committing SSE headers.
 	if logPath == "" && !running {
@@ -505,10 +568,7 @@ func (s *Server) streamPeekOutput(ctx context.Context, send sse.Sender, name str
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
-
-	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-
+	handle := s.agentWorkerHandle(name, cfg)
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
@@ -518,10 +578,11 @@ func (s *Server) streamPeekOutput(ctx context.Context, send sse.Sender, name str
 	var seq int
 
 	emitPeek := func() {
-		if !sp.IsRunning(sessionName) {
+		running, err := workerHandleRunning(ctx, handle)
+		if err != nil || !running {
 			return
 		}
-		output, err := sp.Peek(sessionName, 100)
+		output, err := handle.Peek(ctx, 100)
 		if err != nil || output == lastOutput {
 			return
 		}
@@ -552,6 +613,33 @@ func (s *Server) streamPeekOutput(ctx context.Context, send sse.Sender, name str
 			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}
 	}
+}
+
+func (s *Server) agentWorkerHandle(name string, cfg *config.City) worker.Handle {
+	if cfg == nil {
+		return nil
+	}
+	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
+	handle, _ := s.workerHandleForSessionTarget(s.state.CityBeadStore(), sessionName)
+	return handle
+}
+
+func workerHandleRunning(ctx context.Context, handle worker.Handle) (bool, error) {
+	if handle == nil {
+		return false, nil
+	}
+	obs, err := worker.ObserveHandle(ctx, handle)
+	if err == nil {
+		return obs.Running, nil
+	}
+	state, stateErr := handle.State(ctx)
+	if stateErr != nil {
+		if errors.Is(err, worker.ErrOperationUnsupported) {
+			return false, stateErr
+		}
+		return false, err
+	}
+	return state.Phase != worker.PhaseStopped && state.Phase != worker.PhaseFailed, nil
 }
 
 // unwrapDoubleEncoded handles Claude's double-encoded message format

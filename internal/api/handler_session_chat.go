@@ -485,7 +485,9 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	if caps, capErr := s.sessionManager(store).SubmissionCapabilities(info.ID); capErr == nil {
 		resp.SubmissionCapabilities = caps
 	}
-	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
+	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
+		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false)
+	}
 	statusCode := http.StatusAccepted // always async for agent sessions
 	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)
 	writeJSON(w, statusCode, resp)
@@ -642,7 +644,9 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	if caps, capErr := s.sessionManager(store).SubmissionCapabilities(info.ID); capErr == nil {
 		resp.SubmissionCapabilities = caps
 	}
-	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
+	if handle, handleErr := s.workerHandleForSession(store, info.ID); handleErr == nil {
+		s.enrichSessionResponse(&resp, info, s.state.Config(), handle, false)
+	}
 	statusCode := http.StatusCreated
 	s.idem.storeResponse(idemKey, bodyHash, statusCode, resp)
 	writeJSON(w, statusCode, resp)
@@ -766,12 +770,12 @@ func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
-		output, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
-		if peekErr != nil {
-			writeError(w, http.StatusInternalServerError, "internal", peekErr.Error())
-			return
-		}
+	output, peekErr := handle.Peek(r.Context(), 100)
+	if peekErr != nil && !errors.Is(peekErr, session.ErrSessionInactive) {
+		writeError(w, http.StatusInternalServerError, "internal", peekErr.Error())
+		return
+	}
+	if peekErr == nil {
 		turns := []outputTurn{}
 		if output != "" {
 			turns = append(turns, outputTurn{Role: "output", Text: output})
@@ -909,8 +913,12 @@ func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mgr := s.sessionManager(store)
-	if err := mgr.Kill(id); err != nil {
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	if err := handle.Kill(r.Context()); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
@@ -1070,8 +1078,12 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sp := s.state.SessionProvider()
-	running := info.State == session.StateActive && sp.IsRunning(info.SessionName)
+	state, stateErr := handle.State(r.Context())
+	if stateErr != nil {
+		writeSessionManagerError(w, stateErr)
+		return
+	}
+	running := workerPhaseHasLiveOutput(state.Phase)
 	if !hasHistory && !running {
 		writeError(w, http.StatusNotFound, "not_found", "session "+id+" has no live output")
 		return
@@ -1092,6 +1104,37 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	send := sse.Sender(func(msg sse.Message) error {
+		switch data := msg.Data.(type) {
+		case SessionStreamRawMessageEvent:
+			payload, err := json.Marshal(data)
+			if err != nil {
+				return err
+			}
+			writeSSE(w, "message", msg.ID, payload)
+		case SessionStreamMessageEvent:
+			payload, err := json.Marshal(data)
+			if err != nil {
+				return err
+			}
+			writeSSE(w, "turn", msg.ID, payload)
+		case SessionActivityEvent:
+			payload, err := json.Marshal(data)
+			if err != nil {
+				return err
+			}
+			writeSSE(w, "activity", msg.ID, payload)
+		case runtime.PendingInteraction:
+			payload, err := json.Marshal(data)
+			if err != nil {
+				return err
+			}
+			writeSSE(w, "pending", msg.ID, payload)
+		case HeartbeatEvent:
+			writeSSEComment(w)
+		}
+		return nil
+	})
 	format := r.URL.Query().Get("format")
 	if info.Closed {
 		if format == "raw" {
@@ -1113,7 +1156,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		// and wrap it as a fake raw JSONL assistant message so MC's existing
 		// rendering pipeline shows terminal output (e.g. OAuth prompts).
 		if running {
-			s.streamSessionPeekRaw(ctx, w, info)
+			s.streamSessionPeekRaw(ctx, send, info)
 		} else {
 			data, _ := json.Marshal(sessionRawTranscriptResponse{
 				ID:       info.ID,
@@ -1125,7 +1168,16 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	default:
-		s.streamSessionPeek(ctx, w, info)
+		s.streamSessionPeek(ctx, send, info)
+	}
+}
+
+func workerPhaseHasLiveOutput(phase worker.Phase) bool {
+	switch phase {
+	case worker.PhaseStarting, worker.PhaseReady, worker.PhaseBusy, worker.PhaseBlocked, worker.PhaseStopping:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1648,8 +1700,10 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, send sse.Sender, info
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
-
-	sp := s.state.SessionProvider()
+	handle, err := s.workerHandleForSession(s.state.CityBeadStore(), info.ID)
+	if err != nil {
+		return
+	}
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
@@ -1661,10 +1715,10 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, send sse.Sender, info
 	var lastPeekPendingID string
 
 	emitPeek := func() {
-		if !sp.IsRunning(info.SessionName) {
+		output, err := handle.Peek(ctx, 100)
+		if errors.Is(err, session.ErrSessionInactive) {
 			return
 		}
-		output, err := sp.Peek(info.SessionName, 100)
 		if err != nil || output == lastOutput {
 			return
 		}
@@ -1692,15 +1746,13 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, send sse.Sender, info
 		}})
 
 		// Check for approval prompts in the pane output we already have.
-		if ip, ok := sp.(runtime.InteractionProvider); ok {
-			pending, pErr := ip.Pending(info.SessionName)
-			if pErr == nil && pending != nil && pending.RequestID != lastPeekPendingID {
-				lastPeekPendingID = pending.RequestID
-				seq++
-				_ = send(sse.Message{ID: seq, Data: *pending})
-			} else if pending == nil && lastPeekPendingID != "" {
-				lastPeekPendingID = ""
-			}
+		pending, pErr := handle.Pending(ctx)
+		if pErr == nil && pending != nil && pending.RequestID != lastPeekPendingID {
+			lastPeekPendingID = pending.RequestID
+			seq++
+			_ = send(sse.Message{ID: seq, Data: *pending})
+		} else if pending == nil && lastPeekPendingID != "" {
+			lastPeekPendingID = ""
 		}
 	}
 
@@ -1722,8 +1774,10 @@ func (s *Server) streamSessionPeek(ctx context.Context, send sse.Sender, info se
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
-
-	sp := s.state.SessionProvider()
+	handle, err := s.workerHandleForSession(s.state.CityBeadStore(), info.ID)
+	if err != nil {
+		return
+	}
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
@@ -1733,10 +1787,10 @@ func (s *Server) streamSessionPeek(ctx context.Context, send sse.Sender, info se
 	var seq int
 
 	emitPeek := func() {
-		if !sp.IsRunning(info.SessionName) {
+		output, err := handle.Peek(ctx, 100)
+		if errors.Is(err, session.ErrSessionInactive) {
 			return
 		}
-		output, err := sp.Peek(info.SessionName, 100)
 		if err != nil || output == lastOutput {
 			return
 		}
