@@ -16,7 +16,10 @@ metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
 
   if command -v gc >/dev/null 2>&1; then
-    rig_paths=$(gc rig list --json 2>/dev/null \
+    # Bound the gc rig list call: if gc is itself in a bad state (the
+    # failure mode this patrol is meant to detect) we must not block
+    # here. Degrade to the fallback rig scan below.
+    rig_paths=$(run_bounded 5 gc rig list --json 2>/dev/null \
       | if command -v jq >/dev/null 2>&1; then
           jq -r '.rigs[].path' 2>/dev/null
         else
@@ -63,6 +66,32 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Resolve a bounded-execution helper. Prefer gtimeout (coreutils on
+# macOS), fall back to timeout (coreutils on Linux), then to running
+# the command directly if neither is installed. Running unbounded is
+# still better than the old behavior, but the patrol's goal is a hard
+# upper bound so we prefer a real timeout wherever possible.
+if command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="gtimeout"
+elif command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="timeout"
+else
+  TIMEOUT_BIN=""
+fi
+
+# run_bounded SECS CMD...  — Run CMD with a wall-clock timeout. Exits
+# 124 on timeout (coreutils convention). When no timeout binary is
+# available the command runs unbounded; callers must still tolerate a
+# non-zero status.
+run_bounded() {
+  _t="$1"; shift
+  if [ -n "$TIMEOUT_BIN" ]; then
+    "$TIMEOUT_BIN" "$_t" "$@"
+  else
+    "$@"
+  fi
+}
+
 # Determine host for probing.
 host="${GC_DOLT_HOST:-127.0.0.1}"
 
@@ -70,6 +99,7 @@ host="${GC_DOLT_HOST:-127.0.0.1}"
 server_running=false
 server_pid=0
 server_latency=0
+server_reachable=false
 
 # Find dolt PID by port.
 pid=$(lsof -ti :"$GC_DOLT_PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
@@ -79,10 +109,17 @@ if [ -n "$pid" ]; then
   # Measure query latency.
   start_ms=$(date +%s%N 2>/dev/null | cut -c1-13 || date +%s)
   conn_args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"
-  if [ -n "$GC_DOLT_PASSWORD" ]; then
-    export DOLT_CLI_PASSWORD="$GC_DOLT_PASSWORD"
-  fi
-  if dolt $conn_args sql -q "SELECT 1" >/dev/null 2>&1; then
+  # Always export DOLT_CLI_PASSWORD (even empty) so the client does not
+  # prompt for a password on stdin. Without this, the SELECT 1 probe
+  # silently fails with "Failed to parse credentials: operation not
+  # supported by device" on sessions without a controlling TTY —
+  # which then left the health report claiming "server: running" but
+  # never reporting per-database detail.
+  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  # Bound the ping. A TCP-reachable but unresponsive server (stuck
+  # goroutine, saturated pool, migration lock) would otherwise hang.
+  if run_bounded 5 dolt $conn_args sql -q "SELECT 1" >/dev/null 2>&1; then
+    server_reachable=true
     end_ms=$(date +%s%N 2>/dev/null | cut -c1-13 || date +%s)
     server_latency=$((end_ms - start_ms))
     [ "$server_latency" -lt 0 ] && server_latency=0
@@ -95,15 +132,30 @@ metadata_files > "$_meta_cache"
 trap 'rm -f "$_meta_cache"' EXIT
 
 # Collect database info.
+#
+# NOTE: we must NOT invoke `dolt log` against the on-disk database
+# directory while the sql-server holds it open. Historically this was
+# done with `cd "$d" && dolt log --oneline | wc -l`; on an active DB
+# the client contends with the server for Dolt's file locks and the
+# client process blocks indefinitely, orphaning zombie `dolt log`
+# processes and wedging the health CLI. Query the running server via
+# SQL instead — it's the authoritative source, never deadlocks with
+# itself, and is cheap (dolt_log is indexed by commit hash).
 db_info=""
-if [ -d "$data_dir" ] && [ "$server_running" = true ]; then
+if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
   for d in "$data_dir"/*/; do
     [ ! -d "$d/.dolt" ] && continue
     name="$(basename "$d")"
     case "$name" in information_schema|mysql|dolt_cluster) continue ;; esac
-    # Count commits (best-effort).
-    commits=$(cd "$d" && dolt log --oneline 2>/dev/null | wc -l || echo 0)
-    commits=$(echo "$commits" | tr -d '[:space:]')
+    # Count commits via SQL (bounded). 0 on timeout or error — keep
+    # going rather than hang the whole report.
+    commits_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
+      -q "USE \`$name\`; SELECT COUNT(*) FROM dolt_log;" 2>/dev/null || true)
+    commits=$(printf '%s\n' "$commits_csv" | sed -n '2p' | tr -d '[:space:]')
+    # JSON consumers (deacon patrol) require a number; use 0 on failure.
+    case "$commits" in
+      ''|*[!0-9]*) commits=0 ;;
+    esac
     # Count open beads (best-effort).
     open_beads=0
     while IFS= read -r meta; do
@@ -235,7 +287,12 @@ JSONEOF
   }
 }
 JSONEOF
-  exit 0
+  # JSON consumers expect the document regardless, but mirror the
+  # human-path exit convention: 0 when the data plane is healthy.
+  if [ "$server_reachable" = true ]; then
+    exit 0
+  fi
+  exit 1
 fi
 
 # Human-readable output.
@@ -277,3 +334,13 @@ if [ "$zombie_count" -gt 0 ]; then
   echo ""
   echo "Zombie processes: $zombie_count (PIDs:$zombie_pids)"
 fi
+
+# Exit status: 0 when the data plane is healthy (server running AND
+# answering SQL). Non-zero signals a patrol caller that something is
+# wrong — server not running, or port in use by a process that isn't
+# speaking MySQL. Stale backups, orphans, and zombies are informational
+# and do not fail the exit code.
+if [ "$server_reachable" = true ]; then
+  exit 0
+fi
+exit 1
