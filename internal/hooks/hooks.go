@@ -308,15 +308,17 @@ func readClaudeSettingsCandidate(fs fsys.FS, path string) (claudeCandidateState,
 }
 
 func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFilePolicy) error {
-	if existing, err := fs.ReadFile(dst); err == nil {
-		if bytes.Equal(existing, data) {
+	existing, readErr := fs.ReadFile(dst)
+	if readErr == nil && bytes.Equal(existing, data) {
+		return nil
+	}
+	if readErr != nil {
+		if _, statErr := fs.Stat(dst); statErr == nil && policy == preserveUnreadable {
+			// File exists but isn't readable. For user-owned paths, preserve
+			// rather than clobbering. gc-owned paths fall through and attempt
+			// the write (a write failure surfaces an error to the caller).
 			return nil
 		}
-	} else if _, statErr := fs.Stat(dst); statErr == nil && policy == preserveUnreadable {
-		// File exists but isn't readable. For user-owned paths, preserve
-		// rather than clobbering. gc-owned paths fall through and attempt
-		// the write (a write failure surfaces an error to the caller).
-		return nil
 	}
 
 	dir := filepath.Dir(dst)
@@ -327,14 +329,22 @@ func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFi
 	if err := fs.WriteFile(dst, data, 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", dst, err)
 	}
-	// os.WriteFile preserves the existing file's mode on overwrite. For
-	// gc-owned paths that may have been left with a restrictive mode (e.g.
-	// a stat-ok-but-read-fail file we just force-overwrote), normalize the
-	// permissions so Claude can actually read the file at launch time.
-	// User-owned paths are preserved as-is.
-	if policy == forceOverwrite {
-		if err := fs.Chmod(dst, 0o644); err != nil {
-			return fmt.Errorf("chmod %s: %w", dst, err)
+
+	// If we just force-overwrote a previously-unreadable gc-owned file,
+	// os.WriteFile preserved its restrictive mode and Claude still can't
+	// open --settings. Add ONLY the owner-read bit to the existing mode,
+	// preserving any user-tightened permissions (e.g. 0o600 for privacy)
+	// and leaving fresh-install files at whatever perm-&-umask produced.
+	if policy == forceOverwrite && readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		info, err := fs.Stat(dst)
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", dst, err)
+		}
+		currentMode := info.Mode().Perm()
+		if currentMode&0o400 == 0 {
+			if err := fs.Chmod(dst, currentMode|0o400); err != nil {
+				return fmt.Errorf("chmod %s: %w", dst, err)
+			}
 		}
 	}
 	return nil

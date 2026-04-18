@@ -402,6 +402,49 @@ func TestInstallClaudeForceOverwritesUnreadableRuntimeOSFS(t *testing.T) {
 	}
 }
 
+// TestInstallClaudePreservesTightenedRuntimeMode verifies that a user who
+// intentionally tightened .gc/settings.json permissions (e.g. 0o600 for
+// privacy) keeps that mode after Install rewrites the file. The
+// force-overwrite policy must only ADD owner-read when absent, never
+// widen existing permissions.
+//
+// Skipped as root (root bypasses unix permission checks).
+func TestInstallClaudePreservesTightenedRuntimeMode(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses unix permission checks")
+	}
+	cityDir := t.TempDir()
+	claudeDir := filepath.Join(cityDir, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{"custom": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runtimePath := filepath.Join(gcDir, "settings.json")
+	// User-tightened: readable, but private (no group/other access).
+	if err := os.WriteFile(runtimePath, []byte(`{"stale": true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Install(fsys.OSFS{}, cityDir, cityDir, []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	info, err := os.Stat(runtimePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Must preserve the user's 0o600, not widen to 0o644.
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("runtime mode widened from 0o600 to %o; force-overwrite must not override user tightening", got)
+	}
+}
+
 // TestInstallClaudeSurfacesEmptyPreferredOverride verifies that a
 // zero-byte .claude/settings.json is treated as malformed and surfaces a
 // descriptive error rather than silently degrading to embedded defaults.
