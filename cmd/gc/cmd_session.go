@@ -810,14 +810,15 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 		if saErr == nil && sa != "" {
 			command = command + " " + sa
 		} else if saErr != nil {
-			// Projection failed this tick. Fall back to whatever a prior
-			// reconciler tick left on disk: settingsArgs probes for the
-			// managed .gc/settings.json (or legacy hooks/claude.json) and
-			// returns "" when nothing exists. On a fresh city with a
-			// malformed override, attach therefore launches without
-			// --settings rather than with stale content. On an older city,
-			// attach uses the last-known-good projection.
-			if probe := settingsArgs(cityPath, resolved.Name); probe != "" {
+			// Projection failed this tick. Fall back to the last-known-good
+			// projection on disk, but require the file to be actually
+			// readable — not just Stat-present. Pointing Claude at an
+			// unreadable --settings path would fail agent startup worse
+			// than launching without --settings at all. On a fresh city
+			// with a malformed override, attach therefore launches without
+			// --settings; on an older city with a readable prior projection,
+			// attach uses that projection.
+			if probe := settingsArgsIfReadable(cityPath, resolved.Name); probe != "" {
 				command = command + " " + probe
 			}
 		}
