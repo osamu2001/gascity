@@ -617,7 +617,7 @@ version = "^2.0"
 source = "../my-helper"
 
 # ─── machine-managed: resolved [packs] for the gascity loader ───
-# gc import rewrites these from [imports] + pack.lock. Treat as outputs, not inputs.
+# gc import rewrites these from [imports] + packs.lock. Treat as outputs, not inputs.
 
 [packs.gastown]
 source = "https://github.com/example/gastown"
@@ -638,10 +638,10 @@ provider = "bd"
 ```
 my-city/
 ├── city.toml                 ← contains [imports], [packs], [workspace], [beads] — one file
-├── pack.lock                 ← committed; full transitive closure with commit + hash
+├── packs.lock                 ← committed; full transitive closure with commit + hash
 └── .gc/
     └── cache/
-        └── packs/            ← gitignored, derived from pack.lock
+        └── packs/            ← gitignored, derived from packs.lock
             ├── gastown/
             ├── polecat/      ← transitive dep of gastown
             └── maintenance/
@@ -651,9 +651,9 @@ Three things to notice about the v1 shape:
 
 1. **`[imports]` is the new user-facing surface that `gc import` introduces.** Today, without `gc import`, the user-facing surface for declaring packs is `[workspace].includes` — the user lists pack names there and the loader picks them up. With `gc import`, `[imports]` becomes the place where users declare what they want (with version constraints), and `gc import` re-emits the includes list and `[packs]` blocks as a derived view. `[workspace].includes` remains user-facing in the no-gc-import world; it just becomes machine-managed once `gc import` is in play.
 
-2. **`[packs]` and `[workspace].includes` are machine-managed.** `gc import` rewrites these every time `[imports]` or the lock changes. They're a derived view of `[imports]` + `pack.lock` — treat them as outputs, not inputs.
+2. **`[packs]` and `[workspace].includes` are machine-managed.** `gc import` rewrites these every time `[imports]` or the lock changes. They're a derived view of `[imports]` + `packs.lock` — treat them as outputs, not inputs.
 
-3. **Transitive deps appear in `[packs]` and `pack.lock` but NOT in `[imports]`.** In the example above, `polecat` is a transitive dep that the user never directly asked for. The user only ever sees `polecat` in the lock file (and in `gc import list`, which reads the lock). This is the boundary between "what the user asked for" (`[imports]`) and "what the resolver figured out" (`[packs]` + lock).
+3. **Transitive deps appear in `[packs]` and `packs.lock` but NOT in `[imports]`.** In the example above, `polecat` is a transitive dep that the user never directly asked for. The user only ever sees `polecat` in the lock file (and in `gc import list`, which reads the lock). This is the boundary between "what the user asked for" (`[imports]`) and "what the resolver figured out" (`[packs]` + lock).
 
 ### What gc import will write after the gascity loader patches (v2 schema)
 
@@ -685,10 +685,10 @@ provider = "bd"
 my-city/
 ├── pack.toml                 ← imports + city pack identity
 ├── city.toml                 ← deployment config only
-├── pack.lock                 ← committed; full transitive closure
+├── packs.lock                 ← committed; full transitive closure
 └── .gc/
     └── cache/
-        └── packs/            ← gitignored, derived from pack.lock
+        └── packs/            ← gitignored, derived from packs.lock
             ├── gastown/
             ├── polecat/
             └── maintenance/
@@ -704,14 +704,14 @@ Beyond file locations and TOML syntax, the differences are smaller than you'd th
 |---|---|---|
 | User-facing imports live in | `[imports]` in `city.toml` | `[imports]` in `pack.toml` (city root) |
 | Loader-facing pack list | `[packs.X]` + `[workspace].includes` in `city.toml` (machine-managed) | The same `[imports]` block — no separate machine-managed view |
-| Number of TOML sections `gc import` writes per add | Three (`[imports]`, `[packs]`, `[workspace].includes`) plus `pack.lock` | One (`[imports]`) plus `pack.lock` |
+| Number of TOML sections `gc import` writes per add | Three (`[imports]`, `[packs]`, `[workspace].includes`) plus `packs.lock` | One (`[imports]`) plus `packs.lock` |
 | Loader behavior on unrecognized sections | Ignores `[imports]` (it's a section the loader doesn't know) | Reads `[imports]` directly |
 | Transitive resolution in pack manager | Same | Same |
 | Hidden download accelerator | Same | Same |
-| Reproducibility | `gc import install` reads `pack.lock` and rebuilds the city cache + the [packs] view | `gc import install` reads `pack.lock` and rebuilds the city cache |
+| Reproducibility | `gc import install` reads `packs.lock` and rebuilds the city cache + the [packs] view | `gc import install` reads `packs.lock` and rebuilds the city cache |
 | Hand-editable user surface | `[imports]` (constraints) | `[imports]` (constraints) |
 
-The take-away: **the user-facing experience is identical**. The same `[imports]` syntax, the same verbs, the same `pack.lock`, the same constraints, the same transitive resolution. v2 is a refactor of *where* the data lives, not *what* the data is. The migration is a one-shot file move, not a behavior change.
+The take-away: **the user-facing experience is identical**. The same `[imports]` syntax, the same verbs, the same `packs.lock`, the same constraints, the same transitive resolution. v2 is a refactor of *where* the data lives, not *what* the data is. The migration is a one-shot file move, not a behavior change.
 
 ### Migration
 
