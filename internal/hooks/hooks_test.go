@@ -185,6 +185,71 @@ func TestInstallClaudePrefersCityDotClaudeSettingsOverLegacyHookSource(t *testin
 	}
 }
 
+// TestInstallClaudePreservesUserOwnedHookFile verifies that when both
+// .claude/settings.json and a hand-written hooks/claude.json are present,
+// Install writes only the runtime settings file and leaves the user-owned
+// hook file untouched. The old behavior silently rewrote hooks/claude.json
+// with merged bytes, violating the "hook file is user-authored" contract.
+func TestInstallClaudePreservesUserOwnedHookFile(t *testing.T) {
+	fs := fsys.NewFake()
+	userHook := []byte(`{"user_authored": true}`)
+	fs.Files["/city/hooks/claude.json"] = userHook
+	fs.Files["/city/.claude/settings.json"] = []byte(`{"custom": true}`)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if got := string(fs.Files["/city/hooks/claude.json"]); got != string(userHook) {
+		t.Errorf("user-owned hooks/claude.json was clobbered:\n  want: %q\n  got:  %q", userHook, got)
+	}
+	runtime := string(fs.Files["/city/.gc/settings.json"])
+	if !strings.Contains(runtime, `"custom": true`) {
+		t.Errorf("runtime settings missing .claude override merge:\n%s", runtime)
+	}
+	if !strings.Contains(runtime, "SessionStart") {
+		t.Errorf("runtime settings missing embedded base hooks:\n%s", runtime)
+	}
+}
+
+// TestInstallClaudeTolerantToUnreadableLegacyCandidate verifies that a
+// stat-ok-but-read-fails non-chosen candidate (simulated via a directory at
+// the hook-file path) does not block installation when .claude/settings.json
+// is a valid higher-priority source. Previously readClaudeSettingsCandidate
+// returned a hard error for stat-ok-but-unreadable, aborting resolution.
+func TestInstallClaudeTolerantToUnreadableLegacyCandidate(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.claude/settings.json"] = []byte(`{"custom": true}`)
+	// Put a directory at the hook-file path so Stat succeeds but ReadFile
+	// errors (Fake returns ErrNotExist because the path is not in Files).
+	fs.Dirs["/city/hooks/claude.json"] = true
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install must tolerate unreadable non-chosen legacy candidate: %v", err)
+	}
+
+	runtime := string(fs.Files["/city/.gc/settings.json"])
+	if !strings.Contains(runtime, `"custom": true`) {
+		t.Errorf("runtime settings missing .claude override:\n%s", runtime)
+	}
+}
+
+// TestInstallClaudeSurfacesMalformedOverride verifies that a syntactically
+// invalid .claude/settings.json surfaces a descriptive error rather than
+// silently falling back to a legacy source or the embedded base.
+func TestInstallClaudeSurfacesMalformedOverride(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.claude/settings.json"] = []byte(`{not valid json`)
+
+	err := Install(fs, "/city", "/work", []string{"claude"})
+	if err == nil {
+		t.Fatal("Install must surface malformed .claude/settings.json as an error")
+	}
+	if !strings.Contains(err.Error(), ".claude/settings.json") {
+		t.Errorf("error must name the offending path: %v", err)
+	}
+}
+
 // TestInstallOverlayManagedNoOp verifies that providers whose hooks ship via
 // the core pack overlay are accepted by Install but produce no Go-side files.
 func TestInstallOverlayManagedNoOp(t *testing.T) {
@@ -225,21 +290,38 @@ func TestInstallMultipleProviders(t *testing.T) {
 
 func TestInstallIdempotent(t *testing.T) {
 	fs := fsys.NewFake()
-	// Pre-populate with custom content.
+	// Pre-populate with a legacy hook file that carries a custom key. Under
+	// the current contract this is treated as the chosen source and merged
+	// against the embedded base so future default hooks land for users who
+	// stayed on hooks/claude.json.
 	fs.Files["/city/hooks/claude.json"] = []byte(`{"custom": true}`)
 
-	err := Install(fs, "/city", "/work", []string{"claude"})
-	if err != nil {
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
-	// Should not overwrite existing file.
-	got := string(fs.Files["/city/hooks/claude.json"])
-	if got != `{"custom": true}` {
-		t.Errorf("Install overwrote existing file: got %q", got)
+	hookData := string(fs.Files["/city/hooks/claude.json"])
+	runtimeData := string(fs.Files["/city/.gc/settings.json"])
+	if !strings.Contains(hookData, `"custom": true`) {
+		t.Errorf("merge must preserve user-authored custom key in hook file:\n%s", hookData)
 	}
-	if runtime := string(fs.Files["/city/.gc/settings.json"]); runtime != `{"custom": true}` {
-		t.Errorf("Install should mirror existing hook settings into runtime file: got %q", runtime)
+	if !strings.Contains(hookData, "SessionStart") {
+		t.Errorf("merge must pull embedded default hooks into hook file:\n%s", hookData)
+	}
+	if hookData != runtimeData {
+		t.Error("runtime settings must mirror merged hook settings")
+	}
+
+	// A second Install must be a true no-op: bytes already match the merged
+	// result, so writeManagedFile short-circuits.
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	if got := string(fs.Files["/city/hooks/claude.json"]); got != hookData {
+		t.Errorf("second Install changed hook file bytes:\n  before: %q\n  after:  %q", hookData, got)
+	}
+	if got := string(fs.Files["/city/.gc/settings.json"]); got != runtimeData {
+		t.Errorf("second Install changed runtime file bytes:\n  before: %q\n  after:  %q", runtimeData, got)
 	}
 }
 

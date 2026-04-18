@@ -1142,9 +1142,20 @@ func namedSessionAllowsControllerWorkQuery(cityPath string, cfg *config.City, sp
 // installAgentSideEffects performs idempotent side effects for a resolved
 // agent: hook installation and ACP route registration. Called from
 // buildDesiredState on every tick; safe to repeat.
+//
+// When the resolved provider is Claude, resolveTemplate has already projected
+// managed Claude settings via ensureClaudeSettingsArgs (required so the
+// --settings path exists before runtime fingerprinting). In that case the
+// "claude" entry in install_agent_hooks is filtered out here to avoid
+// duplicating filesystem I/O for every pool instance on every tick. Agents
+// whose resolved provider is not Claude but which opt in explicitly via
+// install_agent_hooks = ["claude"] still flow through hooks.Install here.
 func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp TemplateParams, stderr io.Writer) {
-	// Install provider hooks (idempotent filesystem side effect).
-	if ih := config.ResolveInstallHooks(cfgAgent, bp.workspace); len(ih) > 0 {
+	ih := config.ResolveInstallHooks(cfgAgent, bp.workspace)
+	if tp.ResolvedProvider != nil && tp.ResolvedProvider.Name == "claude" {
+		ih = hooksWithoutClaude(ih)
+	}
+	if len(ih) > 0 {
 		if hErr := hooks.Install(bp.fs, bp.cityPath, tp.WorkDir, ih); hErr != nil {
 			fmt.Fprintf(stderr, "agent %q: hooks: %v\n", tp.DisplayName(), hErr) //nolint:errcheck
 		}
@@ -1155,6 +1166,25 @@ func installAgentSideEffects(bp *agentBuildParams, cfgAgent *config.Agent, tp Te
 			autoSP.RouteACP(tp.SessionName)
 		}
 	}
+}
+
+// hooksWithoutClaude returns ih with any "claude" entries filtered out.
+// Used by installAgentSideEffects when the resolved provider is Claude —
+// in that case resolveTemplate → ensureClaudeSettingsArgs already projected
+// the settings, and running hooks.Install("claude") again would duplicate
+// filesystem I/O on every reconciler tick.
+func hooksWithoutClaude(ih []string) []string {
+	if len(ih) == 0 {
+		return ih
+	}
+	out := make([]string, 0, len(ih))
+	for _, p := range ih {
+		if p == "claude" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // poolInstanceName returns the name for pool slot N.

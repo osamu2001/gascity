@@ -1,10 +1,15 @@
-// template_resolve.go extracts a pure function for resolving agent config
-// into session parameters. This is the data-only half of buildOneAgent:
-// all steps that compute values (provider resolution, dir expansion, env
-// merging, prompt rendering) without side effects.
+// template_resolve.go extracts a value-producing function for resolving
+// agent config into session parameters. Most of the work is pure (provider
+// resolution, dir expansion, env merging, prompt rendering).
 //
-// Side effects (ACP route registration, hook installation) are handled
-// by the caller (buildOneAgent).
+// One side effect lives here by necessity: managed Claude settings are
+// projected to .gc/settings.json via ensureClaudeSettingsArgs so that the
+// --settings path is on disk before runtime fingerprints are captured.
+// This is the single chokepoint for Claude projection — installAgentSideEffects
+// skips the "claude" entry in its hook list to avoid duplicate work.
+//
+// Other side effects (ACP route registration, non-Claude hook installation)
+// are handled by the caller (buildOneAgent → installAgentSideEffects).
 //
 // resolveTemplate returns TemplateParams — a value type suitable for
 // session.Manager.CreateFromParams or for constructing runtime.Config.
@@ -12,7 +17,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -120,15 +124,6 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if cfgAgent.Session == "acp" && !resolved.SupportsACP {
 		return TemplateParams{}, fmt.Errorf("agent %q: session = \"acp\" but provider %q does not support ACP (set supports_acp = true on the provider)", qualifiedName, resolved.Name)
 	}
-	if resolved.Name == "claude" && p.fs != nil && p.cityPath != "" {
-		stderr := p.stderr
-		if stderr == nil {
-			stderr = io.Discard
-		}
-		if code := installClaudeHooks(p.fs, p.cityPath, stderr); code != 0 {
-			return TemplateParams{}, fmt.Errorf("agent %q: installing Claude settings: exit %d", qualifiedName, code)
-		}
-	}
 
 	// Step 3: Expand dir template.
 	dirCtx := sessionSetupContextForAgent(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
@@ -151,7 +146,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 		command = command + " " + shellquote.Join(defaultArgs)
 	}
-	if sa := settingsArgs(p.cityPath, resolved.Name); sa != "" {
+	if sa := ensureClaudeSettingsArgs(p.fs, p.cityPath, resolved.Name, p.stderr); sa != "" {
 		command = command + " " + sa
 		settingsFile, relDst := claudeSettingsSource(p.cityPath)
 		if settingsFile != "" {

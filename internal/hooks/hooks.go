@@ -93,17 +93,22 @@ func Install(fs fsys.FS, cityDir, workDir string, providers []string) error {
 	return nil
 }
 
-// installClaude writes both the legacy hook file (hooks/claude.json) and the
-// runtime settings file (.gc/settings.json) in the city directory.
+// installClaude writes the runtime settings file (.gc/settings.json) that gc
+// passes to Claude via --settings. The legacy hooks/claude.json file is
+// treated as user-owned whenever it contains content gc cannot recognize as
+// its own: present and not matching a known stale auto-generated pattern.
+// That file is rewritten only when it IS the selected source (legacy-hook
+// migration), when it doesn't exist (fresh install seed), or when it matches
+// a known stale pattern (safe auto-upgrade).
 //
 // Source precedence for user-authored Claude settings:
 //  1. <city>/.claude/settings.json
 //  2. <city>/hooks/claude.json
 //  3. <city>/.gc/settings.json
 //
-// The selected source is merged onto the embedded default Claude settings, and
-// the merged result is written to the managed outputs that Gas City points
-// Claude's --settings flag at.
+// The selected source (or embedded defaults, if no override exists) is merged
+// onto the embedded default Claude settings so new default hooks added in
+// future releases land for users on every source, not just .claude/settings.json.
 func installClaude(fs fsys.FS, cityDir string) error {
 	hookDst := filepath.Join(cityDir, citylayout.ClaudeHookFile)
 	runtimeDst := filepath.Join(cityDir, ".gc", "settings.json")
@@ -112,12 +117,30 @@ func installClaude(fs fsys.FS, cityDir string) error {
 		return err
 	}
 
-	if sourceKind != claudeSettingsSourceLegacyHook {
+	if sourceKind == claudeSettingsSourceLegacyHook || hookFileSafeToRewrite(fs, hookDst) {
 		if err := writeManagedFile(fs, hookDst, data); err != nil {
 			return err
 		}
 	}
 	return writeManagedFile(fs, runtimeDst, data)
+}
+
+// hookFileSafeToRewrite reports whether hooks/claude.json can be safely
+// overwritten by installClaude without clobbering user-owned content. It is
+// safe when the file does not exist (fresh install) or when its bytes match
+// a known stale auto-generated pattern that predates the current embedded
+// defaults (proactive upgrade of leftover state). Any other content — even
+// bytes identical to the embedded base — is treated as user-owned to avoid
+// surprising a user who pinned their hook file by hand.
+func hookFileSafeToRewrite(fs fsys.FS, hookDst string) bool {
+	data, err := fs.ReadFile(hookDst)
+	if err != nil {
+		// Missing or unreadable: fresh install (or broken state we can't
+		// reason about). Either way, writeManagedFile's existing guards
+		// decide what to do.
+		return true
+	}
+	return claudeFileNeedsUpgrade(data)
 }
 
 func readEmbedded(embedPath string) ([]byte, error) {
@@ -137,6 +160,16 @@ const (
 	claudeSettingsSourceLegacyRuntime
 )
 
+// desiredClaudeSettings returns the bytes that should land in the managed
+// runtime file (.gc/settings.json) and the source kind that was chosen.
+//
+// All override sources — including legacy ones — are merged against the
+// embedded base. The hooks array in overlay.MergeSettingsJSON uses
+// union-by-identity semantics (duplicate entries collapse), so merging is
+// safe and gives legacy users the future-base-hook-additions path back: any
+// new default hook added to config/claude.json in a future release lands
+// for users whose source is hooks/claude.json or .gc/settings.json, not
+// just users on .claude/settings.json.
 func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSourceKind, error) {
 	base, err := readEmbedded("config/claude.json")
 	if err != nil {
@@ -150,9 +183,6 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 	if len(overrideData) == 0 {
 		return base, claudeSettingsSourceNone, nil
 	}
-	if sourceKind != claudeSettingsSourceCityDotClaude {
-		return overrideData, sourceKind, nil
-	}
 
 	merged, err := overlay.MergeSettingsJSON(base, overrideData)
 	if err != nil {
@@ -162,22 +192,22 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 }
 
 func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string, []byte, claudeSettingsSourceKind, error) {
-	if path, data, ok, err := readClaudeSettingsCandidate(fs, citylayout.ClaudeSettingsPath(cityDir)); err != nil {
+	// The preferred source (.claude/settings.json) is strict: if the user
+	// placed the file and it can't be read, that's a hard error — we don't
+	// want to silently fall back to a legacy source they didn't intend.
+	if path, data, ok, err := readClaudeSettingsCandidate(fs, citylayout.ClaudeSettingsPath(cityDir), true); err != nil {
 		return "", nil, claudeSettingsSourceNone, err
 	} else if ok {
 		return path, data, claudeSettingsSourceCityDotClaude, nil
 	}
 
+	// Legacy candidates are tolerant: an unreadable leftover file (bad perms,
+	// partial write from a crashed tick) must not block source selection when
+	// a readable higher-priority source or embedded defaults can be used.
 	hookPath := citylayout.ClaudeHookFilePath(cityDir)
 	runtimePath := filepath.Join(cityDir, ".gc", "settings.json")
-	_, hookData, hookExists, err := readClaudeSettingsCandidate(fs, hookPath)
-	if err != nil {
-		return "", nil, claudeSettingsSourceNone, err
-	}
-	_, runtimeData, runtimeExists, err := readClaudeSettingsCandidate(fs, runtimePath)
-	if err != nil {
-		return "", nil, claudeSettingsSourceNone, err
-	}
+	_, hookData, hookExists, _ := readClaudeSettingsCandidate(fs, hookPath, false)
+	_, runtimeData, runtimeExists, _ := readClaudeSettingsCandidate(fs, runtimePath, false)
 
 	if hookExists &&
 		!bytes.Equal(hookData, base) &&
@@ -193,13 +223,20 @@ func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string
 	return "", nil, claudeSettingsSourceNone, nil
 }
 
-func readClaudeSettingsCandidate(fs fsys.FS, path string) (string, []byte, bool, error) {
+// readClaudeSettingsCandidate reads a candidate settings file. When strict is
+// true, a file that exists-but-can't-be-read surfaces as an error so callers
+// can fail loudly. When strict is false, unreadable files are reported as
+// "not found" so a corrupt leftover file doesn't block fallback to the next
+// source or to embedded defaults.
+func readClaudeSettingsCandidate(fs fsys.FS, path string, strict bool) (string, []byte, bool, error) {
 	data, err := fs.ReadFile(path)
 	if err == nil {
 		return path, data, true, nil
 	}
-	if _, statErr := fs.Stat(path); statErr == nil {
-		return "", nil, false, fmt.Errorf("reading %s: %w", path, err)
+	if strict {
+		if _, statErr := fs.Stat(path); statErr == nil {
+			return "", nil, false, fmt.Errorf("reading %s: %w", path, err)
+		}
 	}
 	return "", nil, false, nil
 }

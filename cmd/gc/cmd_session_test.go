@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -318,7 +319,7 @@ func TestBuildResumeCommandUsesResolvedProviderCommand(t *testing.T) {
 		WorkDir:  "/tmp/workdir",
 	}
 
-	cmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "")
+	cmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "", io.Discard)
 	if got, want := cmd, "aimux run gemini -- --approval-mode yolo"; got != want {
 		t.Fatalf("resume command = %q, want %q", got, want)
 	}
@@ -359,7 +360,7 @@ func TestBuildResumeCommandIncludesSettingsAndDefaultArgs(t *testing.T) {
 		ResumeFlag: "--resume",
 	}
 
-	cmd, _ := buildResumeCommand(cityDir, cfg, info, "")
+	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", io.Discard)
 
 	// Must include --settings pointing to .gc/settings.json.
 	wantSettings := fmt.Sprintf("--settings %q", filepath.Join(gcDir, "settings.json"))

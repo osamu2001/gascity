@@ -692,6 +692,33 @@ func settingsArgs(cityPath, providerName string) string {
 	return fmt.Sprintf("--settings %q", settingsPath)
 }
 
+// ensureClaudeSettingsArgs projects managed Claude settings to
+// .gc/settings.json (idempotent: no-op when bytes match) and returns the
+// "--settings <path>" arg for the resolved Claude command. This is the
+// single chokepoint that guarantees every Claude launch path — reconciler
+// or session attach/submit — sees the projected file before settingsArgs
+// probes for it. Returns empty for non-Claude providers.
+//
+// fs may be nil; in that case OSFS is used. stderr may be nil; in that
+// case projection errors are discarded.
+func ensureClaudeSettingsArgs(fs fsys.FS, cityPath, providerName string, stderr io.Writer) string {
+	if providerName != "claude" || cityPath == "" {
+		return ""
+	}
+	if fs == nil {
+		fs = fsys.OSFS{}
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	if code := installClaudeHooks(fs, cityPath, stderr); code != 0 {
+		// installClaudeHooks already reported the error; fall through so
+		// --settings still reflects whatever managed file (if any) is on
+		// disk from a prior tick.
+	}
+	return settingsArgs(cityPath, providerName)
+}
+
 func claudeSettingsSource(cityPath string) (src, rel string) {
 	candidates := []struct {
 		src string

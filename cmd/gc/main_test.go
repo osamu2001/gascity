@@ -1659,9 +1659,11 @@ func TestDoInitSettingsIsValidJSON(t *testing.T) {
 
 func TestDoInitDoesNotOverwriteExistingSettings(t *testing.T) {
 	f := fsys.NewFake()
-	// Pre-populate .gc/ and settings.json with custom content.
-	// doInit will see .gc/ exists and return "already initialized".
-	// So test installClaudeHooks directly instead.
+	// Pre-populate hooks/claude.json with a user-authored custom key. The
+	// file was historically preserved verbatim, which meant new default
+	// hooks added to the embedded base in later releases never landed for
+	// legacy users. Current contract: the custom key is preserved via merge
+	// while embedded defaults are pulled in.
 	settingsPath := filepath.Join("/city", "hooks", "claude.json")
 	f.Dirs[filepath.Join("/city", "hooks")] = true
 	f.Files[settingsPath] = []byte(`{"custom": true}`)
@@ -1670,12 +1672,17 @@ func TestDoInitDoesNotOverwriteExistingSettings(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("installClaudeHooks = %d, want 0", code)
 	}
-	got := string(f.Files[settingsPath])
-	if got != `{"custom": true}` {
-		t.Errorf("settings.json was overwritten: %q", got)
+
+	hookData := string(f.Files[settingsPath])
+	runtimeData := string(f.Files[filepath.Join("/city", ".gc", "settings.json")])
+	if !strings.Contains(hookData, `"custom": true`) {
+		t.Errorf("user-authored custom key not preserved in hook file:\n%s", hookData)
 	}
-	if runtime := string(f.Files[filepath.Join("/city", ".gc", "settings.json")]); runtime != `{"custom": true}` {
-		t.Errorf("runtime settings were not mirrored from existing hooks file: %q", runtime)
+	if !strings.Contains(hookData, "SessionStart") {
+		t.Errorf("embedded default hooks not merged into hook file:\n%s", hookData)
+	}
+	if hookData != runtimeData {
+		t.Error("runtime settings must mirror merged hook settings")
 	}
 }
 

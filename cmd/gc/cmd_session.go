@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -757,7 +758,7 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Build the resume command from the template's provider.
-	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID))
+	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID), stderr)
 
 	fmt.Fprintf(stdout, "Attaching to session %s (%s)...\n", sessionID, info.Template) //nolint:errcheck // best-effort stdout
 	if err := mgr.Attach(context.Background(), sessionID, resumeCmd, hints); err != nil {
@@ -774,12 +775,17 @@ func cmdSessionAttach(args []string, stdout, stderr io.Writer) int {
 // cityPath is needed to resolve the --settings flag for Claude sessions.
 // Without it, SessionStart hooks defined in .gc/settings.json are not loaded
 // when gc session attach starts the process (as opposed to the reconciler).
+// For Claude providers, the managed settings file is projected here via
+// ensureClaudeSettingsArgs so `gc session attach` on a fresh city still
+// emits `--settings` even when the reconciler hasn't run yet.
+//
+// stderr receives projection errors (use io.Discard to ignore).
 //
 // sessionKind mirrors the mc_session_kind bead metadata: "provider" means
 // the session was created from a bare provider name (not an agent template),
 // so the agent-template lookup should be skipped. This matches the guard in
 // the API handler (handler_session_chat.go).
-func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, sessionKind string) (string, runtime.Config) {
+func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, sessionKind string, stderr io.Writer) (string, runtime.Config) {
 	cmd := session.BuildResumeCommand(info)
 	if cfg == nil {
 		return cmd, runtime.Config{WorkDir: info.WorkDir}
@@ -796,7 +802,7 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 		if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 			command = command + " " + shellquote.Join(defaultArgs)
 		}
-		if sa := settingsArgs(cityPath, resolved.Name); sa != "" {
+		if sa := ensureClaudeSettingsArgs(fsys.OSFS{}, cityPath, resolved.Name, stderr); sa != "" {
 			command = command + " " + sa
 		}
 		resolvedInfo.Command = command
@@ -1318,7 +1324,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, stdout, stderr
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID))
+	resumeCmd, hints := buildResumeCommand(cityPath, cfg, info, beadSessionKind(store, sessionID), stderr)
 	outcome, err := mgr.Submit(context.Background(), sessionID, message, resumeCmd, hints, intent)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
