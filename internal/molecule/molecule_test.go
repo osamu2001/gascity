@@ -1085,8 +1085,9 @@ depends_on = ["implement"]
 }
 
 func TestCookEndToEndRalph(t *testing.T) {
-	formula.FormulaV2Enabled = true
-	t.Cleanup(func() { formula.FormulaV2Enabled = false })
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 	dir := t.TempDir()
 	toml := `
 formula = "ralph-demo"
@@ -1235,8 +1236,9 @@ timeout = "2m"
 }
 
 func TestCookEndToEndScopedWorkflowStampsRootAndScopeMetadata(t *testing.T) {
-	formula.FormulaV2Enabled = true
-	t.Cleanup(func() { formula.FormulaV2Enabled = false })
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 	dir := t.TempDir()
 	toml := `
 formula = "scoped-demo"

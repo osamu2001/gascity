@@ -549,9 +549,9 @@ func (s failPerRootChildLookupStore) List(query beads.ListQuery) ([]beads.Bead, 
 }
 
 func TestFormulaDetailReturnsCompiledPreview(t *testing.T) {
-	prev := formula.FormulaV2Enabled
-	formula.FormulaV2Enabled = true
-	t.Cleanup(func() { formula.FormulaV2Enabled = prev })
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 
 	state := newFakeState(t)
 	formulaDir := t.TempDir()
