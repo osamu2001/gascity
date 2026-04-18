@@ -264,6 +264,7 @@ DaemonConfig holds controller daemon settings.
 | `drift_drain_timeout` | string |  | `2m` | DriftDrainTimeout is the maximum time to wait for an agent to acknowledge a drain signal during a config-drift restart. If the agent doesn't ack within this window, the controller force-kills and restarts it. Duration string (e.g., "2m", "5m"). Defaults to "2m". |
 | `observe_paths` | []string |  |  | ObservePaths lists extra directories to search for Claude JSONL session files (e.g., aimux session paths). The default search path (~/.claude/projects/) is always included. |
 | `probe_concurrency` | integer |  | `8` | ProbeConcurrency bounds the number of concurrent bd subprocess probes issued by the pool scale_check and work_query paths. bd serializes on a shared dolt sql-server, so unbounded parallelism causes contention. Nil (unset) defaults to 8. Set higher for workspaces with a fast dedicated dolt server, or lower to reduce contention on slow storage. |
+| `max_wakes_per_tick` | integer |  | `5` | MaxWakesPerTick caps how many sessions the reconciler may start in a single tick. Raise this on cities with slow cold-starts (e.g. opus cold-start ~60s) where the default of 5 starves the rest of the candidate queue for minutes. Nil (unset) defaults to 5. Values &lt;= 0 are treated as the default — set a positive integer to override. |
 
 ## DoltConfig
 

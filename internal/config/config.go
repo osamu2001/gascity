@@ -1176,6 +1176,12 @@ type DaemonConfig struct {
 	// Nil (unset) defaults to 8. Set higher for workspaces with a fast
 	// dedicated dolt server, or lower to reduce contention on slow storage.
 	ProbeConcurrency *int `toml:"probe_concurrency,omitempty" jsonschema:"default=8"`
+	// MaxWakesPerTick caps how many sessions the reconciler may start in a
+	// single tick. Raise this on cities with slow cold-starts (e.g. opus
+	// cold-start ~60s) where the default of 5 starves the rest of the
+	// candidate queue for minutes. Nil (unset) defaults to 5. Values <= 0
+	// are treated as the default — set a positive integer to override.
+	MaxWakesPerTick *int `toml:"max_wakes_per_tick,omitempty" jsonschema:"default=5"`
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
@@ -1242,6 +1248,21 @@ func (d *DaemonConfig) ProbeConcurrencyOrDefault() int {
 		return 1
 	}
 	return *d.ProbeConcurrency
+}
+
+// DefaultMaxWakesPerTick is the per-tick wake budget the reconciler uses
+// when [daemon].max_wakes_per_tick is unset. See issue #772 for why 5 is
+// often wrong on slow-cold-start workloads.
+const DefaultMaxWakesPerTick = 5
+
+// MaxWakesPerTickOrDefault returns the per-tick wake budget. Nil (unset)
+// and non-positive values fall back to DefaultMaxWakesPerTick so a bad
+// config can't deadlock the reconciler on a zero budget.
+func (d *DaemonConfig) MaxWakesPerTickOrDefault() int {
+	if d.MaxWakesPerTick == nil || *d.MaxWakesPerTick <= 0 {
+		return DefaultMaxWakesPerTick
+	}
+	return *d.MaxWakesPerTick
 }
 
 // DriftDrainTimeoutDuration returns the drift drain timeout as a time.Duration.

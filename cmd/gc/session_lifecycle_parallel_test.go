@@ -741,6 +741,55 @@ func TestReconcileSessionBeads_BlockedCandidatesDoNotConsumeWakeBudget(t *testin
 	}
 }
 
+// TestReconcileSessionBeads_DaemonMaxWakesPerTickOverride covers the fix for
+// issue #772: [daemon].max_wakes_per_tick = N raises (or lowers) the wake
+// budget away from the 5-per-tick default. Cities with slow cold-starts
+// need this to drain the candidate queue.
+func TestReconcileSessionBeads_DaemonMaxWakesPerTickOverride(t *testing.T) {
+	env := newReconcilerTestEnv()
+	override := 8
+	env.cfg = &config.City{
+		Daemon: config.DaemonConfig{MaxWakesPerTick: &override},
+		Agents: []config.Agent{
+			{Name: "ready-1"},
+			{Name: "ready-2"},
+			{Name: "ready-3"},
+			{Name: "ready-4"},
+			{Name: "ready-5"},
+			{Name: "ready-6"},
+			{Name: "ready-7"},
+			{Name: "ready-8"},
+			{Name: "ready-9"},
+		},
+	}
+	names := []string{"ready-1", "ready-2", "ready-3", "ready-4", "ready-5", "ready-6", "ready-7", "ready-8", "ready-9"}
+	for _, name := range names {
+		env.addDesired(name, name, false)
+	}
+
+	var seeded []beads.Bead
+	for _, name := range names {
+		b := env.createSessionBead(name, name)
+		env.markSessionCreating(&b)
+		seeded = append(seeded, b)
+	}
+
+	woken := env.reconcile(seeded)
+
+	if woken != override {
+		t.Fatalf("woken = %d, want %d (overridden wake budget)", woken, override)
+	}
+	// First 8 run, 9th is deferred_by_wake_budget.
+	for _, name := range names[:override] {
+		if !env.sp.IsRunning(name) {
+			t.Fatalf("%s should have started under override=%d", name, override)
+		}
+	}
+	if env.sp.IsRunning(names[override]) {
+		t.Fatalf("%s should have been deferred once budget hit", names[override])
+	}
+}
+
 func TestPrepareStartCandidate_NoneModeInitialMessageStaysInNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
