@@ -12,6 +12,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -103,10 +104,9 @@ func (tp TemplateParams) DisplayName() string {
 	return tp.TemplateName
 }
 
-// resolveTemplate computes all session parameters from a config.Agent without
-// side effects. This is a pure extraction of steps 1-13 and 15-16 from
-// buildOneAgent. The only side effect excluded is ACP route registration
-// (step 14), which the caller handles.
+// resolveTemplate computes all session parameters from a config.Agent.
+// It also reconciles managed Claude settings before wiring the active
+// --settings path so runtime fingerprinting sees the current projected file.
 //
 // qualifiedName is the agent's canonical identity. fpExtra carries additional
 // fingerprint data (e.g., pool bounds); pass nil for pool instances.
@@ -119,6 +119,15 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 2: Validate session vs provider compatibility.
 	if cfgAgent.Session == "acp" && !resolved.SupportsACP {
 		return TemplateParams{}, fmt.Errorf("agent %q: session = \"acp\" but provider %q does not support ACP (set supports_acp = true on the provider)", qualifiedName, resolved.Name)
+	}
+	if resolved.Name == "claude" && p.fs != nil && p.cityPath != "" {
+		stderr := p.stderr
+		if stderr == nil {
+			stderr = io.Discard
+		}
+		if code := installClaudeHooks(p.fs, p.cityPath, stderr); code != 0 {
+			return TemplateParams{}, fmt.Errorf("agent %q: installing Claude settings: exit %d", qualifiedName, code)
+		}
 	}
 
 	// Step 3: Expand dir template.

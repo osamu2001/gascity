@@ -5,6 +5,7 @@
 package hooks
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/overlay"
 )
 
 //go:embed config/claude.json
@@ -91,37 +93,31 @@ func Install(fs fsys.FS, cityDir, workDir string, providers []string) error {
 	return nil
 }
 
-// installClaude writes both the source hook file (hooks/claude.json) and the
+// installClaude writes both the legacy hook file (hooks/claude.json) and the
 // runtime settings file (.gc/settings.json) in the city directory.
 //
-// The session command path always points at .gc/settings.json, but older code
-// and tests still treat hooks/claude.json as the canonical source file. When
-// either file already exists, use its content to seed the missing counterpart
-// so existing custom hook settings are preserved.
+// Source precedence for user-authored Claude settings:
+//  1. <city>/.claude/settings.json
+//  2. <city>/hooks/claude.json
+//  3. <city>/.gc/settings.json
+//
+// The selected source is merged onto the embedded default Claude settings, and
+// the merged result is written to the managed outputs that Gas City points
+// Claude's --settings flag at.
 func installClaude(fs fsys.FS, cityDir string) error {
 	hookDst := filepath.Join(cityDir, citylayout.ClaudeHookFile)
 	runtimeDst := filepath.Join(cityDir, ".gc", "settings.json")
-	embedded, err := readEmbedded("config/claude.json")
+	data, sourceKind, err := desiredClaudeSettings(fs, cityDir)
 	if err != nil {
 		return err
 	}
 
-	data, err := fs.ReadFile(hookDst)
-	if err != nil {
-		data, err = fs.ReadFile(runtimeDst)
-		if err != nil {
-			data = embedded
-		} else if claudeFileNeedsUpgrade(data) {
-			data = embedded
+	if sourceKind != claudeSettingsSourceLegacyHook {
+		if err := writeManagedFile(fs, hookDst, data); err != nil {
+			return err
 		}
-	} else if claudeFileNeedsUpgrade(data) {
-		data = embedded
 	}
-
-	if err := writeEmbeddedManaged(fs, hookDst, data, claudeFileNeedsUpgrade); err != nil {
-		return err
-	}
-	return writeEmbeddedManaged(fs, runtimeDst, data, claudeFileNeedsUpgrade)
+	return writeManagedFile(fs, runtimeDst, data)
 }
 
 func readEmbedded(embedPath string) ([]byte, error) {
@@ -132,9 +128,85 @@ func readEmbedded(embedPath string) ([]byte, error) {
 	return data, nil
 }
 
-func writeEmbeddedManaged(fs fsys.FS, dst string, data []byte, needsUpgrade func([]byte) bool) error {
+type claudeSettingsSourceKind int
+
+const (
+	claudeSettingsSourceNone claudeSettingsSourceKind = iota
+	claudeSettingsSourceCityDotClaude
+	claudeSettingsSourceLegacyHook
+	claudeSettingsSourceLegacyRuntime
+)
+
+func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSourceKind, error) {
+	base, err := readEmbedded("config/claude.json")
+	if err != nil {
+		return nil, claudeSettingsSourceNone, err
+	}
+
+	overridePath, overrideData, sourceKind, err := readClaudeSettingsOverride(fs, cityDir, base)
+	if err != nil {
+		return nil, claudeSettingsSourceNone, err
+	}
+	if len(overrideData) == 0 {
+		return base, claudeSettingsSourceNone, nil
+	}
+	if sourceKind != claudeSettingsSourceCityDotClaude {
+		return overrideData, sourceKind, nil
+	}
+
+	merged, err := overlay.MergeSettingsJSON(base, overrideData)
+	if err != nil {
+		return nil, claudeSettingsSourceNone, fmt.Errorf("merging Claude settings from %s: %w", overridePath, err)
+	}
+	return merged, sourceKind, nil
+}
+
+func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string, []byte, claudeSettingsSourceKind, error) {
+	if path, data, ok, err := readClaudeSettingsCandidate(fs, citylayout.ClaudeSettingsPath(cityDir)); err != nil {
+		return "", nil, claudeSettingsSourceNone, err
+	} else if ok {
+		return path, data, claudeSettingsSourceCityDotClaude, nil
+	}
+
+	hookPath := citylayout.ClaudeHookFilePath(cityDir)
+	runtimePath := filepath.Join(cityDir, ".gc", "settings.json")
+	_, hookData, hookExists, err := readClaudeSettingsCandidate(fs, hookPath)
+	if err != nil {
+		return "", nil, claudeSettingsSourceNone, err
+	}
+	_, runtimeData, runtimeExists, err := readClaudeSettingsCandidate(fs, runtimePath)
+	if err != nil {
+		return "", nil, claudeSettingsSourceNone, err
+	}
+
+	if hookExists &&
+		!bytes.Equal(hookData, base) &&
+		(!runtimeExists || !bytes.Equal(hookData, runtimeData)) &&
+		!claudeFileNeedsUpgrade(hookData) {
+		return hookPath, hookData, claudeSettingsSourceLegacyHook, nil
+	}
+	if runtimeExists &&
+		!bytes.Equal(runtimeData, base) &&
+		!claudeFileNeedsUpgrade(runtimeData) {
+		return runtimePath, runtimeData, claudeSettingsSourceLegacyRuntime, nil
+	}
+	return "", nil, claudeSettingsSourceNone, nil
+}
+
+func readClaudeSettingsCandidate(fs fsys.FS, path string) (string, []byte, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err == nil {
+		return path, data, true, nil
+	}
+	if _, statErr := fs.Stat(path); statErr == nil {
+		return "", nil, false, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return "", nil, false, nil
+}
+
+func writeManagedFile(fs fsys.FS, dst string, data []byte) error {
 	if existing, err := fs.ReadFile(dst); err == nil {
-		if needsUpgrade == nil || !needsUpgrade(existing) {
+		if bytes.Equal(existing, data) {
 			return nil
 		}
 	} else if _, statErr := fs.Stat(dst); statErr == nil {

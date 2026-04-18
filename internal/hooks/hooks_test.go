@@ -137,6 +137,54 @@ func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 	}
 }
 
+func TestInstallClaudeMergesCityDotClaudeSettings(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.claude/settings.json"] = []byte(`{
+  "custom": true,
+  "mcpServers": {
+    "notes": {
+      "command": "notes-mcp"
+    }
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := string(fs.Files["/city/.gc/settings.json"])
+	if !strings.Contains(data, `"custom": true`) {
+		t.Fatalf("runtime settings missing custom top-level key:\n%s", data)
+	}
+	if !strings.Contains(data, `"mcpServers"`) {
+		t.Fatalf("runtime settings missing merged mcpServers:\n%s", data)
+	}
+	if !strings.Contains(data, "SessionStart") {
+		t.Fatalf("runtime settings lost default hooks during merge:\n%s", data)
+	}
+	if string(fs.Files["/city/hooks/claude.json"]) != data {
+		t.Fatal("hooks/claude.json should mirror merged Claude runtime settings")
+	}
+}
+
+func TestInstallClaudePrefersCityDotClaudeSettingsOverLegacyHookSource(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/.claude/settings.json"] = []byte(`{"preferred": true}`)
+	fs.Files["/city/hooks/claude.json"] = []byte(`{"legacy": true}`)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := string(fs.Files["/city/.gc/settings.json"])
+	if !strings.Contains(data, `"preferred": true`) {
+		t.Fatalf("runtime settings missing preferred city .claude override:\n%s", data)
+	}
+	if strings.Contains(data, `"legacy": true`) {
+		t.Fatalf("legacy hooks source should not win over city .claude/settings.json:\n%s", data)
+	}
+}
+
 // TestInstallOverlayManagedNoOp verifies that providers whose hooks ship via
 // the core pack overlay are accepted by Install but produce no Go-side files.
 func TestInstallOverlayManagedNoOp(t *testing.T) {
