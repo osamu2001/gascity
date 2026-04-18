@@ -471,7 +471,11 @@ func (s *Server) agentWorkerHandle(name string, cfg *config.City) worker.Handle 
 	return handle
 }
 
-func workerHandleRunning(ctx context.Context, handle worker.Handle) (bool, error) {
+func workerHandleRunning(ctx context.Context, handle interface {
+	worker.LiveObservationHandle
+	worker.StateHandle
+},
+) (bool, error) {
 	if handle == nil {
 		return false, nil
 	}

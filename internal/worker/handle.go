@@ -21,8 +21,13 @@ var (
 	ErrHistoryUnavailable = errors.New("worker history is unavailable")
 )
 
-// Handle is the canonical in-memory worker API.
-type Handle interface {
+// StateHandle exposes worker lifecycle state queries.
+type StateHandle interface {
+	State(context.Context) (State, error)
+}
+
+// LifecycleHandle exposes worker lifecycle control operations.
+type LifecycleHandle interface {
 	Start(context.Context) error
 	StartResolved(context.Context, string, runtime.Config) error
 	Attach(context.Context) error
@@ -32,23 +37,55 @@ type Handle interface {
 	Kill(context.Context) error
 	Close(context.Context) error
 	Rename(context.Context, string) error
-	Peek(context.Context, int) (string, error)
+	StateHandle
+}
 
-	State(context.Context) (State, error)
-
+// MessagingHandle exposes live input delivery operations.
+type MessagingHandle interface {
 	Message(context.Context, MessageRequest) (MessageResult, error)
 	Interrupt(context.Context, InterruptRequest) error
 	Nudge(context.Context, NudgeRequest) (NudgeResult, error)
+}
+
+// HistoryHandle exposes normalized transcript history reads.
+type HistoryHandle interface {
+	History(context.Context, HistoryRequest) (*HistorySnapshot, error)
+}
+
+// TranscriptHandle exposes provider transcript reads and agent transcript access.
+type TranscriptHandle interface {
+	HistoryHandle
 	Transcript(context.Context, TranscriptRequest) (*TranscriptResult, error)
 	TranscriptPath(context.Context) (string, error)
 	AgentMappings(context.Context) ([]AgentMapping, error)
 	AgentTranscript(context.Context, string) (*AgentTranscriptResult, error)
+}
 
-	History(context.Context, HistoryRequest) (*HistorySnapshot, error)
-
+// InteractionHandle exposes worker blocking-interaction queries and responses.
+type InteractionHandle interface {
 	Pending(context.Context) (*PendingInteraction, error)
 	PendingStatus(context.Context) (*PendingInteraction, bool, error)
 	Respond(context.Context, InteractionResponse) error
+}
+
+// PeekHandle exposes best-effort live output peeking.
+type PeekHandle interface {
+	Peek(context.Context, int) (string, error)
+}
+
+// LiveObservationHandle exposes runtime presence observations for a worker target.
+type LiveObservationHandle interface {
+	LiveObservation(context.Context) (LiveObservation, error)
+}
+
+// Handle is the canonical in-memory worker API.
+type Handle interface {
+	LifecycleHandle
+	MessagingHandle
+	TranscriptHandle
+	InteractionHandle
+	PeekHandle
+	LiveObservationHandle
 }
 
 // Phase captures the worker-level lifecycle state surfaced by [Handle.State].
