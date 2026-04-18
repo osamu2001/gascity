@@ -193,7 +193,6 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
 
 	// Build the work directory.
 	sessionQualifiedName := workdirutil.SessionQualifiedName(cityPath, found, cfg.Rigs, requestedAlias, explicitName)
@@ -237,6 +236,33 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	if cityUsesManagedReconciler(cityPath) {
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
 			// Controller is running — create bead only, let reconciler start it.
+			kindMeta := map[string]string{
+				"agent_name":     sessionQualifiedName,
+				"session_origin": "manual",
+			}
+			if resolved.Kind != "" && resolved.Kind != resolved.Name {
+				kindMeta["provider_kind"] = resolved.Kind
+			}
+			handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
+				cityPath,
+				store,
+				sp,
+				cfg,
+				alias,
+				explicitName,
+				canonicalTemplate,
+				title,
+				sessionCommand,
+				found.Provider,
+				workDir,
+				found.Session,
+				resolved,
+				kindMeta,
+			)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			var info session.Info
 			err := session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
 				if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", configuredOwner); err != nil {
@@ -251,19 +277,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 					return err
 				}
 				var createErr error
-				kindMeta := map[string]string{
-					"agent_name":     sessionQualifiedName,
-					"session_origin": "manual",
-				}
-				if resolved.Kind != "" && resolved.Kind != resolved.Name {
-					kindMeta["provider_kind"] = resolved.Kind
-				}
-				info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(alias, explicitName, canonicalTemplate, title, sessionCommand, workDir, resolved.Name, found.Session, session.ProviderResume{
-					ResumeFlag:    resolved.ResumeFlag,
-					ResumeStyle:   resolved.ResumeStyle,
-					ResumeCommand: resolved.ResumeCommand,
-					SessionIDFlag: resolved.SessionIDFlag,
-				}, kindMeta)
+				info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
 				return createErr
 			})
 			if err != nil {
@@ -302,25 +316,32 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	}
 
 	// Fallback: controller not running — direct start via session manager.
-	hints := runtime.Config{
-		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-		ReadyDelayMs:           resolved.ReadyDelayMs,
-		ProcessNames:           resolved.ProcessNames,
-		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-	}
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
-	}
-
 	kindMeta := map[string]string{
 		"agent_name":     sessionQualifiedName,
 		"session_origin": "manual",
 	}
 	if resolved.Kind != "" && resolved.Kind != resolved.Name {
 		kindMeta["provider_kind"] = resolved.Kind
+	}
+	handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
+		cityPath,
+		store,
+		sp,
+		cfg,
+		alias,
+		explicitName,
+		canonicalTemplate,
+		title,
+		sessionCommand,
+		found.Provider,
+		workDir,
+		found.Session,
+		resolved,
+		kindMeta,
+	)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
@@ -336,7 +357,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 			return err
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(context.Background(), alias, explicitName, canonicalTemplate, title, sessionCommand, workDir, resolved.Name, found.Session, resolved.Env, resume, hints, kindMeta)
+		info, createErr = handle.Create(context.Background(), worker.CreateModeStarted)
 		return createErr
 	})
 	if err != nil {
