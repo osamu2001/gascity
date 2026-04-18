@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -13,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
-	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // outputTurn is a single conversation turn in the unified output response.
@@ -51,7 +52,8 @@ func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tai
 	if searchPaths == nil {
 		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
-	path := workertranscript.DiscoverPath(searchPaths, provider, workDir, "")
+	adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
+	path := adapter.DiscoverTranscript(provider, workDir, "")
 	if path == "" {
 		return nil, nil
 	}
@@ -61,16 +63,16 @@ func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tai
 		tail = tailInput
 	}
 
-	var sess *sessionlog.Session
-	var err error
-	if before != "" {
-		sess, err = sessionlog.ReadProviderFileOlder(provider, path, tail, before)
-	} else {
-		sess, err = sessionlog.ReadProviderFile(provider, path, tail)
-	}
+	transcript, err := adapter.ReadTranscript(worker.TranscriptRequest{
+		Provider:        provider,
+		TranscriptPath:  path,
+		TailCompactions: tail,
+		BeforeEntryID:   before,
+	})
 	if err != nil {
 		return nil, err
 	}
+	sess := transcript.Session
 
 	turns := make([]outputTurn, 0, len(sess.Messages))
 	for _, e := range sess.Messages {
@@ -316,10 +318,11 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 	if searchPaths == nil {
 		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
+	adapter := worker.SessionLogAdapter{SearchPaths: searchPaths}
 
 	var logPath string
 	if workDir != "" {
-		logPath = workertranscript.DiscoverPath(searchPaths, provider, workDir, "")
+		logPath = adapter.DiscoverTranscript(provider, workDir, "")
 	}
 
 	// Check if agent is running.
@@ -346,11 +349,37 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 		_ = err
 	}
 
+	send := sse.Sender(func(msg sse.Message) error {
+		if msg.ID > 0 {
+			if _, err := fmt.Fprintf(w, "id: %d\n", msg.ID); err != nil {
+				return err
+			}
+		}
+		switch msg.Data.(type) {
+		case agentOutputResponse:
+			if _, err := fmt.Fprint(w, "event: turn\n"); err != nil {
+				return err
+			}
+		case HeartbeatEvent:
+			if _, err := fmt.Fprint(w, "event: heartbeat\n"); err != nil {
+				return err
+			}
+		}
+		data, err := json.Marshal(msg.Data)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			return err
+		}
+		return http.NewResponseController(w).Flush()
+	})
+
 	ctx := r.Context()
 	if logPath != "" {
-		s.streamSessionLog(ctx, w, name, logPath)
+		s.streamSessionLog(ctx, send, name, logPath)
 	} else {
-		s.streamPeekOutput(ctx, w, name, cfg)
+		s.streamPeekOutput(ctx, send, name, cfg)
 	}
 }
 
@@ -389,10 +418,15 @@ func (s *Server) streamSessionLog(ctx context.Context, send sse.Sender, name str
 		}
 
 		// Use tail=1 (last compaction segment) to limit parsing scope.
-		sess, err := sessionlog.ReadProviderFile(provider, logPath, 1)
+		transcript, err := worker.SessionLogAdapter{}.ReadTranscript(worker.TranscriptRequest{
+			Provider:        provider,
+			TranscriptPath:  logPath,
+			TailCompactions: 1,
+		})
 		if err != nil {
 			return
 		}
+		sess := transcript.Session
 		lastSize = currentSize
 
 		turns := make([]outputTurn, 0, len(sess.Messages))

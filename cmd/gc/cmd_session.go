@@ -560,8 +560,12 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 
 	sessionBeads := newSessionBeadSnapshot(allSessionBeads)
 	sp := newSessionProviderFromContext(providerCtx, sessionBeads)
-	mgr := newSessionManager(store, sp)
-	listResult := mgr.ListFullFromBeads(allSessionBeads, stateFilter, templateFilter)
+	catalog, err := workerSessionCatalogWithConfig("", store, sp, providerCtx.cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	listResult := catalog.ListFullFromBeads(allSessionBeads, stateFilter, templateFilter)
 	sessions := listResult.Sessions
 
 	if jsonOutput {
@@ -1088,14 +1092,17 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
 	nudgeIDs, err := waitNudgeIDsForSession(store, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	if err := mgr.Close(sessionID); err != nil {
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := handle.Close(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1145,9 +1152,12 @@ func cmdSessionRename(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
-
-	if err := mgr.Rename(sessionID, title); err != nil {
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := handle.Rename(context.Background(), title); err != nil {
 		fmt.Fprintf(stderr, "gc session rename: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1192,10 +1202,14 @@ func cmdSessionPrune(beforeStr string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
+	catalog, err := workerSessionCatalogWithConfig("", store, sp, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	cutoff := time.Now().Add(-dur)
-	result, err := mgr.PruneDetailed(cutoff)
+	result, err := catalog.PruneBefore(cutoff)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1279,9 +1293,12 @@ func cmdSessionPeek(args []string, lines int, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
-
-	output, err := mgr.Peek(sessionID, lines)
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	output, err := handle.Peek(context.Background(), lines)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1335,9 +1352,12 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
-
-	if err := mgr.Kill(sessionID); err != nil {
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := handle.Kill(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -29,6 +31,159 @@ type gitStatus struct {
 	ChangedFiles int    `json:"changed_files"`
 	Ahead        int    `json:"ahead"`
 	Behind       int    `json:"behind"`
+}
+
+func (s *Server) handleRigList(w http.ResponseWriter, r *http.Request) {
+	bp := parseBlockingParams(r)
+	if bp.isBlocking() {
+		waitForChange(r.Context(), s.state.EventProvider(), bp)
+	}
+
+	cfg := s.state.Config()
+	sp := s.state.SessionProvider()
+	cityName := s.state.CityName()
+	wantGit := r.URL.Query().Get("git") == "true"
+
+	rigs := make([]rigResponse, 0, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		resp := buildRigResponse(cfg, rig, sp, cityName, s.state.CityPath())
+		if wantGit {
+			resp.Git = fetchGitStatus(rig.Path)
+		}
+		rigs = append(rigs, resp)
+	}
+	writeListJSON(w, s.latestIndex(), rigs, len(rigs))
+}
+
+func (s *Server) handleRig(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	cfg := s.state.Config()
+	sp := s.state.SessionProvider()
+	wantGit := r.URL.Query().Get("git") == "true"
+
+	for _, rig := range cfg.Rigs {
+		if rig.Name == name {
+			resp := buildRigResponse(cfg, rig, sp, s.state.CityName(), s.state.CityPath())
+			if wantGit {
+				resp.Git = fetchGitStatus(rig.Path)
+			}
+			writeIndexJSON(w, s.latestIndex(), resp)
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, "not_found", "rig "+name+" not found")
+}
+
+func (s *Server) handleRigAction(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	action := r.PathValue("action")
+
+	sm, ok := s.state.(StateMutator)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "internal", "mutations not supported")
+		return
+	}
+
+	var err error
+	switch action {
+	case "suspend":
+		err = sm.SuspendRig(name)
+	case "resume":
+		err = sm.ResumeRig(name)
+	case "restart":
+		s.handleRigRestart(w, name)
+		return
+	default:
+		writeError(w, http.StatusNotFound, "not_found", "unknown rig action: "+action)
+		return
+	}
+
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "not_found", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "action": action, "rig": name})
+}
+
+// handleRigRestart kills all agents in a rig so the reconciler restarts them.
+func (s *Server) handleRigRestart(w http.ResponseWriter, name string) {
+	cfg := s.state.Config()
+	sp := s.state.SessionProvider()
+	cityName := s.state.CityName()
+	store := s.state.CityBeadStore()
+
+	// Verify rig exists.
+	rigFound := false
+	for _, rig := range cfg.Rigs {
+		if rig.Name == name {
+			rigFound = true
+			break
+		}
+	}
+	if !rigFound {
+		writeError(w, http.StatusNotFound, "not_found", "rig "+name+" not found")
+		return
+	}
+
+	// Best-effort kill: the agent set may change between config read and each
+	// Stop call (pool scaling, config reload). The reconciler is the
+	// convergence mechanism — survivors will be caught on its next tick.
+	killed := make([]string, 0)
+	failed := make([]string, 0)
+	for _, a := range cfg.Agents {
+		if workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs) != name {
+			continue
+		}
+		expanded := expandAgent(a, cityName, cfg.Workspace.SessionTemplate, sp)
+		for _, ea := range expanded {
+			sessionName := agentSessionName(cityName, ea.qualifiedName, cfg.Workspace.SessionTemplate)
+			killedViaWorker := false
+			err := error(nil)
+			if store != nil {
+				if sessionID, resolveErr := session.ResolveSessionID(store, sessionName); resolveErr == nil {
+					if handle, handleErr := s.workerHandleForSession(store, sessionID); handleErr == nil {
+						err = handle.Kill(context.Background())
+						killedViaWorker = err == nil
+					} else {
+						err = handleErr
+					}
+				}
+			}
+			if !killedViaWorker {
+				err = sp.Stop(sessionName)
+			}
+			if err != nil {
+				// "not found" / "not running" are benign — agent wasn't running.
+				if !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "not running") {
+					failed = append(failed, ea.qualifiedName)
+				}
+			} else {
+				killed = append(killed, ea.qualifiedName)
+			}
+		}
+	}
+	resp := map[string]any{
+		"status": "ok",
+		"action": "restart",
+		"rig":    name,
+		"killed": killed,
+	}
+	httpStatus := http.StatusOK
+	if len(failed) > 0 {
+		resp["failed"] = failed
+		if len(killed) == 0 {
+			// Total failure — no agents were killed.
+			resp["status"] = "failed"
+			httpStatus = http.StatusInternalServerError
+		} else {
+			resp["status"] = "partial"
+		}
+	}
+	writeJSON(w, httpStatus, resp)
 }
 
 // buildRigResponse creates a rigResponse with agent counts and last activity.
