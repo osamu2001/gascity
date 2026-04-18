@@ -1505,6 +1505,50 @@ func TestBuildDesiredState_PendingCreatePoolSessionUsesConcreteBeadIdentity(t *t
 	}
 }
 
+func TestBuildDesiredState_LegacyAliaslessManualPoolSessionFallsBackToSessionNameIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "legacy ant",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:demo/ant"},
+		Metadata: map[string]string{
+			"template":       "demo/ant",
+			"session_name":   "s-gc-legacy",
+			"session_origin": "manual",
+			"state":          "creating",
+			"work_dir":       filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "ant"),
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		Agents: []config.Agent{{
+			Name:              "ant",
+			Dir:               "demo",
+			Provider:          "test-agent",
+			StartCommand:      "true",
+			WorkDir:           ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(4),
+		}},
+	}
+
+	dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	got, ok := dsResult.State["s-gc-legacy"]
+	if !ok {
+		t.Fatalf("desired state missing legacy session: keys=%v", mapKeys(dsResult.State))
+	}
+	if got.InstanceName != "demo/s-gc-legacy" {
+		t.Fatalf("InstanceName = %q, want %q", got.InstanceName, "demo/s-gc-legacy")
+	}
+	wantWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "s-gc-legacy")
+	if got.WorkDir != wantWorkDir {
+		t.Fatalf("WorkDir = %q, want %q", got.WorkDir, wantWorkDir)
+	}
+}
+
 func TestBuildDesiredState_DoesNotCreateDuplicatePoolBeadForDiscoveredSession(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()

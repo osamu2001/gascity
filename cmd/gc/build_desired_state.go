@@ -1011,6 +1011,9 @@ func sessionBeadQualifiedName(cityPath string, cfgAgent *config.Agent, rigs []co
 	if strings.TrimSpace(sessionBead.Metadata["session_name_explicit"]) == boolMetadata(true) {
 		explicitName = strings.TrimSpace(sessionBead.Metadata["session_name"])
 	}
+	if explicitName == "" && strings.TrimSpace(sessionBead.Metadata["alias"]) == "" && strings.TrimSpace(sessionBeadAgentName(sessionBead)) == "" && cfgAgent.SupportsMultipleSessions() {
+		explicitName = strings.TrimSpace(sessionBead.Metadata["session_name"])
+	}
 	qualifiedName := workdirutil.SessionQualifiedName(
 		cityPath,
 		*cfgAgent,

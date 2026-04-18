@@ -85,6 +85,25 @@ func TestSessionQualifiedNameKeepsSingletonTemplateIdentity(t *testing.T) {
 	}
 }
 
+func TestSessionQualifiedNamePreservesRigQualifiedBindingIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	agent := config.Agent{
+		Name:              "worker",
+		Dir:               "demo",
+		BindingName:       "ops",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(2),
+	}
+
+	if got := SessionQualifiedName(cityPath, agent, rigs, "ops.worker-1", ""); got != "demo/ops.worker-1" {
+		t.Fatalf("SessionQualifiedName(bare binding) = %q, want %q", got, "demo/ops.worker-1")
+	}
+	if got := SessionQualifiedName(cityPath, agent, rigs, "demo/ops.worker-1", ""); got != "demo/ops.worker-1" {
+		t.Fatalf("SessionQualifiedName(rig-qualified binding) = %q, want %q", got, "demo/ops.worker-1")
+	}
+}
+
 func TestCityNameFallsBackToCityDirBase(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "city-root")
 	got := CityName(cityPath, &config.City{})

@@ -579,6 +579,8 @@ func syncSessionBeadsWithSnapshot(
 		// For pool instances, use the qualified instance name as the agent_name.
 		if slot := resolvePoolSlot(tp.InstanceName, tp.TemplateName); slot > 0 {
 			agentName = tp.InstanceName
+		} else if tp.InstanceName != "" && tp.InstanceName != tp.TemplateName {
+			agentName = tp.InstanceName
 		}
 		isManagedPool := origin == "ephemeral"
 
@@ -777,8 +779,12 @@ func syncSessionBeadsWithSnapshot(
 				queueMeta("pool_slot", strconv.Itoa(slot))
 			}
 		}
-		if b.Metadata["work_dir"] == "" && tp.WorkDir != "" {
+		legacyMissingConcreteIdentity := strings.TrimSpace(b.Metadata["agent_name"]) == ""
+		if tp.WorkDir != "" && (b.Metadata["work_dir"] == "" || (legacyMissingConcreteIdentity && b.Metadata["work_dir"] != tp.WorkDir)) {
 			queueMeta("work_dir", tp.WorkDir)
+		}
+		if legacyMissingConcreteIdentity && agentName != "" {
+			queueMeta("agent_name", agentName)
 		}
 		if b.Metadata["dependency_only"] != boolMetadata(tp.DependencyOnly) {
 			queueMeta("dependency_only", boolMetadata(tp.DependencyOnly))
