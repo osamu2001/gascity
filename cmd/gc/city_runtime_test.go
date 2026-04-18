@@ -319,6 +319,53 @@ func TestSweepUndesiredPoolSessionBeads_SweepsActiveWithoutCreationCompleteAt(t 
 	}
 }
 
+// The reconciler's healStatePatch rewrites a live bead from state=active
+// to state=awake (session_reconcile.go). "awake" is semantically
+// equivalent to "active" in this codebase, and both must receive the
+// same post-create sweep protection — otherwise the same spin loop
+// reopens on the alias path.
+func TestSweepUndesiredPoolSessionBeads_SkipsAwakeStateInPreWakeWindow(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-awake",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			// healStatePatch rewrote state=active → state=awake while the
+			// runtime was alive; the pre-wake condition is preserved
+			// because last_woke_at has not yet landed (or was cleared).
+			"state":                "awake",
+			"state_reason":         "creation_complete",
+			"creation_complete_at": time.Now().UTC().Format(time.RFC3339),
+			"last_woke_at":         "",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		nil,
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		runtime.NewFake(),
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 — state=awake in pre-wake window must receive same protection as state=active", closed)
+	}
+}
+
 // Recovery of an already-active bead (recoverRunningPendingCreate path:
 // state=active + pending_create_claim=true + alive runtime) must produce
 // a fresh creation_complete_at so the healed bead stays protected in the

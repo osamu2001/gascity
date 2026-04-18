@@ -697,8 +697,12 @@ func recoverRunningPendingCreate(
 		CoreBreakdown: coreBreakdown,
 		ConfirmState: confirmPendingStart(session.Metadata["state"]) ||
 			sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) == sessionpkg.StateAwake,
-		ClearSleepReason:        session.Metadata["sleep_reason"] != "",
-		ClearPendingCreateClaim: shouldRollbackPendingCreate(session),
+		ClearSleepReason: session.Metadata["sleep_reason"] != "",
+		// recoverRunningPendingCreate's caller (session_reconciler.go)
+		// already gates entry on shouldRollbackPendingCreate(session), so
+		// at this point the claim is guaranteed to be set — hard-code the
+		// clear rather than re-evaluating the same predicate.
+		ClearPendingCreateClaim: true,
 		Now:                     now,
 	})
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {

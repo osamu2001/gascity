@@ -960,23 +960,31 @@ func sweepUndesiredPoolSessionBeads(
 		// we observed pool sessions with state=active, last_woke=empty
 		// getting closed before wake ever landed.
 		//
+		// The guard matches both "active" and "awake" because the
+		// reconciler's healStatePatch (session_reconcile.go) rewrites a
+		// live bead from "active" to "awake" whenever the runtime is
+		// alive, and the reconciler treats both values as equivalent
+		// live states. Limiting the guard to "active" alone would leave
+		// the same spin-loop open on the "awake" alias path.
+		//
 		// The guard must only match the post-create window, not crash/
 		// churn/start-failure paths that ALSO clear last_woke_at
 		// (checkStability, checkChurn, and the start-failure branch in
 		// session_lifecycle_parallel.go all clear last_woke_at on beads
 		// that may already be state=active). We distinguish by the
 		// per-start marker creation_complete_at, written atomically with
-		// the state transition by CommitStartedPatch / ConfirmStartedPatch.
-		// A bead is protected while creation_complete_at is recent
-		// (within staleCreatingStateTimeout) AND last_woke_at is still
-		// empty — crash/churn paths do not touch creation_complete_at,
-		// so a post-crash bead whose last successful start was longer
-		// than the timeout ago is sweepable even when wake_attempts or
+		// the state transition by CommitStartedPatch / ConfirmStartedPatch
+		// and restamped by recoverRunningPendingCreate on heal. A bead
+		// is protected while creation_complete_at is recent (within
+		// staleCreatingStateTimeout) AND last_woke_at is still empty —
+		// crash/churn paths do not touch creation_complete_at, so a
+		// post-crash bead whose last successful start was longer than
+		// the timeout ago is sweepable even when wake_attempts or
 		// churn_count are non-zero. The age bound mirrors
 		// staleCreatingState: a missing or zero creation_complete_at is
 		// treated as stale (sweepable) so beads without the per-start
 		// marker (older builds, manually repaired) stay recoverable.
-		if strings.TrimSpace(bead.Metadata["state"]) == "active" &&
+		if state := strings.TrimSpace(bead.Metadata["state"]); (state == "active" || state == "awake") &&
 			strings.TrimSpace(bead.Metadata["last_woke_at"]) == "" &&
 			strings.TrimSpace(bead.Metadata["state_reason"]) == "creation_complete" {
 			if creationCompleteAt, ok := parseRFC3339Metadata(bead.Metadata["creation_complete_at"]); ok &&
