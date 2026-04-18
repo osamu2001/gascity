@@ -275,6 +275,33 @@ func TestInstallClaudePinnedHookFileOutranksRuntime(t *testing.T) {
 	}
 }
 
+// TestInstallClaudeUnreadableHookBlocksRuntimeFallback verifies that when
+// hooks/claude.json exists-but-is-unreadable and .gc/settings.json exists
+// with content, the tolerant-legacy path does NOT silently demote hook
+// precedence and let the runtime file become the source. Earlier versions
+// of the tolerant-read change skipped the unreadable hook file entirely,
+// which allowed a stale .gc/settings.json to override the user-owned but
+// currently-unreadable hook file — a precedence violation. The override
+// now resolves to "no source" (embedded base defaults) so Claude launches
+// with known-good settings instead.
+func TestInstallClaudeUnreadableHookBlocksRuntimeFallback(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Errors["/city/hooks/claude.json"] = errors.New("permission denied")
+	fs.Files["/city/.gc/settings.json"] = []byte(`{"stale_runtime_override": true}`)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := string(fs.Files["/city/.gc/settings.json"])
+	if strings.Contains(runtime, `"stale_runtime_override": true`) {
+		t.Errorf("unreadable hook must not let stale runtime override win:\n%s", runtime)
+	}
+	if !strings.Contains(runtime, "SessionStart") {
+		t.Errorf("runtime must contain embedded base defaults:\n%s", runtime)
+	}
+}
+
 // TestInstallClaudeSurfacesMalformedOverride verifies that a syntactically
 // invalid .claude/settings.json surfaces a descriptive error rather than
 // silently falling back to a legacy source or the embedded base.

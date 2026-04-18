@@ -194,22 +194,32 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 }
 
 func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string, []byte, claudeSettingsSourceKind, error) {
-	// The preferred source (.claude/settings.json) is strict: if the user
-	// placed the file and it can't be read, that's a hard error — we don't
-	// want to silently fall back to a legacy source they didn't intend.
-	if path, data, ok, err := readClaudeSettingsCandidate(fs, citylayout.ClaudeSettingsPath(cityDir), true); err != nil {
-		return "", nil, claudeSettingsSourceNone, err
-	} else if ok {
-		return path, data, claudeSettingsSourceCityDotClaude, nil
+	// Preferred source (.claude/settings.json): a present-but-unreadable
+	// file is a hard error. Falling back silently to a legacy source the
+	// user did not intend would ship the wrong --settings.
+	preferredPath := citylayout.ClaudeSettingsPath(cityDir)
+	preferredState, preferredData, preferredErr := readClaudeSettingsCandidate(fs, preferredPath)
+	switch preferredState {
+	case candidateFound:
+		return preferredPath, preferredData, claudeSettingsSourceCityDotClaude, nil
+	case candidateUnreadable:
+		return "", nil, claudeSettingsSourceNone, fmt.Errorf("reading %s: %w", preferredPath, preferredErr)
 	}
 
-	// Legacy candidates are tolerant: an unreadable leftover file (bad perms,
-	// partial write from a crashed tick) must not block source selection when
-	// a readable higher-priority source or embedded defaults can be used.
+	// Legacy candidates. A genuinely missing file is fine — fall through.
+	// An exists-but-unreadable file (bad perms, i/o error) must NOT silently
+	// demote to a lower-priority source, or a stale .gc/settings.json could
+	// override a user-owned hooks/claude.json that gc simply couldn't read
+	// this tick. Use embedded base defaults instead so the agent still
+	// launches without surfacing leftover runtime state.
 	hookPath := citylayout.ClaudeHookFilePath(cityDir)
 	runtimePath := filepath.Join(cityDir, ".gc", "settings.json")
-	_, hookData, hookExists, _ := readClaudeSettingsCandidate(fs, hookPath, false)
-	_, runtimeData, runtimeExists, _ := readClaudeSettingsCandidate(fs, runtimePath, false)
+	hookState, hookData, _ := readClaudeSettingsCandidate(fs, hookPath)
+	runtimeState, runtimeData, _ := readClaudeSettingsCandidate(fs, runtimePath)
+
+	if hookState == candidateUnreadable || runtimeState == candidateUnreadable {
+		return "", nil, claudeSettingsSourceNone, nil
+	}
 
 	// hooks/claude.json is authoritative when it exists, is not a known
 	// stale auto-generated file, and differs from the managed runtime file
@@ -217,8 +227,10 @@ func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string
 	// hook file whose bytes equal the embedded base: a user may pin
 	// hooks/claude.json to exactly the embedded defaults as their
 	// authoritative source and still expect it to outrank .gc/settings.json
-	// per the documented precedence. Use stale-pattern detection alone to
-	// decide whether the hook file is gc-generated vs user-authored.
+	// per the documented precedence. Stale-pattern detection alone
+	// distinguishes gc-generated from user-authored.
+	hookExists := hookState == candidateFound
+	runtimeExists := runtimeState == candidateFound
 	if hookExists &&
 		(!runtimeExists || !bytes.Equal(hookData, runtimeData)) &&
 		!claudeFileNeedsUpgrade(hookData) {
@@ -232,22 +244,31 @@ func readClaudeSettingsOverride(fs fsys.FS, cityDir string, base []byte) (string
 	return "", nil, claudeSettingsSourceNone, nil
 }
 
-// readClaudeSettingsCandidate reads a candidate settings file. When strict is
-// true, a file that exists-but-can't-be-read surfaces as an error so callers
-// can fail loudly. When strict is false, unreadable files are reported as
-// "not found" so a corrupt leftover file doesn't block fallback to the next
-// source or to embedded defaults.
-func readClaudeSettingsCandidate(fs fsys.FS, path string, strict bool) (string, []byte, bool, error) {
+type claudeCandidateState int
+
+const (
+	candidateMissing claudeCandidateState = iota
+	candidateFound
+	candidateUnreadable
+)
+
+// readClaudeSettingsCandidate reads a candidate settings file and reports
+// one of three states. Callers decide strictness: the preferred source
+// surfaces candidateUnreadable as a hard error; legacy sources use it to
+// block silent fallback to a lower-priority source.
+//
+// A read error that wraps os.ErrNotExist reports candidateMissing (matches
+// both real OS filesystems and the test Fake). Any other read error
+// reports candidateUnreadable with the original error returned.
+func readClaudeSettingsCandidate(fs fsys.FS, path string) (claudeCandidateState, []byte, error) {
 	data, err := fs.ReadFile(path)
 	if err == nil {
-		return path, data, true, nil
+		return candidateFound, data, nil
 	}
-	if strict {
-		if _, statErr := fs.Stat(path); statErr == nil {
-			return "", nil, false, fmt.Errorf("reading %s: %w", path, err)
-		}
+	if errors.Is(err, os.ErrNotExist) {
+		return candidateMissing, nil, nil
 	}
-	return "", nil, false, nil
+	return candidateUnreadable, nil, err
 }
 
 func writeManagedFile(fs fsys.FS, dst string, data []byte) error {

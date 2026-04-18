@@ -803,17 +803,20 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 			command = command + " " + shellquote.Join(defaultArgs)
 		}
 		// buildResumeCommand is best-effort: log projection failures and
-		// continue so `gc session attach` still starts the agent with
-		// whatever --settings file (if any) is already on disk. The strict
-		// path is resolveTemplate at reconciler time.
+		// continue so `gc session attach` still starts the agent. The strict
+		// path is resolveTemplate at reconciler time, which fails agent
+		// creation on projection errors.
 		sa, saErr := ensureClaudeSettingsArgs(fsys.OSFS{}, cityPath, resolved.Name, stderr)
 		if saErr == nil && sa != "" {
 			command = command + " " + sa
 		} else if saErr != nil {
-			// Fall back to probing whatever exists on disk. settingsArgs
-			// returns "" if nothing is projected yet, so Claude launches
-			// without --settings rather than with stale content from the
-			// failed projection.
+			// Projection failed this tick. Fall back to whatever a prior
+			// reconciler tick left on disk: settingsArgs probes for the
+			// managed .gc/settings.json (or legacy hooks/claude.json) and
+			// returns "" when nothing exists. On a fresh city with a
+			// malformed override, attach therefore launches without
+			// --settings rather than with stale content. On an older city,
+			// attach uses the last-known-good projection.
 			if probe := settingsArgs(cityPath, resolved.Name); probe != "" {
 				command = command + " " + probe
 			}
