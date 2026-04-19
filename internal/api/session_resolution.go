@@ -202,10 +202,11 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		return "", err
 	}
 
-	resolved, workDir, transport, qualifiedTemplate, err := s.resolveSessionTemplate(spec.Agent.QualifiedName())
+	resolved, _, transport, qualifiedTemplate, err := s.resolveSessionTemplate(spec.Agent.QualifiedName())
 	if err != nil {
 		return "", err
 	}
+	var workDir string
 	workDirQualifiedName := workdirutil.SessionQualifiedName(s.state.CityPath(), *spec.Agent, s.state.Config().Rigs, spec.Identity, "")
 	workDir, err = s.resolveSessionWorkDir(*spec.Agent, workDirQualifiedName)
 	if err != nil {
@@ -289,6 +290,14 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		return "", err
 	}
 	if id, err := session.ResolveSessionID(store, identifier); err == nil {
+		if cfg := s.state.Config(); cfg != nil {
+			if bead, getErr := store.Get(id); getErr == nil && apiIsNamedSessionBead(bead) {
+				identity := apiNamedSessionIdentity(bead)
+				if identity != "" && config.FindNamedSession(cfg, identity) == nil {
+					return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+				}
+			}
+		}
 		return id, nil
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
@@ -304,9 +313,6 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		} else if !errors.Is(err, session.ErrSessionNotFound) {
 			return "", err
 		}
-	}
-	if !opts.materialize {
-		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 }
