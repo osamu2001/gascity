@@ -346,7 +346,7 @@ func TestRegisterCityWithSupervisorRejectsStandaloneController(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc register", true)
+	code := registerCityWithSupervisor(cityPath, &stdout, &stderr, "gc start", true)
 	if code != 1 {
 		t.Fatalf("registerCityWithSupervisor code = %d, want 1", code)
 	}
@@ -355,6 +355,13 @@ func TestRegisterCityWithSupervisorRejectsStandaloneController(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "PID 4242") {
 		t.Fatalf("stderr = %q, want controller PID", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Authority: standalone controller PID 4242") {
+		t.Fatalf("stderr = %q, want standalone-controller authority", stderr.String())
+	}
+	wantNext := "Next: gc stop " + shellQuotePath(cityPath) + " && gc start " + shellQuotePath(cityPath)
+	if !strings.Contains(stderr.String(), wantNext) {
+		t.Fatalf("stderr = %q, want next command %q", stderr.String(), wantNext)
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())

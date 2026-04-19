@@ -153,11 +153,7 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 	cityPath = normalizePathForCompare(cityPath)
 	if pid, err := ensureNoStandaloneController(cityPath); err != nil {
 		if errors.Is(err, errControllerAlreadyRunning) {
-			if pid != 0 {
-				fmt.Fprintf(stderr, "%s: standalone controller already running for %s (PID %d); stop it before registering with the supervisor\n", commandName, cityPath, pid) //nolint:errcheck // best-effort stderr
-			} else {
-				fmt.Fprintf(stderr, "%s: standalone controller already running for %s; stop it before registering with the supervisor\n", commandName, cityPath) //nolint:errcheck // best-effort stderr
-			}
+			writeStandaloneControllerConflict(stderr, commandName, cityPath, pid)
 		} else {
 			fmt.Fprintf(stderr, "%s: probing standalone controller: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		}
@@ -239,6 +235,31 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		}
 	}
 	return 0
+}
+
+func writeStandaloneControllerConflict(stderr io.Writer, commandName, cityPath string, pid int) {
+	pidSuffix := ""
+	authority := "standalone controller"
+	if pid != 0 {
+		pidSuffix = fmt.Sprintf(" (PID %d)", pid)
+		authority = fmt.Sprintf("standalone controller PID %d", pid)
+	}
+	nextCommand := "gc stop " + shellQuotePath(cityPath) + " && " + supervisorRetryCommand(commandName, cityPath)
+	fmt.Fprintf(stderr,
+		"%s: standalone controller already running for %s%s; supervisor cannot manage this city until it stops\n",
+		commandName, cityPath, pidSuffix) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: Authority: %s\n", commandName, authority) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: Next: %s\n", commandName, nextCommand)    //nolint:errcheck // best-effort stderr
+}
+
+func supervisorRetryCommand(commandName, cityPath string) string {
+	quotedPath := shellQuotePath(cityPath)
+	switch strings.TrimSpace(commandName) {
+	case "gc register":
+		return "gc register " + quotedPath
+	default:
+		return "gc start " + quotedPath
+	}
 }
 
 func keepRegisteredCity(entry supervisor.CityEntry, stderr io.Writer, commandName, reason string) {

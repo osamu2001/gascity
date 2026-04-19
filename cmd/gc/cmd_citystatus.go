@@ -126,6 +126,9 @@ func doCityStatus(
 
 	ctrl := controllerStatusForCity(cityPath)
 	fmt.Fprintf(stdout, "  Controller: %s\n", controllerStatusLine(ctrl)) //nolint:errcheck // best-effort stdout
+	for _, line := range controllerStatusGuidance(ctrl, cityPath) {
+		fmt.Fprintf(stdout, "  %s\n", line) //nolint:errcheck // best-effort stdout
+	}
 
 	// Suspended status.
 	if citySuspended(cfg) {
@@ -432,16 +435,52 @@ func controllerStatusLine(ctrl ControllerJSON) string {
 	switch ctrl.Mode {
 	case "supervisor":
 		if ctrl.Running {
-			return fmt.Sprintf("supervisor (PID %d)", ctrl.PID)
+			return fmt.Sprintf("supervisor-managed (PID %d)", ctrl.PID)
 		}
 		if ctrl.PID != 0 {
-			return fmt.Sprintf("supervisor (PID %d, %s)", ctrl.PID, controllerSupervisorStatusText(ctrl.Status))
+			return fmt.Sprintf("supervisor-managed (PID %d, %s)", ctrl.PID, controllerSupervisorStatusText(ctrl.Status))
 		}
 		return "supervisor-managed (supervisor not running)"
 	case "standalone":
 		if ctrl.Running {
-			return fmt.Sprintf("standalone (PID %d)", ctrl.PID)
+			return fmt.Sprintf("standalone-managed (PID %d)", ctrl.PID)
 		}
 	}
 	return "stopped"
+}
+
+func controllerStatusGuidance(ctrl ControllerJSON, cityPath string) []string {
+	quotedPath := shellQuotePath(cityPath)
+	startCommand := "gc start " + quotedPath
+
+	switch ctrl.Mode {
+	case "standalone":
+		if !ctrl.Running {
+			return nil
+		}
+		authority := "Authority: standalone controller"
+		if ctrl.PID != 0 {
+			authority = fmt.Sprintf("Authority: standalone controller PID %d", ctrl.PID)
+		}
+		return []string{
+			authority,
+			"Next: gc stop " + quotedPath + " && " + startCommand + " to hand ownership to the supervisor",
+		}
+	case "supervisor":
+		if ctrl.PID == 0 {
+			return []string{
+				"Authority: supervisor registry; no supervisor process is running",
+				"Next: " + startCommand + " to start the supervisor and reconcile this city",
+			}
+		}
+		lines := []string{fmt.Sprintf("Authority: supervisor process PID %d", ctrl.PID)}
+		if ctrl.Running {
+			return lines
+		}
+		if ctrl.Status == "" {
+			return append(lines, "Next: "+startCommand+" to ask the supervisor to start this city")
+		}
+		return append(lines, "Next: gc supervisor logs to inspect startup progress")
+	}
+	return nil
 }
