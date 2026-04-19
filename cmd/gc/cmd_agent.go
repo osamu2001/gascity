@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -94,6 +96,61 @@ func writeCityConfigForEditFS(fs fsys.FS, tomlPath string, cfg *config.City) err
 		return fmt.Errorf("writing .gc/site.toml failed after city.toml was rewritten — rigs may be unbound; re-run the command or `gc doctor --fix` to retry: %w", err)
 	}
 	return nil
+}
+
+func loadCityPackConfigForEditFS(fs fsys.FS, packPath string) (*initPackConfig, error) {
+	data, err := fs.ReadFile(packPath)
+	if err != nil {
+		return nil, err
+	}
+	cfg := initPackConfig{}
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		return nil, fmt.Errorf("loading pack config %q: %w", packPath, err)
+	}
+	return &cfg, nil
+}
+
+func writeCityPackConfigForEditFS(fs fsys.FS, packPath string, cfg *initPackConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("writing pack config: nil pack")
+	}
+	content, err := marshalInitPackConfig(*cfg)
+	if err != nil {
+		return err
+	}
+	return fsys.WriteFileIfChangedAtomic(fs, packPath, content, 0o644)
+}
+
+func updateRootPackAgentSuspended(fs fsys.FS, cityPath string, cityCfg *config.City, name string, suspended bool) (bool, error) {
+	packPath := filepath.Join(cityPath, "pack.toml")
+	packCfg, err := loadCityPackConfigForEditFS(fs, packPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	rawPack := &config.City{
+		Workspace: cityCfg.Workspace,
+		Rigs:      append([]config.Rig(nil), cityCfg.Rigs...),
+		Agents:    append([]config.Agent(nil), packCfg.Agents...),
+	}
+	resolved, ok := resolveAgentIdentity(rawPack, name, currentRigContext(rawPack))
+	if !ok {
+		return false, nil
+	}
+	resolvedQN := resolved.QualifiedName()
+	for i := range packCfg.Agents {
+		if packCfg.Agents[i].QualifiedName() == resolvedQN {
+			packCfg.Agents[i].Suspended = suspended
+			break
+		}
+	}
+	if err := writeCityPackConfigForEditFS(fs, packPath, packCfg); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // resolveAgentIdentity resolves an agent input string to a config.Agent using
@@ -454,6 +511,13 @@ func doAgentSuspend(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 		fmt.Fprintf(stdout, "Suspended agent '%s'\n", name) //nolint:errcheck // best-effort stdout
 		return 0
 	}
+	if updated, err := updateRootPackAgentSuspended(fs, cityPath, cfg, name, true); err != nil {
+		fmt.Fprintf(stderr, "gc agent suspend: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if updated {
+		fmt.Fprintf(stdout, "Suspended agent '%s'\n", name) //nolint:errcheck // best-effort stdout
+		return 0
+	}
 
 	// Phase 2: not in raw config — check expanded config for pack-derived agents.
 	expanded, err := loadCityConfigFS(fs, tomlPath)
@@ -547,6 +611,13 @@ func doAgentResume(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) 
 			fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		fmt.Fprintf(stdout, "Resumed agent '%s'\n", name) //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	if updated, err := updateRootPackAgentSuspended(fs, cityPath, cfg, name, false); err != nil {
+		fmt.Fprintf(stderr, "gc agent resume: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	} else if updated {
 		fmt.Fprintf(stdout, "Resumed agent '%s'\n", name) //nolint:errcheck // best-effort stdout
 		return 0
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -131,6 +132,183 @@ func TestDoAgentResumePackDerivedError(t *testing.T) {
 	}
 	if !strings.Contains(errMsg, "[[patches]]") {
 		t.Errorf("stderr should mention patches: %s", errMsg)
+	}
+}
+
+func TestDoAgentSuspendRootPackAgent(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+
+[[agent]]
+name = "mayor"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentSuspend(fs, "/city", "mayor", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Suspended agent 'mayor'") {
+		t.Fatalf("stdout = %q, want suspend message", stdout.String())
+	}
+	if !strings.Contains(string(fs.Files["/city/pack.toml"]), "suspended = true") {
+		t.Fatalf("pack.toml missing suspended = true:\n%s", string(fs.Files["/city/pack.toml"]))
+	}
+	if strings.Contains(string(fs.Files["/city/city.toml"]), "suspended") {
+		t.Fatalf("city.toml should not be rewritten with pack agent suspension:\n%s", string(fs.Files["/city/city.toml"]))
+	}
+	renamed := false
+	for _, call := range fs.Calls {
+		if call.Method == "Rename" {
+			renamed = true
+			break
+		}
+	}
+	if !renamed {
+		t.Fatal("expected atomic rename when writing pack.toml")
+	}
+}
+
+func TestDoAgentResumeRootPackAgent(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+
+[[agent]]
+name = "mayor"
+suspended = true
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentResume(fs, "/city", "mayor", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Resumed agent 'mayor'") {
+		t.Fatalf("stdout = %q, want resume message", stdout.String())
+	}
+	if strings.Contains(string(fs.Files["/city/pack.toml"]), "suspended = true") {
+		t.Fatalf("pack.toml should clear suspended flag:\n%s", string(fs.Files["/city/pack.toml"]))
+	}
+	renamed := false
+	for _, call := range fs.Calls {
+		if call.Method == "Rename" {
+			renamed = true
+			break
+		}
+	}
+	if !renamed {
+		t.Fatal("expected atomic rename when writing pack.toml")
+	}
+}
+
+func TestDoAgentSuspendRootPackReadError(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	fs.Errors["/city/pack.toml"] = fmt.Errorf("permission denied")
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentSuspend(fs, "/city", "mayor", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "permission denied") {
+		t.Fatalf("stderr = %q, want permission denied", stderr.String())
+	}
+}
+
+func TestDoAgentSuspendRootPackPreservesPackFields(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`[workspace]
+name = "test-city"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`[pack]
+name = "test-city"
+schema = 2
+version = "0.1.0"
+requires_gc = ">=0.16.0"
+includes = ["../shared"]
+
+[[pack.requires]]
+agent = "mayor"
+scope = "city"
+
+[imports.helper]
+source = "../helper"
+
+[agent_defaults]
+append_fragments = ["shared"]
+
+[providers.claude]
+command = "claude"
+
+[formulas]
+dir = "custom-formulas"
+
+[[service]]
+name = "api"
+kind = "workflow"
+
+[[patches.agent]]
+name = "mayor"
+
+[[doctor]]
+name = "check-env"
+script = "doctor/check-env.sh"
+
+[[commands]]
+name = "status"
+description = "show status"
+long_description = "docs/status.md"
+script = "commands/status.sh"
+
+[global]
+session_live = ["echo live"]
+
+[[agent]]
+name = "mayor"
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doAgentSuspend(fs, "/city", "mayor", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packToml := string(fs.Files["/city/pack.toml"])
+	for _, want := range []string{
+		`version = "0.1.0"`,
+		`requires_gc = ">=0.16.0"`,
+		`includes = ["../shared"]`,
+		`[imports.helper]`,
+		`append_fragments = ["shared"]`,
+		`[providers.claude]`,
+		`dir = "custom-formulas"`,
+		`[[service]]`,
+		`name = "api"`,
+		`[[patches.agent]]`,
+		`[[doctor]]`,
+		`script = "doctor/check-env.sh"`,
+		`[[commands]]`,
+		`script = "commands/status.sh"`,
+		`[global]`,
+		`session_live = ["echo live"]`,
+		`suspended = true`,
+	} {
+		if !strings.Contains(packToml, want) {
+			t.Fatalf("pack.toml missing %q after suspend:\n%s", want, packToml)
+		}
 	}
 }
 

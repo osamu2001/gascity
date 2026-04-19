@@ -60,6 +60,9 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// deployment (rigs, substrates, capacity) plus any inline agents.
 	cityImportCount := len(root.Imports)
 	packExists := false
+	var rootPackIncludes []string
+	var rootPackGlobals []ResolvedPackGlobal
+	var rootPackRequires []PackRequirement
 	packPath := filepath.Join(cityRoot, packFile)
 	if packData, pErr := fs.ReadFile(packPath); pErr == nil {
 		packExists = true
@@ -73,6 +76,8 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		// Preserve the city.toml agents so they can override pack-defined
 		// and convention-discovered agents.
 		cityAgents := append([]Agent{}, root.Agents...)
+		rootPackIncludes = append([]string(nil), pc.Pack.Includes...)
+		rootPackRequires = append([]PackRequirement(nil), pc.Pack.Requires...)
 		// Dedup: city.toml agents override pack.toml agents with the same
 		// name. Build a set of city.toml agent names and skip pack.toml
 		// agents that would duplicate.
@@ -110,15 +115,37 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 		}
 		// Merge named sessions.
 		root.NamedSessions = append(pc.NamedSessions, root.NamedSessions...)
+		// Merge root-pack services as the portable base layer. city.toml
+		// services stay later in the slice and therefore remain the more
+		// local declaration when callers inspect the merged config.
+		if len(pc.Services) > 0 {
+			packServices := make([]Service, len(pc.Services))
+			copy(packServices, pc.Services)
+			for i := range packServices {
+				packServices[i].SourceDir = cityRoot
+			}
+			root.Services = append(packServices, root.Services...)
+		}
 		// Merge patches (accumulated, applied later).
 		root.Patches.Agents = append(pc.Patches.Agents, root.Patches.Agents...)
 		root.Patches.Rigs = append(pc.Patches.Rigs, root.Patches.Rigs...)
 		root.Patches.Providers = append(pc.Patches.Providers, root.Patches.Providers...)
+		// Merge formulas config with pack.toml as the base and city.toml as
+		// the more local override.
+		if root.Formulas.Dir == "" {
+			root.Formulas = pc.Formulas
+		}
 		// Merge pack-level agent defaults before city fragments so the
 		// city layer can append on top of the portable baseline.
 		mergedAgentDefaults := pc.AgentDefaults
 		mergeAgentDefaults(&mergedAgentDefaults, root.AgentDefaults, packPath, nil)
 		root.AgentDefaults = mergedAgentDefaults
+		if len(pc.Global.SessionLive) > 0 {
+			rootPackGlobals = append(rootPackGlobals, ResolvedPackGlobal{
+				SessionLive: resolveConfigDirInCommands(pc.Global.SessionLive, cityRoot),
+				PackName:    pc.Pack.Name,
+			})
+		}
 		// Track pack.toml agents in provenance.
 		trackAgents(prov, pc.Agents, packPath)
 		prov.Sources = append(prov.Sources, packPath)
@@ -241,6 +268,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	// Skip packs already reachable from user includes or top-level imports
 	// (avoids duplicate agent errors when a user pack transitively includes
 	// a system pack).
+	root.Workspace.Includes = append(rootPackIncludes, root.Workspace.Includes...)
 	existingPacks := resolvedPackNames(root.Workspace.Includes, root.Imports, fs, cityRoot)
 	for _, inc := range packIncludes {
 		name := readPackNameFromDir(inc)
@@ -296,6 +324,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	if ctErr != nil {
 		return nil, nil, ctErr
 	}
+	cityReqs = append(cityReqs, rootPackRequires...)
 	prov.Warnings = append(prov.Warnings, shadowWarnings...)
 	// Track city pack agents in provenance.
 	for _, ref := range root.Workspace.Includes {
@@ -340,6 +369,7 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	}
 
 	// Apply [global] sections from packs to agents in scope.
+	root.PackGlobals = append(root.PackGlobals, rootPackGlobals...)
 	applyPackGlobals(root)
 
 	// Validate city-scoped pack requirements.
