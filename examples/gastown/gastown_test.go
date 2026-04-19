@@ -40,6 +40,18 @@ func currentBranch(t *testing.T, dir string) string {
 	return runCmd(t, dir, "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
+func assertContainsInOrder(t *testing.T, body string, wants ...string) {
+	t.Helper()
+	offset := 0
+	for _, want := range wants {
+		idx := strings.Index(body[offset:], want)
+		if idx == -1 {
+			t.Fatalf("missing %q after byte offset %d", want, offset)
+		}
+		offset += idx + len(want)
+	}
+}
+
 // loadExpanded loads city.toml with full pack expansion.
 func loadExpanded(t *testing.T) *config.City {
 	t.Helper()
@@ -150,7 +162,9 @@ func TestPolecatFormulaTreatsMetadataBranchAsAuthoritative(t *testing.T) {
 	}
 	body := string(data)
 	for _, want := range []string{
-		`git fetch --prune origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"`,
+		`git fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"`,
+		`Could not fetch metadata.branch=$BRANCH from origin`,
+		`git merge --ff-only "origin/$BRANCH"`,
 		`metadata.branch=$BRANCH was set but no local or origin branch exists`,
 		`STOP. Do not create a different branch.`,
 	} {
@@ -158,6 +172,10 @@ func TestPolecatFormulaTreatsMetadataBranchAsAuthoritative(t *testing.T) {
 			t.Errorf("polecat formula missing metadata.branch authority guidance %q", want)
 		}
 	}
+	assertContainsInOrder(t, body,
+		`if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then`,
+		`if git show-ref --verify --quiet "refs/heads/$BRANCH"; then`,
+	)
 }
 
 func TestPolecatFormulaRecordsExistingPRMetadataOnSubmit(t *testing.T) {
@@ -169,12 +187,14 @@ func TestPolecatFormulaRecordsExistingPRMetadataOnSubmit(t *testing.T) {
 	}
 	body := string(data)
 	for _, want := range []string{
-		`EXISTING_PR=$(gc bd show {{issue}} --json | jq -r '.metadata.existing_pr // empty')`,
-		`--set-metadata pr_url="$EXISTING_PR"`,
+		`metadata.existing_pr` + "`" + ` is preserved for refinery`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("polecat formula missing existing_pr submit handling %q", want)
 		}
+	}
+	if strings.Contains(body, `--set-metadata pr_url="$EXISTING_PR"`) {
+		t.Fatalf("polecat must not record caller-supplied existing_pr as canonical pr_url")
 	}
 	if strings.Contains(body, "gh pr create") {
 		t.Fatalf("polecat submit flow must not create pull requests directly")
@@ -190,19 +210,53 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 	}
 	body := string(data)
 	for _, want := range []string{
-		`EXISTING_PR=$(gc bd show $WORK --json | jq -r '.metadata.existing_pr // empty')`,
-		`PR_URL="$EXISTING_PR"`,
+		`EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')`,
+		`ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')`,
+		`metadata.existing_pr requires pull-request handoff; using merge_strategy=mr`,
+		`block_existing_pr()`,
+		`--assignee=""`,
+		`--set-metadata gc.routed_to=human`,
+		`--set-metadata blocked_reason="$reason"`,
+		`gc mail send mayor/ -s "ESCALATION: invalid existing_pr for $WORK"`,
+		`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')`,
+		`gc bd update "$NEXT" --assignee=$GC_AGENT`,
+		`CURRENT_WISP=${GC_BEAD_ID:-}`,
+		`gc bd mol burn "$CURRENT_WISP" --force`,
+		`pr_lookup_missing()`,
+		`EXISTING_PR_ERR=$(mktemp)`,
+		`EXISTING_PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$EXISTING_PR" 2>"$EXISTING_PR_ERR")`,
+		`EXISTING_PR_STATUS=$?`,
+		`if pr_lookup_missing "$EXISTING_PR_ERROR"; then`,
+		`Existing PR $EXISTING_PR was not found or is not accessible.`,
+		`Could not resolve existing PR $EXISTING_PR. STOP. Debug and retry without mutating bead state.`,
+		`EXISTING_PR_STATE=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.state')`,
+		`EXISTING_PR_HEAD=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.headRefName')`,
+		`EXISTING_PR_BASE=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.baseRefName')`,
+		`EXISTING_PR_REPO=$(printf '%s\n' "$EXISTING_PR_URL" | sed -E 's#^https://github.com/([^/]+/[^/]+)/pull/[0-9]+$#\\1#')`,
+		`EXISTING_PR_HEAD_REPO=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.headRepositoryOwner.login + "/" + .headRepository.name')`,
+		`metadata.existing_pr is set but metadata.branch is missing`,
+		`Existing PR $EXISTING_PR is $EXISTING_PR_STATE, want OPEN`,
+		`Existing PR $EXISTING_PR targets branch $EXISTING_PR_HEAD, want $BRANCH`,
+		`Existing PR $EXISTING_PR targets base $EXISTING_PR_BASE, want $TARGET`,
+		`Existing PR $EXISTING_PR belongs to repo $EXISTING_PR_REPO, want $ORIGIN_REPO`,
+		`Existing PR $EXISTING_PR head repo $EXISTING_PR_HEAD_REPO, want $ORIGIN_REPO`,
 		`PR_REF="$EXISTING_PR"`,
+		`PR_STATUS=$?`,
+		`if [ -n "$EXISTING_PR" ] && pr_lookup_missing "$PR_ERROR"; then`,
+		`PR_REPO=$(printf '%s\n' "$PR_URL" | sed -E 's#^https://github.com/([^/]+/[^/]+)/pull/[0-9]+$#\\1#')`,
+		`Existing PR $EXISTING_PR belongs to repo $PR_REPO, want $ORIGIN_REPO`,
+		`if [ -n "$EXISTING_PR" ]; then`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("refinery formula missing existing_pr handling %q", want)
 		}
 	}
-	existingIdx := strings.Index(body, `EXISTING_PR=$(gc bd show $WORK --json | jq -r '.metadata.existing_pr // empty')`)
-	createIdx := strings.Index(body, "gh pr create")
-	if existingIdx == -1 || createIdx == -1 || existingIdx > createIdx {
-		t.Fatalf("refinery formula must inspect existing_pr before gh pr create")
-	}
+	assertContainsInOrder(t, body,
+		`EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')`,
+		`EXISTING_PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$EXISTING_PR" 2>"$EXISTING_PR_ERR")`,
+		`git push origin HEAD:$BRANCH --force-with-lease`,
+		`gh pr create`,
+	)
 }
 
 func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {

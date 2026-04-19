@@ -95,18 +95,30 @@ BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
 
 **If branch exists in metadata** — treat it as authoritative. This
 metadata may come from rejection recovery or from a caller that wants
-work applied to an existing branch. Fetch the named remote branch first,
-then check out the local branch if present or create a local tracking
-branch from `origin/$BRANCH`:
+work applied to an existing branch. Fetch the named remote branch first.
+If `origin/$BRANCH` exists, make the local branch fast-forward to that
+remote tip or stop on divergence:
 ```bash
-git fetch --prune origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" 2>/dev/null || true
-if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+git fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" || \
+    echo "Could not fetch metadata.branch=$BRANCH from origin. Checking local refs before stopping."
+if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+    if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+        git checkout "$BRANCH" || exit 1
+        git merge --ff-only "origin/$BRANCH" || {
+            echo "Local branch $BRANCH diverged from origin/$BRANCH."
+            echo "STOP. Reconcile the branch before continuing."
+            gc runtime drain-ack
+            exit 1
+        }
+    else
+        git checkout --track -b "$BRANCH" "origin/$BRANCH" || exit 1
+    fi
+elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
     git checkout "$BRANCH" || exit 1
-elif git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
-    git checkout --track -b "$BRANCH" "origin/$BRANCH" || exit 1
 else
     echo "metadata.branch=$BRANCH was set but no local or origin branch exists."
     echo "STOP. Do not create a different branch."
+    gc runtime drain-ack
     exit 1
 fi
 ```
@@ -180,23 +192,15 @@ git branch -D "$BRANCH"              # Branch is pushed; refinery owns it now
 
 **4. Update metadata on the work bead:**
 ```bash
-EXISTING_PR=$(gc bd show {{issue}} --json | jq -r '.metadata.existing_pr // empty')
-if [ -n "$EXISTING_PR" ]; then
-  gc bd update {{issue}} \
-    --set-metadata target={{base_branch}} \
-    --set-metadata pr_url="$EXISTING_PR" \
-    --notes "Implemented: <brief summary>"
-else
-  gc bd update {{issue}} \
-    --set-metadata target={{base_branch}} \
-    --notes "Implemented: <brief summary>"
-fi
+gc bd update {{issue}} \
+  --set-metadata target={{base_branch}} \
+  --notes "Implemented: <brief summary>"
 ```
 Branch was recorded in workspace-setup and is already in metadata.
 This adds the target for the refinery. If an existing pull request was
-provided by the caller, this records the URL on the bead. The refinery's
-PR mode also reads `metadata.existing_pr` and must reuse it instead of
-creating a duplicate pull request.
+provided by the caller, `metadata.existing_pr` is preserved for refinery
+validation. The refinery records canonical `pr_url` only after verifying
+the PR is open and matches the branch, base, and origin repository.
 
 **5. Reassign to refinery:**
 ```bash
