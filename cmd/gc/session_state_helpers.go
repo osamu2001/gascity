@@ -29,6 +29,11 @@ func isDrainedSessionBead(session beads.Bead) bool {
 // snapshot falsely reports assigned work. Freeing the slot for idle-asleep
 // pool beads lets the supervisor spawn a fresh worker for ready queue work
 // instead of stranding it on a ghost slot.
+//
+// An explicit sleep_reason is required: deny-by-default for unknown or
+// missing reasons so writes that land in state=asleep without a known
+// reason (legacy beads, regressions, write races) cannot silently free
+// their slot.
 func isPoolSessionSlotFreeable(session beads.Bead) bool {
 	if isDrainedSessionBead(session) {
 		return true
@@ -38,7 +43,7 @@ func isPoolSessionSlotFreeable(session beads.Bead) bool {
 	}
 	reason := strings.TrimSpace(session.Metadata["sleep_reason"])
 	switch reason {
-	case "", "idle", "idle-timeout":
+	case "idle", "idle-timeout":
 		return true
 	}
 	return false

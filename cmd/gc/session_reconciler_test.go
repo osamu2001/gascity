@@ -438,6 +438,14 @@ func TestReconcileSessionBeads_DrainAckIgnoresStaleOwnershipSnapshot(t *testing.
 // spawn a fresh worker for pending queue work. Before the fix the close
 // gate only fired for state=drained, so idle-asleep pool beads sat open
 // indefinitely and blocked new spawns.
+//
+// The test passes a stale ownership snapshot that lies about assigned
+// work (mirroring the drain-ack regression). Before the close gate was
+// rewired to call closeBead directly, the gate's live query cleared work
+// but the downstream closeSessionBeadIfUnassigned helper re-consulted
+// the stale snapshot and vetoed the close — reintroducing the ghost
+// slot. With the direct closeBead call, the snapshot can no longer veto
+// a close that the live query has already cleared.
 func TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -453,6 +461,20 @@ func TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot(t *testing.T) {
 		poolManagedMetadataKey: boolMetadata(true),
 	})
 
+	// Stale snapshot: claims the pool worker still has an open assigned
+	// bead. The live store has no such record (the worker already closed
+	// it before its runtime exited). If the close path re-reads this
+	// snapshot, it will veto the close and leak the slot — which is
+	// exactly the regression this test exists to guard.
+	stale := beads.Bead{
+		ID:       "stale-work",
+		Title:   "already closed",
+		Type:     "task",
+		Status:   "open",
+		Assignee: session.ID,
+	}
+	staleSnapshot := []beads.Bead{stale}
+
 	reconcileSessionBeadsAtPath(
 		context.Background(),
 		"",
@@ -464,7 +486,7 @@ func TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot(t *testing.T) {
 		env.store,
 		newFakeDrainOps(),
 		nil,
-		nil,
+		staleSnapshot, // lies about assigned work
 		nil,
 		env.dt,
 		nil,
@@ -485,7 +507,7 @@ func TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot(t *testing.T) {
 		t.Fatalf("Get(%s): %v", session.ID, err)
 	}
 	if got.Status != "closed" {
-		t.Fatalf("status = %q, want closed — asleep-idle pool beads must free their slot", got.Status)
+		t.Fatalf("status = %q, want closed — asleep-idle pool beads must free their slot even when the stale ownership snapshot falsely reports assigned work", got.Status)
 	}
 }
 

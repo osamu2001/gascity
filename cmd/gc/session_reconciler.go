@@ -11,7 +11,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,8 +27,6 @@ import (
 )
 
 const maxIdleSleepProbesPerTick = 3
-
-var errOwnershipSnapshotPartial = errors.New("ownership work snapshot partial")
 
 type wakeTarget struct {
 	session *beads.Bead
@@ -890,7 +887,14 @@ func reconcileSessionBeadsTraced(
 			// Singleton/named controller-managed identities must keep the same
 			// bead so later wake/restart happens in place instead of minting a
 			// fresh canonical owner.
-			closeSessionBeadIfUnassigned(store, *target.session, ownershipWorkIndex, "drained", clk.Now().UTC(), stderr)
+			//
+			// Close directly rather than via closeSessionBeadIfUnassigned: the
+			// live sessionHasOpenAssignedWork query above already established
+			// hasAssignedWork=false. Routing through closeSessionBeadIfUnassigned
+			// would re-consult ownershipWorkIndex (the stale pre-tick snapshot)
+			// and let it veto the close — exactly the behaviour the PR set out
+			// to kill in the drain-ack handler.
+			closeBead(store, target.session.ID, "drained", clk.Now().UTC(), stderr)
 		}
 	}
 
@@ -986,22 +990,6 @@ func sessionHasOpenAssignedWork(store beads.Store, session beads.Bead) (bool, er
 		}
 	}
 	return false, nil
-}
-
-func sessionHasOpenAssignedWorkWithSnapshot(
-	store beads.Store,
-	session beads.Bead,
-	ownershipWorkBeads []beads.Bead,
-	ownershipWorkIndex map[string]bool,
-	storeQueryPartial bool,
-) (bool, error) {
-	if storeQueryPartial {
-		return false, errOwnershipSnapshotPartial
-	}
-	if ownershipWorkBeads != nil {
-		return sessionHasAssignedWork(session, ownershipWorkIndex), nil
-	}
-	return sessionHasOpenAssignedWork(store, session)
 }
 
 func resetConfiguredNamedSessionForConfigDrift(
