@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -1469,7 +1470,11 @@ func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, send sse.Sen
 
 		// Use tail=1 (last compaction segment) to limit parsing scope,
 		// consistent with the non-raw streaming path.
-		transcript, err := worker.SessionLogAdapter{}.ReadTranscript(worker.TranscriptRequest{
+		factory, err := s.workerFactory(s.state.CityBeadStore())
+		if err != nil {
+			return
+		}
+		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
 			Provider:        info.Provider,
 			TranscriptPath:  logPath,
 			TailCompactions: 1,
@@ -1623,7 +1628,11 @@ func (s *Server) streamSessionTranscriptLog(ctx context.Context, send sse.Sender
 			return
 		}
 
-		transcript, err := worker.SessionLogAdapter{}.ReadTranscript(worker.TranscriptRequest{
+		factory, err := s.workerFactory(s.state.CityBeadStore())
+		if err != nil {
+			return
+		}
+		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
 			Provider:       info.Provider,
 			TranscriptPath: logPath,
 		})

@@ -2,11 +2,13 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 // SSE stream handlers for the session endpoint. resolveSessionStream picks
@@ -80,9 +82,9 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 	reqCtx := hctx.Context()
 	if info.Closed {
 		if format == "raw" {
-			s.emitClosedSessionSnapshotRaw(send, info, path)
+			s.emitClosedSessionSnapshotRawHuma(send, info, path)
 		} else {
-			s.emitClosedSessionSnapshot(send, info, path)
+			s.emitClosedSessionSnapshotHuma(send, info, path)
 		}
 		return
 	}
@@ -108,4 +110,65 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 	default:
 		s.streamSessionPeek(reqCtx, send, info)
 	}
+}
+
+func (s *Server) emitClosedSessionSnapshotHuma(send sse.Sender, info session.Info, logPath string) {
+	if logPath == "" {
+		return
+	}
+	sess, err := sessionlog.ReadProviderFile(info.Provider, logPath, 0)
+	if err != nil {
+		return
+	}
+
+	turns := make([]outputTurn, 0, len(sess.Messages))
+	for _, entry := range sess.Messages {
+		turn := entryToTurn(entry)
+		if turn.Text == "" {
+			continue
+		}
+		turns = append(turns, turn)
+	}
+	if len(turns) == 0 {
+		return
+	}
+
+	_ = send(sse.Message{ID: 1, Data: SessionStreamMessageEvent{
+		ID:       info.ID,
+		Template: info.Template,
+		Provider: info.Provider,
+		Format:   "conversation",
+		Turns:    turns,
+	}})
+	_ = send(sse.Message{ID: 2, Data: SessionActivityEvent{Activity: "idle"}})
+}
+
+func (s *Server) emitClosedSessionSnapshotRawHuma(send sse.Sender, info session.Info, logPath string) {
+	if logPath == "" {
+		return
+	}
+	sess, err := sessionlog.ReadProviderFileRaw(info.Provider, logPath, 0)
+	if err != nil {
+		return
+	}
+
+	rawMessages := make([]json.RawMessage, 0, len(sess.Messages))
+	for _, entry := range sess.Messages {
+		if len(entry.Raw) == 0 {
+			continue
+		}
+		rawMessages = append(rawMessages, entry.Raw)
+	}
+	if len(rawMessages) == 0 {
+		return
+	}
+
+	_ = send(sse.Message{ID: 1, Data: SessionStreamRawMessageEvent{
+		ID:       info.ID,
+		Template: info.Template,
+		Provider: info.Provider,
+		Format:   "raw",
+		Messages: wrapRawFrameBytes(rawMessages),
+	}})
+	_ = send(sse.Message{ID: 2, Data: SessionActivityEvent{Activity: "idle"}})
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -443,8 +444,25 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 
 // enrichSessionResponse populates runtime fields on a session response:
 // running state, active bead, peek output, and model/context metadata.
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, _ *config.City, handle worker.Handle, wantPeek bool) {
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, _ *config.City, runtimeHandle any, wantPeek bool) {
 	if info.State != session.StateActive {
+		return
+	}
+	var handle worker.Handle
+	switch v := runtimeHandle.(type) {
+	case worker.Handle:
+		handle = v
+	case runtime.Provider:
+		store := s.state.CityBeadStore()
+		if store == nil {
+			return
+		}
+		resolved, err := s.workerHandleForSession(store, info.ID)
+		if err != nil {
+			return
+		}
+		handle = resolved
+	default:
 		return
 	}
 	if handle == nil {
