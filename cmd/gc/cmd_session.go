@@ -210,6 +210,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	// via findAgentByTemplate (which compares against QualifiedName()).
 	canonicalTemplate := found.QualifiedName()
 	configuredOwner := sessionNewAliasOwner(cfg, &found)
+	reservationIDs := []string{alias, explicitName}
+	reserveConcreteIdentity := found.SupportsMultipleSessions() && strings.TrimSpace(sessionQualifiedName) != ""
+	if reserveConcreteIdentity {
+		reservationIDs = append(reservationIDs, sessionQualifiedName)
+	}
 
 	// Resolve the workspace default provider for title generation. This
 	// mirrors api.Server.resolveTitleProvider: use an empty Agent so we
@@ -226,9 +231,14 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
 			// Controller is running — create bead only, let reconciler start it.
 			var info session.Info
-			err := session.WithCitySessionIdentifierLocks(cityPath, []string{alias, explicitName}, func() error {
+			err := session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
 				if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", configuredOwner); err != nil {
 					return err
+				}
+				if reserveConcreteIdentity && sessionQualifiedName != alias {
+					if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
+						return err
+					}
 				}
 				if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
 					return err
@@ -306,9 +316,14 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		kindMeta["provider_kind"] = resolved.Kind
 	}
 	var info session.Info
-	err = session.WithCitySessionIdentifierLocks(cityPath, []string{alias, explicitName}, func() error {
+	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, alias, "", configuredOwner); err != nil {
 			return err
+		}
+		if reserveConcreteIdentity && sessionQualifiedName != alias {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, sessionQualifiedName, "", configuredOwner); err != nil {
+				return err
+			}
 		}
 		if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
 			return err

@@ -298,11 +298,15 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		ResumeCommand: resolved.ResumeCommand,
 		SessionIDFlag: resolved.SessionIDFlag,
 	}
+	reservationIDs := []string{explicitName, sessionQualifiedName}
 
 	if cityUsesManagedReconciler(cityPath) {
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
 			var info session.Info
-			createErr := session.WithCitySessionIdentifierLocks(cityPath, []string{explicitName}, func() error {
+			createErr := session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
+				if err := session.EnsureAliasAvailableWithConfig(store, cfg, sessionQualifiedName, ""); err != nil {
+					return err
+				}
 				if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
 					return err
 				}
@@ -339,7 +343,10 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 	}
 	var info session.Info
-	err = session.WithCitySessionIdentifierLocks(cityPath, []string{explicitName}, func() error {
+	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
+		if err := session.EnsureAliasAvailableWithConfig(store, cfg, sessionQualifiedName, ""); err != nil {
+			return err
+		}
 		if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
 			return err
 		}

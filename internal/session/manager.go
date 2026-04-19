@@ -368,10 +368,14 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		cfg := hints
 		cfg.Command = startCommand
 		cfg.WorkDir = workDir
+		runtimeAlias := alias
+		if runtimeAlias == "" {
+			runtimeAlias = strings.TrimSpace(extraMeta["agent_name"])
+		}
 		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnvWithSessionContext(
 			b.ID,
 			sessName,
-			alias,
+			runtimeAlias,
 			template,
 			meta["session_origin"],
 			DefaultGeneration,

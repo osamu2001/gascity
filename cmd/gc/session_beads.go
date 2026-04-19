@@ -779,11 +779,24 @@ func syncSessionBeadsWithSnapshot(
 				queueMeta("pool_slot", strconv.Itoa(slot))
 			}
 		}
-		legacyMissingConcreteIdentity := strings.TrimSpace(b.Metadata["agent_name"]) == ""
-		if tp.WorkDir != "" && (b.Metadata["work_dir"] == "" || (legacyMissingConcreteIdentity && b.Metadata["work_dir"] != tp.WorkDir)) {
-			queueMeta("work_dir", tp.WorkDir)
+		existingAgentName := strings.TrimSpace(b.Metadata["agent_name"])
+		legacyTemplateIdentity := agentName != "" &&
+			agentName != tp.TemplateName &&
+			(existingAgentName == tp.TemplateName || existingAgentName == targetBasename(tp.TemplateName))
+		legacyNeedsConcreteIdentity := existingAgentName == "" || legacyTemplateIdentity
+		if tp.WorkDir != "" {
+			switch {
+			case b.Metadata["work_dir"] == "":
+				// Legacy active sessions are still running in their original
+				// work_dir. Don't repoint metadata until the session stops.
+				if !legacyNeedsConcreteIdentity || state != "active" {
+					queueMeta("work_dir", tp.WorkDir)
+				}
+			case legacyNeedsConcreteIdentity && b.Metadata["work_dir"] != tp.WorkDir && state != "active":
+				queueMeta("work_dir", tp.WorkDir)
+			}
 		}
-		if legacyMissingConcreteIdentity && agentName != "" {
+		if legacyNeedsConcreteIdentity && agentName != "" {
 			queueMeta("agent_name", agentName)
 		}
 		if b.Metadata["dependency_only"] != boolMetadata(tp.DependencyOnly) {

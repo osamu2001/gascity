@@ -424,9 +424,19 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// show the session in the sidebar immediately via optimistic UI.
 	mgr := s.sessionManager(store)
 	var info session.Info
-	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{alias, explicitName}, func() error {
+	reservationIDs := []string{alias, explicitName}
+	reserveConcreteIdentity := kind == "agent" && agentCfg.SupportsMultipleSessions() && strings.TrimSpace(workDirQualifiedName) != ""
+	if reserveConcreteIdentity {
+		reservationIDs = append(reservationIDs, workDirQualifiedName)
+	}
+	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), reservationIDs, func() error {
 		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
 			return err
+		}
+		if reserveConcreteIdentity && workDirQualifiedName != alias {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), workDirQualifiedName, ""); err != nil {
+				return err
+			}
 		}
 		if err := session.EnsureSessionNameAvailableWithConfig(store, s.state.Config(), explicitName, ""); err != nil {
 			return err

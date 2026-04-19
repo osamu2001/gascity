@@ -273,6 +273,41 @@ func TestCmdSessionNew_PoolTemplateCanonicalizesQualifiedAliasCollisions(t *test
 	}
 }
 
+func TestCmdSessionNew_PoolTemplateBareAliasStillResolves(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writePoolSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig(%q): %v", cityDir, err)
+	}
+	store, code := openCityStore(io.Discard, "test")
+	if store == nil {
+		t.Fatalf("openCityStore = nil, code=%d", code)
+	}
+
+	id, err := resolveSessionIDMaterializingNamed(cityDir, cfg, store, "ant-fenrir")
+	if err != nil {
+		t.Fatalf("resolveSessionIDMaterializingNamed(ant-fenrir): %v", err)
+	}
+	all := sessionBeads(t, cityDir)
+	if len(all) != 1 {
+		t.Fatalf("session beads = %d, want 1", len(all))
+	}
+	if id != all[0].ID {
+		t.Fatalf("resolved ID = %q, want %q", id, all[0].ID)
+	}
+}
+
 func TestCmdSessionNew_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
@@ -333,6 +368,38 @@ func TestCmdSessionNew_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *t
 		if got := bead.Metadata["agent_name"]; got != "demo/"+sessionName {
 			t.Fatalf("agent_name(%q) = %q, want %q", sessionName, got, "demo/"+sessionName)
 		}
+	}
+}
+
+func TestCmdSessionNew_PoolTemplateRejectsAliasMatchingConcreteIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writePoolSessionCityTOML(t, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionNew(aliasless) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	all := sessionBeads(t, cityDir)
+	if len(all) != 1 {
+		t.Fatalf("session beads = %d, want 1", len(all))
+	}
+	sessionName := all[0].Metadata["session_name"]
+	if sessionName == "" {
+		t.Fatal("session_name should be populated for aliasless pooled session")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdSessionNew([]string{"demo/ant"}, "demo/"+sessionName, "", "", true, &stdout, &stderr); code == 0 {
+		t.Fatal("cmdSessionNew(alias collision) = 0, want conflict")
+	}
+	if !strings.Contains(stderr.String(), session.ErrSessionAliasExists.Error()) {
+		t.Fatalf("stderr = %q, want alias conflict", stderr.String())
 	}
 }
 

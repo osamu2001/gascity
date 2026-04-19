@@ -696,7 +696,7 @@ func discoverSessionBeadsWithRoots(
 		// scaling and causes infinite wake→drain→stop loops when there's
 		// no work.
 		if isEphemeralSessionBeadForAgent(b, cfgAgent) {
-			manualSession := isManualSessionBead(b)
+			manualSession := isManualSessionBeadForAgent(b, cfgAgent)
 			creating := b.Metadata["state"] == "creating"
 			if isPoolManagedSessionBead(b) && !manualSession && !isNamedSessionBead(b) && !creating {
 				continue
@@ -719,7 +719,7 @@ func discoverSessionBeadsWithRoots(
 			resolveAgent         *config.Agent
 			sessionQualifiedName string
 		)
-		if isManualSessionBead(b) {
+		if isManualSessionBeadForAgent(b, cfgAgent) {
 			sessionQualifiedName = sessionBeadQualifiedName(bp.cityPath, cfgAgent, bp.rigs, b)
 			resolveAgent = sessionBeadConfigAgent(cfgAgent, sessionQualifiedName)
 		} else {
@@ -739,7 +739,7 @@ func discoverSessionBeadsWithRoots(
 			fmt.Fprintf(stderr, "buildDesiredState: bead %s template %q: %v (skipping)\n", b.ID, template, err) //nolint:errcheck
 			continue
 		}
-		tp.ManualSession = isManualSessionBead(b)
+		tp.ManualSession = isManualSessionBeadForAgent(b, cfgAgent)
 		if tp.ManualSession {
 			if manualAlias := strings.TrimSpace(b.Metadata["alias"]); manualAlias != "" {
 				// Explicit aliases from `gc session new --alias ...` are
@@ -751,7 +751,11 @@ func discoverSessionBeadsWithRoots(
 			if !tp.ManualSession || strings.TrimSpace(b.Metadata["alias"]) == "" {
 				tp.Alias = ""
 			}
-			tp.InstanceName = sn
+			if tp.ManualSession && sessionQualifiedName != "" {
+				tp.InstanceName = sessionQualifiedName
+			} else {
+				tp.InstanceName = sn
+			}
 		}
 		installAgentSideEffects(bp, cfgAgent, tp, stderr)
 		desired[sn] = tp
@@ -1004,14 +1008,20 @@ func sessionBeadQualifiedName(cityPath string, cfgAgent *config.Agent, rigs []co
 	if cfgAgent == nil {
 		return ""
 	}
-	if agentName := normalizeSessionBeadQualifiedName(cfgAgent, sessionBeadAgentName(sessionBead)); agentName != "" {
-		return agentName
+	persistedAgentName := normalizeSessionBeadQualifiedName(cfgAgent, sessionBeadAgentName(sessionBead))
+	if persistedAgentName != "" {
+		if !cfgAgent.SupportsMultipleSessions() || persistedAgentName != cfgAgent.QualifiedName() {
+			return persistedAgentName
+		}
 	}
 	explicitName := ""
 	if strings.TrimSpace(sessionBead.Metadata["session_name_explicit"]) == boolMetadata(true) {
 		explicitName = strings.TrimSpace(sessionBead.Metadata["session_name"])
 	}
-	if explicitName == "" && strings.TrimSpace(sessionBead.Metadata["alias"]) == "" && strings.TrimSpace(sessionBeadAgentName(sessionBead)) == "" && cfgAgent.SupportsMultipleSessions() {
+	if explicitName == "" && strings.TrimSpace(sessionBead.Metadata["alias"]) == "" && persistedAgentName == cfgAgent.QualifiedName() && cfgAgent.SupportsMultipleSessions() {
+		explicitName = strings.TrimSpace(sessionBead.Metadata["session_name"])
+	}
+	if explicitName == "" && strings.TrimSpace(sessionBead.Metadata["alias"]) == "" && persistedAgentName == "" && cfgAgent.SupportsMultipleSessions() {
 		explicitName = strings.TrimSpace(sessionBead.Metadata["session_name"])
 	}
 	qualifiedName := workdirutil.SessionQualifiedName(
@@ -1045,7 +1055,7 @@ func normalizeSessionBeadQualifiedName(cfgAgent *config.Agent, identity string) 
 }
 
 func sessionBeadConfigAgent(cfgAgent *config.Agent, qualifiedName string) *config.Agent {
-	if cfgAgent == nil || !cfgAgent.SupportsInstanceExpansion() || strings.TrimSpace(qualifiedName) == "" || qualifiedName == cfgAgent.QualifiedName() {
+	if cfgAgent == nil || !cfgAgent.SupportsMultipleSessions() || strings.TrimSpace(qualifiedName) == "" || qualifiedName == cfgAgent.QualifiedName() {
 		return cfgAgent
 	}
 	localName := strings.TrimSpace(qualifiedName)
@@ -1118,6 +1128,7 @@ func selectOrCreatePoolSessionBead(
 	preferred *beads.Bead,
 	used map[string]bool,
 ) (beads.Bead, error) {
+	cfgAgent := findAgentByTemplate(&config.City{Agents: bp.agents}, template)
 	// Resume tier: reuse the session that has in-progress work assigned.
 	if preferred != nil && preferred.ID != "" && !used[preferred.ID] {
 		return *preferred, nil
@@ -1135,7 +1146,7 @@ func selectOrCreatePoolSessionBead(
 		if bead.Metadata["state"] == "asleep" {
 			continue
 		}
-		if isManualSessionBead(bead) {
+		if isManualSessionBeadForAgent(bead, cfgAgent) {
 			continue
 		}
 		if isNamedSessionBead(bead) {

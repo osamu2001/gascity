@@ -1505,7 +1505,7 @@ func TestBuildDesiredState_PendingCreatePoolSessionUsesConcreteBeadIdentity(t *t
 	}
 }
 
-func TestBuildDesiredState_LegacyAliaslessManualPoolSessionFallsBackToSessionNameIdentity(t *testing.T) {
+func TestBuildDesiredState_LegacyAliaslessEphemeralPoolSessionFallsBackToSessionNameIdentity(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
@@ -1514,8 +1514,9 @@ func TestBuildDesiredState_LegacyAliaslessManualPoolSessionFallsBackToSessionNam
 		Labels: []string{sessionBeadLabel, "template:demo/ant"},
 		Metadata: map[string]string{
 			"template":       "demo/ant",
+			"agent_name":     "demo/ant",
 			"session_name":   "s-gc-legacy",
-			"session_origin": "manual",
+			"session_origin": "ephemeral",
 			"state":          "creating",
 			"work_dir":       filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants", "ant"),
 		},
@@ -2309,6 +2310,28 @@ func agentName(a *config.Agent) string {
 		return "<nil>"
 	}
 	return a.Name
+}
+
+func TestSessionBeadConfigAgent_UsesMultipleSessionShapeForMaxZero(t *testing.T) {
+	cfgAgent := &config.Agent{
+		Name:              "ant",
+		Dir:               "demo",
+		MaxActiveSessions: intPtr(0),
+	}
+
+	got := sessionBeadConfigAgent(cfgAgent, "demo/ant-adhoc-123")
+	if got == cfgAgent {
+		t.Fatal("sessionBeadConfigAgent returned base agent, want deep-copied instance agent")
+	}
+	if got == nil || got.Name != "ant-adhoc-123" {
+		t.Fatalf("agent.Name = %q, want %q", agentName(got), "ant-adhoc-123")
+	}
+	if got.PoolName != "demo/ant" {
+		t.Fatalf("agent.PoolName = %q, want %q", got.PoolName, "demo/ant")
+	}
+	if template := templateNameFor(got, "demo/ant-adhoc-123"); template != "demo/ant" {
+		t.Fatalf("templateNameFor(instance) = %q, want %q", template, "demo/ant")
+	}
 }
 
 // TestEnsureDependencyOnlyTemplate_StoreBackedUsesInstanceIdentity is a
