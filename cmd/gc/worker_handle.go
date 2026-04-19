@@ -15,14 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
-func newWorkerSessionHandleWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, spec worker.SessionSpec) (worker.Handle, error) {
-	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
-	if err != nil {
-		return nil, err
-	}
-	return factory.Session(spec)
-}
-
 func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.SessionCatalog, error) {
 	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
 	if err != nil {
@@ -87,41 +79,72 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	resolved *config.ResolvedProvider,
 	metadata map[string]string,
 ) (worker.Handle, error) {
-	if resolved == nil {
-		return nil, fmt.Errorf("resolved provider is required")
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(command) == "" {
-		command = resolved.CommandString()
+	sessionCfg, err := resolvedWorkerSessionConfigWithConfig(
+		command,
+		provider,
+		workDir,
+		alias,
+		explicitName,
+		template,
+		title,
+		transport,
+		resolved,
+		metadata,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return factory.SessionForResolvedRuntime(sessionCfg)
+}
+
+func resolvedWorkerSessionConfigWithConfig(
+	command string,
+	provider string,
+	workDir string,
+	alias string,
+	explicitName string,
+	template string,
+	title string,
+	transport string,
+	resolved *config.ResolvedProvider,
+	metadata map[string]string,
+) (worker.ResolvedSessionConfig, error) {
+	if resolved == nil {
+		return worker.ResolvedSessionConfig{}, fmt.Errorf("resolved provider is required")
+	}
+	command = strings.TrimSpace(command)
+	if command == "" {
+		command = strings.TrimSpace(resolved.CommandString())
 	}
 	providerName := strings.TrimSpace(resolved.Name)
 	if providerName == "" {
 		providerName = strings.TrimSpace(provider)
 	}
-	if providerName == "" {
-		providerName = command
-		if idx := strings.IndexAny(providerName, " \t"); idx >= 0 {
-			providerName = providerName[:idx]
-		}
-	}
-	return newWorkerSessionHandleWithConfig(cityPath, store, sp, cfg, worker.SessionSpec{
+	return worker.ResolvedSessionConfig{
 		Alias:        alias,
 		ExplicitName: explicitName,
 		Template:     template,
 		Title:        title,
-		Command:      command,
-		WorkDir:      workDir,
-		Provider:     providerName,
 		Transport:    transport,
-		Env:          resolved.Env,
-		Resume: session.ProviderResume{
-			ResumeFlag:    resolved.ResumeFlag,
-			ResumeStyle:   resolved.ResumeStyle,
-			ResumeCommand: resolved.ResumeCommand,
-			SessionIDFlag: resolved.SessionIDFlag,
+		Metadata:     metadata,
+		Runtime: worker.ResolvedRuntime{
+			Command:    command,
+			WorkDir:    workDir,
+			Provider:   providerName,
+			SessionEnv: resolved.Env,
+			Resume: session.ProviderResume{
+				ResumeFlag:    resolved.ResumeFlag,
+				ResumeStyle:   resolved.ResumeStyle,
+				ResumeCommand: resolved.ResumeCommand,
+				SessionIDFlag: resolved.SessionIDFlag,
+			},
+			Hints: workerSessionCreateHints(resolved),
 		},
-		Hints:    workerSessionCreateHints(resolved),
-		Metadata: metadata,
-	})
+	}, nil
 }
 
 func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
