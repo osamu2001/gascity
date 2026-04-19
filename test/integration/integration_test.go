@@ -1142,11 +1142,16 @@ provider = "file"
 
 [[named_session]]
 template = "worker"
+mode = "on_demand"
+
+[[named_session]]
+template = "worker"
 mode = "always"
 
 [[named_session]]
-template = "control-dispatcher"
-mode = "always"
+template = "worker"
+name = "worker-extra"
+mode = "on_demand"
 `
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(initial), 0o644); err != nil {
 		t.Fatalf("writing city.toml: %v", err)
@@ -1156,13 +1161,17 @@ mode = "always"
 		Agents: []e2eAgent{{Name: "worker", StartCommand: "VERSION=v2 sleep 3600"}},
 	})
 
-	data, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
+	cityData, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
 	if err != nil {
 		t.Fatalf("reading city.toml: %v", err)
 	}
-	cfg, err := config.Parse(data)
+	packData, err := os.ReadFile(filepath.Join(cityDir, "pack.toml"))
 	if err != nil {
-		t.Fatalf("parsing city.toml: %v", err)
+		t.Fatalf("reading pack.toml: %v", err)
+	}
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading city.toml: %v\ncity.toml:\n%s\npack.toml:\n%s", err, cityData, packData)
 	}
 	if cfg.Workspace.Name != "test-city" {
 		t.Fatalf("Workspace.Name = %q, want test-city", cfg.Workspace.Name)
@@ -1174,10 +1183,29 @@ mode = "always"
 		t.Fatalf("StartCommand = %q, want updated command", got)
 	}
 	if len(cfg.NamedSessions) != 2 {
-		t.Fatalf("len(NamedSessions) = %d, want 2\n%s", len(cfg.NamedSessions), data)
+		t.Fatalf("len(NamedSessions) = %d, want 2\ncity.toml:\n%s\npack.toml:\n%s", len(cfg.NamedSessions), cityData, packData)
 	}
-	if got := strings.Count(string(data), "[[named_session]]"); got != 2 {
-		t.Fatalf("named_session blocks = %d, want 2\n%s", got, data)
+	var workerSession config.NamedSession
+	for _, ns := range cfg.NamedSessions {
+		if ns.QualifiedName() == "worker" {
+			workerSession = ns
+			break
+		}
+	}
+	if workerSession.Template == "" {
+		t.Fatalf("worker named session not found\ncity.toml:\n%s\npack.toml:\n%s", cityData, packData)
+	}
+	if got := workerSession.Mode; got != "always" {
+		t.Fatalf("worker named session mode = %q, want always\ncity.toml:\n%s\npack.toml:\n%s", got, cityData, packData)
+	}
+	if got := strings.Count(string(cityData), "[[named_session]]"); got != 1 {
+		t.Fatalf("city.toml named_session blocks = %d, want 1\n%s", got, cityData)
+	}
+	if !strings.Contains(string(cityData), `name = "worker-extra"`) {
+		t.Fatalf("city.toml should preserve non-conflicting worker-extra named session:\n%s", cityData)
+	}
+	if got := strings.Count(string(packData), "[[named_session]]"); got != 1 {
+		t.Fatalf("pack.toml named_session blocks = %d, want 1\n%s", got, packData)
 	}
 }
 

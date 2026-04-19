@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -278,6 +279,7 @@ func writeE2ETomlFile(t *testing.T, tomlPath string, city e2eCity) {
 func rewriteE2ETomlPreservingNamedSessions(t *testing.T, cityDir string, city e2eCity) {
 	t.Helper()
 	tomlPath := filepath.Join(cityDir, "city.toml")
+	packPath := filepath.Join(cityDir, "pack.toml")
 	data, err := os.ReadFile(tomlPath)
 	if err != nil {
 		t.Fatalf("reading city.toml: %v", err)
@@ -292,38 +294,45 @@ func rewriteE2ETomlPreservingNamedSessions(t *testing.T, cityDir string, city e2
 	if strings.TrimSpace(city.Workspace.Name) == "" {
 		city.Workspace.Name = filepath.Base(cityDir)
 	}
-	nextCfg, err := config.Parse([]byte(renderE2EToml(city)))
+	desiredCfg, err := config.Parse([]byte(renderE2EToml(city)))
 	if err != nil {
 		t.Fatalf("parsing rendered city.toml: %v", err)
 	}
-	nextCfg.NamedSessions = mergeNamedSessions(current.NamedSessions, nextCfg.NamedSessions)
-	next, err := nextCfg.Marshal()
+	nextRuntimeCfg, err := config.Parse([]byte(renderE2ECityRuntimeToml(city)))
+	if err != nil {
+		t.Fatalf("parsing rendered runtime city.toml: %v", err)
+	}
+	nextRuntimeCfg.NamedSessions = preservedLocalNamedSessions(current.NamedSessions, desiredCfg.NamedSessions)
+	nextRuntime, err := nextRuntimeCfg.Marshal()
 	if err != nil {
 		t.Fatalf("marshaling city.toml: %v", err)
 	}
-	writeFileAtomic(t, tomlPath, next)
+	writeFileAtomic(t, packPath, []byte(renderE2EPackToml(city)))
+	writeFileAtomic(t, tomlPath, nextRuntime)
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath); err != nil {
+		t.Fatalf("loading rewritten city.toml: %v\n%s", err, nextRuntime)
+	}
 }
 
-func mergeNamedSessions(existing, desired []config.NamedSession) []config.NamedSession {
-	merged := make([]config.NamedSession, 0, len(existing)+len(desired))
-	seen := make(map[string]bool, len(existing)+len(desired))
-	for _, ns := range existing {
-		key := ns.QualifiedName()
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		merged = append(merged, ns)
-	}
+func preservedLocalNamedSessions(existing, desired []config.NamedSession) []config.NamedSession {
+	preserved := make([]config.NamedSession, 0, len(existing))
+	seen := make(map[string]bool, len(desired))
 	for _, ns := range desired {
-		key := ns.QualifiedName()
+		seen[namedSessionMergeKey(ns)] = true
+	}
+	for _, ns := range existing {
+		key := namedSessionMergeKey(ns)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		merged = append(merged, ns)
+		preserved = append(preserved, ns)
 	}
-	return merged
+	return preserved
+}
+
+func namedSessionMergeKey(ns config.NamedSession) string {
+	return ns.Dir + "\x00" + ns.IdentityName()
 }
 
 func writeFileAtomic(t *testing.T, path string, data []byte) {
