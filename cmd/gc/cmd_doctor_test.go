@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -47,6 +48,72 @@ prefix = "fe"
 
 	if doctorSkipsDoltChecks(cityDir) {
 		t.Fatal("doctorSkipsDoltChecks() = true, want false for bd-backed rig")
+	}
+}
+
+func TestDoDoctorRunsCityDoltCheckForInheritedBdRigUnderFileBackedCity(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "config.yaml"), contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "fe",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	oldCityCheck := newDoctorDoltServerCheck
+	oldRigCheck := newDoctorRigDoltServerCheck
+	var citySkip, rigSkip *bool
+	newDoctorDoltServerCheck = func(cityPath string, skip bool) *doctor.DoltServerCheck {
+		citySkip = &skip
+		return doctor.NewDoltServerCheck(cityPath, true)
+	}
+	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, skip bool) *doctor.RigDoltServerCheck {
+		rigSkip = &skip
+		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
+	}
+	t.Cleanup(func() {
+		newDoctorDoltServerCheck = oldCityCheck
+		newDoctorRigDoltServerCheck = oldRigCheck
+	})
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, false, &stdout, &stderr)
+
+	if citySkip == nil || *citySkip {
+		t.Fatalf("city dolt check skip = %v, want false when a bd-backed rig inherits the city endpoint", citySkip)
+	}
+	if rigSkip == nil || *rigSkip {
+		t.Fatalf("rig dolt check skip = %v, want false for bd-backed rig", rigSkip)
 	}
 }
 

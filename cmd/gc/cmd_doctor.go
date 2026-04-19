@@ -9,11 +9,17 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/spf13/cobra"
+)
+
+var (
+	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
+	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -55,6 +61,22 @@ func doctorSkipsDoltChecks(cityPath string) bool {
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 	return !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
+}
+
+func workspaceNeedsCityDoltCheck(cityPath string, cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, rig := range cfg.Rigs {
+		if !rigUsesManagedBdStoreContract(cityPath, rig) {
+			continue
+		}
+		explicit, err := contract.ScopeUsesExplicitEndpoint(fsys.OSFS{}, cityPath, rig.Path)
+		if err != nil || !explicit {
+			return true
+		}
+	}
+	return false
 }
 
 type doltTopologyCheck struct {
@@ -164,7 +186,8 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
 		d.Register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
-	d.Register(doctor.NewDoltServerCheck(cityPath, !scopeUsesManagedBdStoreContract(cityPath, cityPath) || os.Getenv("GC_DOLT") == "skip"))
+	skipCityDoltCheck := os.Getenv("GC_DOLT") == "skip" || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
+	d.Register(newDoctorDoltServerCheck(cityPath, skipCityDoltCheck))
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
 
@@ -184,7 +207,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			d.Register(doctor.NewRigPathCheck(rig))
 			d.Register(doctor.NewRigGitCheck(rig))
 			d.Register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
-			d.Register(doctor.NewRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || os.Getenv("GC_DOLT") == "skip"))
+			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || os.Getenv("GC_DOLT") == "skip"))
 			// Custom types check — rig store.
 			d.Register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
 		}
