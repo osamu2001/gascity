@@ -237,7 +237,7 @@ func resolvedEventsCityName(cityPath string, cfg *config.City) string {
 	if strings.TrimSpace(cityPath) == "" {
 		return ""
 	}
-	return resolveCityName("", cityPath)
+	return resolveCityName("", "", cityPath)
 }
 
 func validateEventsCursor(scope eventsAPIScope, afterSeq uint64, afterCursor string) error {

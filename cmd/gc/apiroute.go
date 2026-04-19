@@ -54,7 +54,7 @@ func standaloneControllerCityName(cfg *config.City, cityPath string) string {
 	if cfg != nil && cfg.Workspace.Name != "" {
 		return cfg.Workspace.Name
 	}
-	return resolveCityName("", cityPath)
+	return resolveCityName("", "", cityPath)
 }
 
 // resolveAgentForAPI resolves a bare agent name (e.g., "worker") to its

@@ -34,7 +34,7 @@ gc [flags]
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
 | [gc halt](#gc-halt) | Pause the supervisor reconciliation tick |
-| [gc handoff](#gc-handoff) | Send handoff mail and restart this session |
+| [gc handoff](#gc-handoff) | Send handoff mail and restart controller-managed sessions |
 | [gc help](#gc-help) | Help about any command |
 | [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
 | [gc import](#gc-import) | Manage pack imports |
@@ -968,15 +968,23 @@ gc halt [path]
 
 Convenience command for context handoff.
 
-Self-handoff (default): sends mail to self and blocks until controller
-restarts the session. Equivalent to:
+Self-handoff (default): sends mail to self. If the current session is
+controller-restartable, requests a restart and blocks until the controller
+stops the session. For on-demand configured named sessions, sends mail and
+returns without requesting restart because the controller cannot restart the
+user-attended process.
+
+For controller-restartable sessions, equivalent to:
 
   gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
-Remote handoff (--target): sends mail to a target session and kills its
-session. The reconciler restarts it with the handoff mail waiting.
-Returns immediately. Equivalent to:
+Remote handoff (--target): sends mail to a target session. If the target is
+controller-restartable, kills it so the reconciler restarts it with the handoff
+mail waiting. For on-demand configured named targets, sends mail and returns
+without killing the session.
+
+For controller-restartable targets, equivalent to:
 
   gc mail send &lt;target&gt; &lt;subject&gt; [message]
   gc session kill &lt;target&gt;
@@ -990,7 +998,7 @@ gc handoff <subject> [message] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--target` | string |  | Remote session alias or ID to handoff (sends mail + kills session) |
+| `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
 
 ## gc help
 
@@ -1132,7 +1140,7 @@ gc init
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
-| `--name` | string |  | workspace name (default: target directory basename) |
+| `--name` | string |  | workspace name (default: source template's workspace.name if set, else target directory basename) |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 
@@ -1862,6 +1870,11 @@ Sets GC_RESTART_REQUESTED metadata on the session, then blocks forever.
 The controller will stop the session on its next reconcile tick and
 restart it fresh. The blocking prevents the agent from consuming more
 context while waiting.
+
+For on-demand configured named sessions, the controller cannot restart the
+user-attended process. In that case this command reports that restart was
+skipped and returns without blocking. No session.draining event is emitted
+when restart is skipped.
 
 This command is designed to be called from within a session context.
 It emits a session.draining event before blocking.
