@@ -54,7 +54,15 @@ func workerSessionRuntimeResolverWithConfig(cityPath string, cfg *config.City) w
 		return nil
 	}
 	return func(info session.Info, sessionKind string) (*worker.ResolvedRuntime, error) {
-		return resolvedWorkerRuntimeWithConfig(cityPath, cfg, info, sessionKind), nil
+		runtimeCfg := resolvedWorkerRuntimeWithConfig(cityPath, cfg, info, sessionKind)
+		if runtimeCfg == nil {
+			return nil, nil
+		}
+		normalized, err := worker.NormalizeResolvedRuntime(*runtimeCfg)
+		if err != nil {
+			return nil, err
+		}
+		return &normalized, nil
 	}
 }
 

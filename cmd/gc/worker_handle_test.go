@@ -353,3 +353,69 @@ func TestResolvedWorkerSessionConfigWithConfigFallsBackToProviderArgForCommand(t
 		t.Fatalf("Runtime.Provider = %q, want %q", got, want)
 	}
 }
+
+func TestResolvedWorkerRuntimeWithConfigFallsBackToCityPathAndSyncsHintsWorkDir(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+ready_prompt_prefix = "stub-ready>"
+ready_delay_ms = 250
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	runtimeCfg := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template: "worker",
+	}, "")
+	if runtimeCfg == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	if got, want := runtimeCfg.WorkDir, cityDir; got != want {
+		t.Fatalf("WorkDir = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Hints.WorkDir, cityDir; got != want {
+		t.Fatalf("Hints.WorkDir = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Provider, "stub"; got != want {
+		t.Fatalf("Provider = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Command, "/bin/echo"; got != want {
+		t.Fatalf("Command = %q, want %q", got, want)
+	}
+}
+
+func TestWorkerSessionRuntimeResolverWithConfigReturnsErrorForInvalidResolvedRuntime(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "stub",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {},
+		},
+	}
+
+	resolver := workerSessionRuntimeResolverWithConfig(t.TempDir(), cfg)
+	if resolver == nil {
+		t.Fatal("workerSessionRuntimeResolverWithConfig() = nil")
+	}
+
+	_, err := resolver(session.Info{Template: "worker"}, "")
+	if err == nil {
+		t.Fatal("resolver error = nil, want invalid resolved runtime error")
+	}
+}
