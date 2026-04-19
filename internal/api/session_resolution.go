@@ -23,7 +23,35 @@ const (
 	apiNamedSessionModeKey     = session.NamedSessionModeMetadata
 )
 
-var errConfiguredNamedSessionConflict = errors.New("configured named session conflict")
+var (
+	errConfiguredNamedSessionConflict = errors.New("configured named session conflict")
+	errSessionTargetRejectedByConfig  = errors.New("session target rejected by config")
+)
+
+type apiSessionTargetNotFoundError struct {
+	identifier       string
+	rejectedByConfig bool
+}
+
+func (e apiSessionTargetNotFoundError) Error() string {
+	return fmt.Sprintf("%v: %q", session.ErrSessionNotFound, e.identifier)
+}
+
+func (e apiSessionTargetNotFoundError) Unwrap() error {
+	return session.ErrSessionNotFound
+}
+
+func (e apiSessionTargetNotFoundError) Is(target error) bool {
+	return target == session.ErrSessionNotFound || (e.rejectedByConfig && target == errSessionTargetRejectedByConfig)
+}
+
+func apiSessionTargetNotFound(identifier string) error {
+	return apiSessionTargetNotFoundError{identifier: identifier}
+}
+
+func apiSessionTargetRejectedByConfig(identifier string) error {
+	return apiSessionTargetNotFoundError{identifier: identifier, rejectedByConfig: true}
+}
 
 type apiSessionResolveOptions struct {
 	allowClosed bool
@@ -297,7 +325,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		return "", fmt.Errorf("session store unavailable")
 	}
 	if _, ok := parseAPITemplateTarget(identifier); ok {
-		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+		return "", apiSessionTargetNotFound(identifier)
 	}
 	if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
 		return id, nil
@@ -314,7 +342,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 			if bead, getErr := store.Get(id); getErr == nil && apiIsNamedSessionBead(bead) {
 				identity := apiNamedSessionIdentity(bead)
 				if identity != "" && config.FindNamedSession(cfg, identity) == nil {
-					return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+					return "", apiSessionTargetRejectedByConfig(identifier)
 				}
 			}
 		}
@@ -326,7 +354,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		if _, ok, err := s.findNamedSessionSpecForTarget(store, identifier); err != nil {
 			return "", err
 		} else if ok {
-			return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+			return "", apiSessionTargetNotFound(identifier)
 		}
 		if id, err := session.ResolveSessionIDAllowClosed(store, identifier); err == nil {
 			return id, nil
@@ -334,7 +362,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 			return "", err
 		}
 	}
-	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	return "", apiSessionTargetNotFound(identifier)
 }
 
 func (s *Server) resolveSessionTargetID(store beads.Store, identifier string, opts apiSessionResolveOptions) (string, error) {
@@ -411,7 +439,7 @@ func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) 
 	if store != nil {
 		if id, err := s.resolveSessionIDWithConfig(store, target); err == nil {
 			return factory.SessionByID(id)
-		} else if !errors.Is(err, session.ErrSessionNotFound) {
+		} else if !errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, errSessionTargetRejectedByConfig) {
 			return nil, err
 		}
 	}
