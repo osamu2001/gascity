@@ -266,9 +266,39 @@ func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
 		t.Fatalf("writing pack.toml: %v", err)
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte(renderE2ECityRuntimeToml(city)), 0o644); err != nil {
-		t.Fatalf("writing city.toml: %v", err)
+	writeFileAtomic(t, tomlPath, []byte(renderE2ECityRuntimeToml(city)))
+}
+
+func writeE2ETomlFile(t *testing.T, tomlPath string, city e2eCity) {
+	t.Helper()
+	writeFileAtomic(t, tomlPath, []byte(renderE2EToml(city)))
+}
+
+func writeFileAtomic(t *testing.T, path string, data []byte) {
+	t.Helper()
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		t.Fatalf("creating temp file for %s: %v", path, err)
 	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		t.Fatalf("writing temp file for %s: %v", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("closing temp file for %s: %v", path, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		t.Fatalf("replacing %s: %v", path, err)
+	}
+	cleanup = false
 }
 
 // setupE2ECity initializes a city, writes config, starts agents, and
@@ -290,9 +320,7 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 	// to agent output), but keep it symmetric so future assertions don't
 	// regress on macOS's /var→/private/var symlink.
 	configPath := filepath.Join(canonicalTempDir(t), city.Workspace.Name+".toml")
-	if err := os.WriteFile(configPath, []byte(renderE2EToml(city)), 0o644); err != nil {
-		t.Fatalf("writing init config: %v", err)
-	}
+	writeE2ETomlFile(t, configPath, city)
 
 	// Stage scripts before the first controller launch so CopyFiles hashing is
 	// stable. If scripts appear only after init's startup, the second gc start
@@ -349,9 +377,7 @@ func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 
 	cityDir := filepath.Join(canonicalTempDir(t), city.Workspace.Name)
 	configPath := filepath.Join(canonicalTempDir(t), city.Workspace.Name+".toml")
-	if err := os.WriteFile(configPath, []byte(renderE2EToml(city)), 0o644); err != nil {
-		t.Fatalf("writing init config: %v", err)
-	}
+	writeE2ETomlFile(t, configPath, city)
 
 	// Pre-stage scripts so init's first launch fingerprints the final staged
 	// content instead of a missing scripts directory.

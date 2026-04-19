@@ -231,6 +231,7 @@ func gcWithEnv(dir string, env map[string]string, args ...string) (string, error
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	cmd.Env = commandEnvForDir(dir, false)
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}

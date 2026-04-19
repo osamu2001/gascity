@@ -377,14 +377,26 @@ func subprocessTestKillSet(procs map[int]procSnapshot, agentScript string) map[i
 // gc runs the gc binary with the given args. If dir is non-empty, it sets
 // the working directory. Returns combined stdout+stderr and any error.
 func gc(dir string, args ...string) (string, error) {
-	return runCommand(dir, commandEnvForDir(dir, false), integrationGCCommandTimeout, gcBinary, args...)
+	return runCommand(dir, commandEnvForDir(commandEnvLookupDir(dir, args), false), integrationGCCommandTimeout, gcBinary, args...)
 }
 
 // gcDolt runs the gc binary with the given args using the isolated integration
 // supervisor state, but without forcing GC_DOLT=skip. Use this for tests that
 // need the real bd+dolt-backed bead store.
 func gcDolt(dir string, args ...string) (string, error) {
-	return runCommand(dir, commandEnvForDir(dir, true), integrationGCDoltCommandTimeout, gcBinary, args...)
+	return runCommand(dir, commandEnvForDir(commandEnvLookupDir(dir, args), true), integrationGCDoltCommandTimeout, gcBinary, args...)
+}
+
+func commandEnvLookupDir(dir string, args []string) string {
+	if dir != "" {
+		return dir
+	}
+	for _, arg := range args {
+		if _, ok := cityCommandEnv.Load(arg); ok {
+			return arg
+		}
+	}
+	return ""
 }
 
 // bd runs the bd binary with the given args. If dir is non-empty, it sets
@@ -1091,6 +1103,19 @@ func TestCommandEnvForDirPrefersRegisteredCityEnv(t *testing.T) {
 	got := commandEnvForDir(cityDir, false)
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("commandEnvForDir(%q) = %v, want %v", cityDir, got, want)
+	}
+}
+
+func TestCommandEnvLookupDirUsesRegisteredPathArg(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "city")
+	registerCityCommandEnv(cityDir, []string{"GC_HOME=/tmp/isolated"})
+	t.Cleanup(func() { unregisterCityCommandEnv(cityDir) })
+
+	if got := commandEnvLookupDir("", []string{"start", cityDir}); got != cityDir {
+		t.Fatalf("commandEnvLookupDir with path arg = %q, want %q", got, cityDir)
+	}
+	if got := commandEnvLookupDir("/tmp/cwd", []string{"start", cityDir}); got != "/tmp/cwd" {
+		t.Fatalf("commandEnvLookupDir with cwd = %q, want cwd", got)
 	}
 }
 
