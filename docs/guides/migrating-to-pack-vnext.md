@@ -74,7 +74,7 @@ The clean target shape is:
 - `city.toml`
   - deployment decisions for this city
 - pack-owned directories
-  - agents, formulas, orders, commands, doctor checks, overlays, skills, MCP, template fragments, assets
+  - agents, formulas, orders, commands, doctor checks, overlay, skills, MCP, template fragments, assets
 
 ## First: split `city.toml` and `pack.toml`
 

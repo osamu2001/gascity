@@ -44,7 +44,7 @@ my-city/
 ├── commands/              # pack-provided CLI commands
 ├── doctor/                # diagnostic check scripts
 ├── patches/               # prompt replacements for imported agents
-├── overlays/              # pack-wide overlay files
+├── overlay/               # pack-wide overlay files
 ├── skills/                # current-city-pack skills catalog (imported-pack catalogs later)
 ├── mcp/                   # current-city-pack MCP server definitions (imported-pack catalogs later)
 ├── template-fragments/    # prompt template fragments
@@ -322,7 +322,7 @@ my-pack/
 ├── commands/              # pack-provided CLI commands
 ├── doctor/                # diagnostic check scripts
 ├── patches/               # prompt replacements for imported agents
-├── overlays/              # pack-wide overlay files
+├── overlay/               # pack-wide overlay files
 ├── skills/                # current-city-pack skills catalog (imported-pack catalogs later)
 ├── mcp/                   # current-city-pack MCP server definitions (imported-pack catalogs later)
 ├── template-fragments/    # prompt template fragments
@@ -336,7 +336,7 @@ my-pack/
 | `[[agent]]` tables in pack.toml | `agents/<name>/` directory exists → agent exists |
 | `prompt_template = "prompts/mayor.md"` | `agents/<name>/prompt.md` |
 | `[[formula]].path` | File exists in `formulas/` → it's a formula |
-| `overlay_dir = "overlays/default"` | `overlays/` + `agents/<name>/overlay/` |
+| `overlay_dir = "overlays/default"` | `overlay/` + `agents/<name>/overlay/` |
 | `scripts_dir = "scripts"` | Gone. Scripts live next to the manifest that uses them (`commands/<id>/run.sh`, `agents/<name>/`) or under `assets/` |
 | `[formulas].dir` | Gone. `formulas/` is a fixed convention, not a configurable path |
 

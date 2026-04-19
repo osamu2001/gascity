@@ -1614,14 +1614,14 @@ func TestDoInitSuccess(t *testing.T) {
 		"formulas",
 		"orders",
 		"template-fragments",
-		"overlays",
+		"overlay",
 		"assets",
 	} {
 		if !f.Dirs[filepath.Join("/bright-lights", dir)] {
 			t.Errorf("%s/ not created", dir)
 		}
 	}
-	for _, dir := range []string{"packs", "prompts"} {
+	for _, dir := range []string{"overlays", "packs", "prompts"} {
 		if f.Dirs[filepath.Join("/bright-lights", dir)] {
 			t.Errorf("%s/ should not be created by init", dir)
 		}
