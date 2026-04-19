@@ -276,3 +276,22 @@ func TestValidateNamedSessions_UsesResolvedWorkspaceName(t *testing.T) {
 		t.Fatalf("ValidateNamedSessions() error = %v, want session_name collision", err)
 	}
 }
+
+func TestValidateNamedSessions_AllowsQualifiedImportedTemplate(t *testing.T) {
+	cfg := &City{
+		Workspace: Workspace{Name: "test-city"},
+		Agents: []Agent{
+			{Name: "penny", BindingName: "employees"},
+		},
+		NamedSessions: []NamedSession{
+			{Name: "corp--penny-root", Template: "employees.penny"},
+		},
+	}
+
+	if err := ValidateNamedSessions(cfg); err != nil {
+		t.Fatalf("ValidateNamedSessions() = %v, want nil", err)
+	}
+	if got := cfg.NamedSessions[0].TemplateQualifiedName(); got != "employees.penny" {
+		t.Fatalf("TemplateQualifiedName() = %q, want employees.penny", got)
+	}
+}
