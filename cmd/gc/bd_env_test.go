@@ -2246,6 +2246,35 @@ func TestBdTransportRetryableErrorDoesNotTreatCommandTimeoutAsTransportFailure(t
 	}
 }
 
+func TestBdTransportRetryableErrorUsesScopeProviderForMixedRig(t *testing.T) {
+	cityPath := t.TempDir()
+	_ = writeReachableManagedDoltState(t, cityPath)
+	rigDir := filepath.Join(cityPath, "repo")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: repo
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"GC_DOLT_HOST": "", "GC_DOLT_PORT": "3307"}
+
+	if !bdTransportRetryableError(cityPath, rigDir, env, fmt.Errorf("server unreachable at 127.0.0.1:3307")) {
+		t.Fatal("bd-backed rig under file-backed city should still be transport-retryable")
+	}
+}
+
 func TestBdCommandRunnerWithManagedRetryRecoversAndRerunsWithFreshEnv(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 

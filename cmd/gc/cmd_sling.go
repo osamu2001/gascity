@@ -257,19 +257,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 		return 1
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cfg.Workspace.Name, cfg)
-	storeEnv := map[string]string{}
-	switch provider := rawBeadsProvider(cityPath); {
-	case provider == "file":
-		// Built-in routing now goes through beads.Store; custom queries own any
-		// provider-specific shell environment when they opt out of that path.
-	case strings.HasPrefix(provider, "exec:"):
-		// Explicit custom sling_query commands own their env for exec providers.
-	default:
-		storeEnv = bdRuntimeEnv(cityPath)
-		if !samePath(storeDir, cityPath) {
-			storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
-		}
-	}
+	storeEnv := slingStoreEnv(cfg, cityPath, storeDir)
 
 	// Inline text mode: if the argument doesn't look like a bead ID
 	// (and we're not in formula mode), create a task bead from the text.
@@ -347,6 +335,23 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 	}
 
 	return doSlingBatch(opts, deps, store, stdout, stderr)
+}
+
+func slingStoreEnv(cfg *config.City, cityPath, storeDir string) map[string]string {
+	storeEnv := map[string]string{}
+	switch provider := rawBeadsProviderForScope(storeDir, cityPath); {
+	case provider == "file":
+		// Built-in routing now goes through beads.Store; custom queries own any
+		// provider-specific shell environment when they opt out of that path.
+	case strings.HasPrefix(provider, "exec:"):
+		// Explicit custom sling_query commands own their env for exec providers.
+	default:
+		storeEnv = bdRuntimeEnv(cityPath)
+		if !samePath(storeDir, cityPath) {
+			storeEnv = bdRuntimeEnvForRig(cityPath, cfg, storeDir)
+		}
+	}
+	return storeEnv
 }
 
 // findRigByPrefix returns the rig whose effective prefix matches (case-insensitive).

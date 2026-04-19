@@ -296,9 +296,15 @@ func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(scopeRoot)
 	}
+	if explicit := strings.TrimSpace(os.Getenv("GC_BEADS")); explicit != "" {
+		return normalizeRawBeadsProvider(runtimeCityPath, explicit)
+	}
 	provider := rawBeadsProvider(runtimeCityPath)
 	resolvedScopeRoot := resolveStoreScopeRoot(runtimeCityPath, scopeRoot)
 	if samePath(resolvedScopeRoot, runtimeCityPath) {
+		return provider
+	}
+	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		return provider
 	}
 	// Mixed-provider workspaces can keep legacy bd-backed rigs under a
