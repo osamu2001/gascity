@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -99,6 +100,67 @@ func TestSessionHandleStartStopState(t *testing.T) {
 		if call.Method == "Pending" {
 			t.Fatalf("State(after stop) probed Pending on a stopped session: %#v", sp.Calls[callCount:])
 		}
+	}
+}
+
+func TestSessionHandleStateBusyDoesNotPrimeHistoryCache(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	manager := sessionpkg.NewManager(store, sp)
+	handle, err := NewSessionHandle(SessionHandleConfig{
+		Manager:     manager,
+		SearchPaths: []string{searchBase},
+		Session: SessionSpec{
+			Profile:  ProfileClaudeTmuxCLI,
+			Template: "probe",
+			Title:    "Probe",
+			Command:  "claude",
+			WorkDir:  workDir,
+			Provider: "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", handle.sessionID, err)
+	}
+
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", slugDir, err)
+	}
+	path := filepath.Join(slugDir, info.SessionKey+".jsonl")
+	writeWorkerTestJSONL(t, path, []map[string]any{
+		{"type": "assistant", "message": map[string]any{
+			"role":        "assistant",
+			"model":       "claude-opus-4-5-20251101",
+			"stop_reason": "end_turn",
+			"content":     "done",
+			"usage":       map[string]any{"input_tokens": 1000},
+		}},
+		{"type": "user", "message": map[string]any{"role": "user", "content": "next"}},
+	})
+
+	if handle.history != nil {
+		t.Fatal("history cache initialized before State")
+	}
+
+	state, err := handle.State(context.Background())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if state.Phase != PhaseBusy {
+		t.Fatalf("State().Phase = %s, want %s", state.Phase, PhaseBusy)
+	}
+	if handle.history != nil {
+		t.Fatal("State() primed history cache, want tail-only busy probe")
 	}
 }
 
@@ -1632,6 +1694,21 @@ func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) 
 
 func newTestSessionHandle(t *testing.T, spec SessionSpec) (*SessionHandle, *beads.MemStore, *runtime.Fake, *sessionpkg.Manager) {
 	return newTestSessionHandleWithRecorder(t, spec, nil)
+}
+
+func writeWorkerTestJSONL(t *testing.T, path string, lines []map[string]any) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("Create(%q): %v", path, err)
+	}
+	defer f.Close() //nolint:errcheck // test helper
+	enc := json.NewEncoder(f)
+	for _, line := range lines {
+		if err := enc.Encode(line); err != nil {
+			t.Fatalf("Encode(%q): %v", path, err)
+		}
+	}
 }
 
 func newTestSessionHandleWithRecorder(t *testing.T, spec SessionSpec, recorder events.Recorder) (*SessionHandle, *beads.MemStore, *runtime.Fake, *sessionpkg.Manager) {
