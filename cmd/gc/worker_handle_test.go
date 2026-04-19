@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -300,5 +301,55 @@ func TestWorkerNudgeDeliveryForMode(t *testing.T) {
 				t.Fatalf("workerNudgeDeliveryForMode(%q) = %q, want %q", tt.mode, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolvedWorkerSessionConfigWithConfigFallsBackToResolvedProviderNameForCommand(t *testing.T) {
+	cfg, err := resolvedWorkerSessionConfigWithConfig(
+		"",
+		"",
+		"/tmp/work",
+		"worker",
+		"",
+		"worker",
+		"Worker",
+		"",
+		&config.ResolvedProvider{
+			Name: "custom-provider",
+		},
+		map[string]string{"session_origin": "test"},
+	)
+	if err != nil {
+		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
+	}
+	if got, want := cfg.Runtime.Command, "custom-provider"; got != want {
+		t.Fatalf("Runtime.Command = %q, want %q", got, want)
+	}
+	if got, want := cfg.Runtime.Provider, "custom-provider"; got != want {
+		t.Fatalf("Runtime.Provider = %q, want %q", got, want)
+	}
+}
+
+func TestResolvedWorkerSessionConfigWithConfigFallsBackToProviderArgForCommand(t *testing.T) {
+	cfg, err := resolvedWorkerSessionConfigWithConfig(
+		"",
+		"legacy-provider",
+		"/tmp/work",
+		"worker",
+		"",
+		"worker",
+		"Worker",
+		"",
+		&config.ResolvedProvider{},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
+	}
+	if got, want := cfg.Runtime.Command, "legacy-provider"; got != want {
+		t.Fatalf("Runtime.Command = %q, want %q", got, want)
+	}
+	if got, want := cfg.Runtime.Provider, "legacy-provider"; got != want {
+		t.Fatalf("Runtime.Provider = %q, want %q", got, want)
 	}
 }

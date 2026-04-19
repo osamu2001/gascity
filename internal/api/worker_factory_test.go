@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 func TestWorkerFactorySessionByIDUsesResolvedTemplateRuntime(t *testing.T) {
@@ -120,5 +122,97 @@ func TestWorkerFactoryHandleForTargetUsesResolvedTemplateRuntimeForSessionMeta(t
 	}
 	if got, want := start.ReadyDelayMs, 321; got != want {
 		t.Fatalf("ReadyDelayMs = %d, want %d", got, want)
+	}
+}
+
+func TestNewResolvedWorkerSessionHandleStartsResolvedSession(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	handle, err := srv.newResolvedWorkerSessionHandle(fs.cityBeadStore, worker.ResolvedSessionConfig{
+		Alias:        "worker",
+		ExplicitName: "worker-named",
+		Template:     "myrig/worker",
+		Title:        "Worker Named",
+		Transport:    "acp",
+		Metadata:     map[string]string{"session_origin": "named"},
+		Runtime: worker.ResolvedRuntime{
+			Command:    "/bin/echo",
+			WorkDir:    t.TempDir(),
+			Provider:   "resolved-worker",
+			SessionEnv: map[string]string{"API_RESOLVED_ENV": "present"},
+			Resume: session.ProviderResume{
+				SessionIDFlag: "--session-id-resolved",
+			},
+			Hints: runtime.Config{
+				ReadyPromptPrefix: "resolved-ready>",
+				ReadyDelayMs:      321,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("newResolvedWorkerSessionHandle: %v", err)
+	}
+
+	info, err := handle.Create(context.Background(), worker.CreateModeStarted)
+	if err != nil {
+		t.Fatalf("Create(started): %v", err)
+	}
+
+	start := fs.sp.LastStartConfig(info.SessionName)
+	if start == nil {
+		t.Fatal("LastStartConfig() = nil")
+	}
+	if got, want := start.Command, "/bin/echo --session-id-resolved "+info.SessionKey; got != want {
+		t.Fatalf("start command = %q, want %q", got, want)
+	}
+	if got, want := start.ReadyPromptPrefix, "resolved-ready>"; got != want {
+		t.Fatalf("ReadyPromptPrefix = %q, want %q", got, want)
+	}
+	if got, want := start.ReadyDelayMs, 321; got != want {
+		t.Fatalf("ReadyDelayMs = %d, want %d", got, want)
+	}
+	if got, want := start.Env["API_RESOLVED_ENV"], "present"; got != want {
+		t.Fatalf("Env[API_RESOLVED_ENV] = %q, want %q", got, want)
+	}
+}
+
+func TestNewResolvedWorkerSessionHandleDerivesProviderFromCommand(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	handle, err := srv.newResolvedWorkerSessionHandle(fs.cityBeadStore, worker.ResolvedSessionConfig{
+		Alias:        "worker",
+		ExplicitName: "worker-command-only",
+		Template:     "myrig/worker",
+		Title:        "Worker Command Only",
+		Runtime: worker.ResolvedRuntime{
+			Command: "/bin/echo --print",
+			WorkDir: t.TempDir(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("newResolvedWorkerSessionHandle: %v", err)
+	}
+
+	info, err := handle.Create(context.Background(), worker.CreateModeStarted)
+	if err != nil {
+		t.Fatalf("Create(started): %v", err)
+	}
+
+	start := fs.sp.LastStartConfig(info.SessionName)
+	if start == nil {
+		t.Fatal("LastStartConfig() = nil")
+	}
+	if got, want := start.Command, "/bin/echo --print"; got != want {
+		t.Fatalf("start command = %q, want %q", got, want)
+	}
+
+	bead, err := fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", info.ID, err)
+	}
+	if got, want := bead.Metadata["provider"], "/bin/echo"; got != want {
+		t.Fatalf("Metadata[provider] = %q, want %q", got, want)
 	}
 }

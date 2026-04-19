@@ -246,31 +246,32 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 	if err != nil {
 		return "", err
 	}
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
-	}
 	extraMeta := map[string]string{
 		apiNamedSessionMetadataKey: "true",
 		apiNamedSessionIdentityKey: spec.Identity,
 		apiNamedSessionModeKey:     spec.Mode,
 		"session_origin":           "named",
 	}
-	handle, err := s.newWorkerSessionHandle(store, worker.SessionSpec{
+	handle, err := s.newResolvedWorkerSessionHandle(store, worker.ResolvedSessionConfig{
 		Alias:        spec.Identity,
 		ExplicitName: spec.SessionName,
 		Template:     qualifiedTemplate,
 		Title:        spec.Identity,
-		Command:      resolved.CommandString(),
-		WorkDir:      workDir,
-		Provider:     resolved.Name,
 		Transport:    transport,
-		Env:          resolved.Env,
-		Resume:       resume,
-		Hints:        sessionCreateHints(resolved),
 		Metadata:     extraMeta,
+		Runtime: worker.ResolvedRuntime{
+			Command:    firstNonEmptyString(resolved.CommandString(), resolved.Name),
+			WorkDir:    workDir,
+			Provider:   resolved.Name,
+			SessionEnv: resolved.Env,
+			Resume: session.ProviderResume{
+				ResumeFlag:    resolved.ResumeFlag,
+				ResumeStyle:   resolved.ResumeStyle,
+				ResumeCommand: resolved.ResumeCommand,
+				SessionIDFlag: resolved.SessionIDFlag,
+			},
+			Hints: sessionCreateHints(resolved),
+		},
 	})
 	if err != nil {
 		return "", err
@@ -433,12 +434,12 @@ func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) 
 	return factory.HandleForTarget(target, nil)
 }
 
-func (s *Server) newWorkerSessionHandle(store beads.Store, spec worker.SessionSpec) (worker.Handle, error) {
+func (s *Server) newResolvedWorkerSessionHandle(store beads.Store, cfg worker.ResolvedSessionConfig) (worker.Handle, error) {
 	factory, err := s.workerFactory(store)
 	if err != nil {
 		return nil, err
 	}
-	return factory.Session(spec)
+	return factory.SessionForResolvedRuntime(cfg)
 }
 
 func workerDeliveryIntent(intent session.SubmitIntent) worker.DeliveryIntent {

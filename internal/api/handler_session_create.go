@@ -121,12 +121,6 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		title = template
 	}
 
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
-	}
 	alias, err := session.ValidateAlias(body.Alias)
 	if err != nil {
 		s.idem.unreserve(idemKey)
@@ -137,7 +131,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// Merge explicit options with provider effective defaults.
 	// User-specified options override defaults; unspecified options get the
 	// provider's EffectiveDefaults (e.g., permission_mode=unrestricted for claude).
-	command := resolved.CommandString()
+	command := firstNonEmptyString(resolved.CommandString(), resolved.Name)
 	if len(resolved.OptionsSchema) > 0 {
 		mergedOptions := make(map[string]string)
 		for k, v := range resolved.EffectiveDefaults {
@@ -177,18 +171,25 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// starts the agent process on the next tick. This avoids blocking the
 	// HTTP response for 10-30s while the agent boots in tmux, and lets MC
 	// show the session in the sidebar immediately via optimistic UI.
-	handle, err := s.newWorkerSessionHandle(store, worker.SessionSpec{
+	handle, err := s.newResolvedWorkerSessionHandle(store, worker.ResolvedSessionConfig{
 		Alias:     alias,
 		Template:  template,
 		Title:     title,
-		Command:   command,
-		WorkDir:   workDir,
-		Provider:  resolved.Name,
 		Transport: transport,
-		Env:       resolved.Env,
-		Resume:    resume,
-		Hints:     sessionCreateHints(resolved),
 		Metadata:  extraMeta,
+		Runtime: worker.ResolvedRuntime{
+			Command:    command,
+			WorkDir:    workDir,
+			Provider:   resolved.Name,
+			SessionEnv: resolved.Env,
+			Resume: session.ProviderResume{
+				ResumeFlag:    resolved.ResumeFlag,
+				ResumeStyle:   resolved.ResumeStyle,
+				ResumeCommand: resolved.ResumeCommand,
+				SessionIDFlag: resolved.SessionIDFlag,
+			},
+			Hints: sessionCreateHints(resolved),
+		},
 	})
 	if err != nil {
 		s.idem.unreserve(idemKey)
@@ -308,12 +309,6 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 
 	workDir := s.state.CityPath()
 
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
-	}
 	alias, err := session.ValidateAlias(body.Alias)
 	if err != nil {
 		s.idem.unreserve(idemKey)
@@ -321,25 +316,31 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 
-	command := resolved.CommandString()
+	command := firstNonEmptyString(resolved.CommandString(), resolved.Name)
 	if len(extraArgs) > 0 {
 		command = command + " " + shellquote.Join(extraArgs)
 	}
 
 	hints := sessionCreateHints(resolved)
-	handle, err := s.newWorkerSessionHandle(store, worker.SessionSpec{
-		Alias:     alias,
-		Template:  template,
-		Title:     title,
-		Command:   command,
-		WorkDir:   workDir,
-		Provider:  resolved.Name,
-		Transport: "",
-		Env:       resolved.Env,
-		Resume:    resume,
-		Hints:     hints,
+	handle, err := s.newResolvedWorkerSessionHandle(store, worker.ResolvedSessionConfig{
+		Alias:    alias,
+		Template: template,
+		Title:    title,
 		Metadata: map[string]string{
 			"session_origin": "manual",
+		},
+		Runtime: worker.ResolvedRuntime{
+			Command:    command,
+			WorkDir:    workDir,
+			Provider:   resolved.Name,
+			SessionEnv: resolved.Env,
+			Resume: session.ProviderResume{
+				ResumeFlag:    resolved.ResumeFlag,
+				ResumeStyle:   resolved.ResumeStyle,
+				ResumeCommand: resolved.ResumeCommand,
+				SessionIDFlag: resolved.SessionIDFlag,
+			},
+			Hints: hints,
 		},
 	})
 	if err != nil {

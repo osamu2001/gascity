@@ -124,6 +124,9 @@ func resolvedWorkerSessionConfigWithConfig(
 	if providerName == "" {
 		providerName = strings.TrimSpace(provider)
 	}
+	if command == "" {
+		command = providerName
+	}
 	return worker.ResolvedSessionConfig{
 		Alias:        alias,
 		ExplicitName: explicitName,
