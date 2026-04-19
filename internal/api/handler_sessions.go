@@ -458,10 +458,10 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		peekHandle  worker.PeekHandle
 	)
 	switch v := runtimeHandle.(type) {
-	case sessionResponseHandle:
+	case worker.Handle:
 		stateHandle = v
 		peekHandle = v
-	case worker.Handle:
+	case sessionResponseHandle:
 		stateHandle = v
 		peekHandle = v
 	case runtime.Provider:

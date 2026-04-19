@@ -383,6 +383,33 @@ func TestFactoryHandleForTargetRuntimeFallbackPreservesRecorder(t *testing.T) {
 	}
 }
 
+type failingGetStore struct {
+	beads.Store
+	err error
+}
+
+func (s failingGetStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, s.err
+}
+
+func TestFactoryHandleForTargetPropagatesSessionResolutionError(t *testing.T) {
+	wantErr := errors.New("store boom")
+	factory, err := NewFactory(FactoryConfig{
+		Store: failingGetStore{
+			Store: beads.NewMemStore(),
+			err:   wantErr,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	_, err = factory.HandleForTarget("sess-1", nil)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("HandleForTarget error = %v, want %v", err, wantErr)
+	}
+}
+
 func TestFactoryRuntimeHandleUsesConfiguredProviderAndRecorder(t *testing.T) {
 	sp := runtime.NewFake()
 	recorder := events.NewFake()

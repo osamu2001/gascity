@@ -1,22 +1,15 @@
 package api
 
 import (
-	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type sessionMessageRequest struct {
 	Message string `json:"message"`
-}
-
-type sessionSubmitRequest struct {
-	Message string               `json:"message"`
-	Intent  session.SubmitIntent `json:"intent,omitempty"`
 }
 
 type sessionPendingResponse struct {
@@ -29,65 +22,6 @@ type sessionRespondRequest struct {
 	Action    string            `json:"action"`
 	Text      string            `json:"text,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
-}
-
-func (s *Server) handleSessionSubmit(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	var body sessionSubmitRequest
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if strings.TrimSpace(body.Message) == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "message is required")
-		return
-	}
-	if body.Intent == "" {
-		body.Intent = session.SubmitIntentDefault
-	}
-	switch body.Intent {
-	case session.SubmitIntentDefault, session.SubmitIntentFollowUp, session.SubmitIntentInterruptNow:
-	default:
-		writeError(w, http.StatusBadRequest, "invalid", fmt.Sprintf("intent must be one of %q, %q, or %q", session.SubmitIntentDefault, session.SubmitIntentFollowUp, session.SubmitIntentInterruptNow))
-		return
-	}
-
-	idemKey := scopedIdemKey(r, r.Header.Get("Idempotency-Key"))
-	var bodyHash string
-	if idemKey != "" {
-		bodyHash = hashBody(body)
-		if s.idem.handleIdempotent(w, idemKey, bodyHash) {
-			return
-		}
-	}
-
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		writeResolveError(w, err)
-		return
-	}
-
-	outcome, err := s.submitMessageToSession(r.Context(), store, id, body.Message, body.Intent)
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	resp := map[string]any{
-		"status": "accepted",
-		"id":     id,
-		"queued": outcome.Queued,
-		"intent": string(body.Intent),
-	}
-	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
-	writeJSON(w, http.StatusAccepted, resp)
 }
 
 func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {

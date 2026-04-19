@@ -73,7 +73,7 @@ var KnownEventTypes = []string{
 	ControllerStarted, ControllerStopped,
 	CitySuspended, CityResumed,
 	OrderFired, OrderCompleted, OrderFailed,
-	ProviderSwapped,
+	ProviderSwapped, WorkerOperation,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,

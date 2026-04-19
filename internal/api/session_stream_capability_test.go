@@ -23,7 +23,7 @@ func (h peekOnlyHandle) Peek(context.Context, int) (string, error) {
 
 func TestStreamSessionPeekAcceptsPeekCapability(t *testing.T) {
 	srv := New(newSessionFakeState(t))
-	info := session.Info{ID: "sess-1", Template: "probe"}
+	info := session.Info{ID: "sess-1", Template: "probe", Provider: "claude"}
 	rec := httptest.NewRecorder()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -36,6 +36,11 @@ func TestStreamSessionPeekAcceptsPeekCapability(t *testing.T) {
 	deadline := time.Now().Add(250 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if strings.Contains(rec.Body.String(), "hello from peek") {
+			if !strings.Contains(rec.Body.String(), `"provider":"claude"`) {
+				cancel()
+				<-done
+				t.Fatalf("stream body missing provider envelope: %s", rec.Body.String())
+			}
 			cancel()
 			<-done
 			return
@@ -96,7 +101,7 @@ func (h *peekPendingHandle) SetPending(pending *worker.PendingInteraction) {
 func TestStreamSessionPeekRawWorkerWakeEmitsPendingWithoutOutputChange(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	info := session.Info{ID: "sess-1", Template: "probe"}
+	info := session.Info{ID: "sess-1", Template: "probe", Provider: "claude"}
 	handle := &peekPendingHandle{output: "steady output"}
 	rec := newSyncResponseRecorder()
 
@@ -111,6 +116,8 @@ func TestStreamSessionPeekRawWorkerWakeEmitsPendingWithoutOutputChange(t *testin
 
 	if body := waitForRecorderSubstring(t, rec, "steady output", time.Second); !strings.Contains(body, "steady output") {
 		t.Fatalf("stream body missing initial peek output: %s", body)
+	} else if !strings.Contains(body, `"provider":"claude"`) {
+		t.Fatalf("stream body missing provider envelope: %s", body)
 	}
 
 	handle.SetPending(&worker.PendingInteraction{

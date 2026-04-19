@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -140,9 +141,13 @@ func (f *Factory) HandleForTarget(target string, processNames []string) (Handle,
 	if f.store != nil {
 		if id, err := sessionpkg.ResolveSessionIDByExactID(f.store, target); err == nil {
 			return f.SessionByID(id)
+		} else if !errors.Is(err, sessionpkg.ErrSessionNotFound) {
+			return nil, err
 		}
 		if id, err := sessionpkg.ResolveSessionID(f.store, target); err == nil {
 			return f.SessionByID(id)
+		} else if !errors.Is(err, sessionpkg.ErrSessionNotFound) {
+			return nil, err
 		}
 		if f.provider != nil {
 			if sessionID, err := f.provider.GetMeta(target, "GC_SESSION_ID"); err == nil && strings.TrimSpace(sessionID) != "" {

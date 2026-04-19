@@ -126,11 +126,12 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 		if running {
 			s.streamSessionPeekRaw(ctx, w, info, handle)
 		} else {
-			data, _ := json.Marshal(sessionRawTranscriptResponse{
+			data, _ := json.Marshal(SessionStreamRawMessageEvent{
 				ID:       info.ID,
 				Template: info.Template,
+				Provider: info.Provider,
 				Format:   "raw",
-				Messages: []json.RawMessage{},
+				Messages: []SessionRawMessageFrame{},
 			})
 			writeSSE(w, "message", 1, data)
 		}
@@ -158,9 +159,10 @@ func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.I
 		return
 	}
 
-	data, err := json.Marshal(sessionTranscriptResponse{
+	data, err := json.Marshal(SessionStreamMessageEvent{
 		ID:       info.ID,
 		Template: info.Template,
+		Provider: info.Provider,
 		Format:   "conversation",
 		Turns:    turns,
 	})
@@ -181,11 +183,12 @@ func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info sessio
 		return
 	}
 
-	data, err := json.Marshal(sessionRawTranscriptResponse{
+	data, err := json.Marshal(SessionStreamRawMessageEvent{
 		ID:       info.ID,
 		Template: info.Template,
+		Provider: info.Provider,
 		Format:   "raw",
-		Messages: rawMessages,
+		Messages: wrapRawFrameBytes(rawMessages),
 	})
 	if err != nil {
 		return
@@ -247,11 +250,12 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 			}
 			if len(toSend) > 0 {
 				seq++
-				data, err := json.Marshal(sessionRawTranscriptResponse{
+				data, err := json.Marshal(SessionStreamRawMessageEvent{
 					ID:       info.ID,
 					Template: info.Template,
+					Provider: info.Provider,
 					Format:   "raw",
-					Messages: toSend,
+					Messages: wrapRawFrameBytes(toSend),
 				})
 				if err == nil {
 					writeSSE(w, "message", seq, data)
@@ -384,9 +388,10 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 			}
 			if len(toSend) > 0 {
 				seq++
-				data, err := json.Marshal(sessionTranscriptResponse{
+				data, err := json.Marshal(SessionStreamMessageEvent{
 					ID:       info.ID,
 					Template: info.Template,
+					Provider: info.Provider,
 					Format:   "conversation",
 					Turns:    toSend,
 				})
@@ -495,11 +500,12 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 						{"type": "text", "text": output},
 					},
 				})
-				data, err := json.Marshal(sessionRawTranscriptResponse{
+				data, err := json.Marshal(SessionStreamRawMessageEvent{
 					ID:       info.ID,
 					Template: info.Template,
+					Provider: info.Provider,
 					Format:   "raw",
-					Messages: []json.RawMessage{fakeMsg},
+					Messages: wrapRawFrameBytes([]json.RawMessage{fakeMsg}),
 				})
 				if err == nil {
 					writeSSE(w, "message", seq, data)
@@ -554,9 +560,10 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 		if output != "" {
 			turns = append(turns, outputTurn{Role: "output", Text: output})
 		}
-		data, err := json.Marshal(sessionTranscriptResponse{
+		data, err := json.Marshal(SessionStreamMessageEvent{
 			ID:       info.ID,
 			Template: info.Template,
+			Provider: info.Provider,
 			Format:   "text",
 			Turns:    turns,
 		})
