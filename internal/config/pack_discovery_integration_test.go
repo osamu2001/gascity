@@ -230,7 +230,7 @@ includes = ["../legacy"]
 func TestLoadWithIncludes_TransitiveFalseFiltersNestedCommandsAndDoctors(t *testing.T) {
 	dir := t.TempDir()
 	parentDir := filepath.Join(dir, "parent")
-	childDir := filepath.Join(dir, "child")
+	childDir := filepath.Join(parentDir, "child")
 	cityDir := filepath.Join(dir, "city")
 
 	writeTestFile(t, childDir, "pack.toml", `
@@ -247,7 +247,7 @@ name = "parent"
 schema = 1
 
 [imports.child]
-source = "../child"
+source = "./child"
 `)
 	writeTestFile(t, parentDir, "commands/status/run.sh", "#!/bin/sh\nexit 0\n")
 	writeTestFile(t, parentDir, "doctor/parent-check/run.sh", "#!/bin/sh\nexit 0\n")
@@ -328,6 +328,87 @@ source = "../helper"
 	}
 	if cfg.PackDoctors[0].Name != "binaries" {
 		t.Fatalf("doctor Name = %q, want %q", cfg.PackDoctors[0].Name, "binaries")
+	}
+}
+
+func TestExpandPacks_RigImportTransitiveFalseFiltersNestedCommandsAndDoctors(t *testing.T) {
+	dir := t.TempDir()
+	parentDir := filepath.Join(dir, "parent")
+	childDir := filepath.Join(parentDir, "child")
+	cityDir := filepath.Join(dir, "city")
+
+	writeTestFile(t, childDir, "pack.toml", `
+[pack]
+name = "child"
+schema = 1
+
+[[agent]]
+name = "nested"
+scope = "rig"
+`)
+	writeTestFile(t, childDir, "commands/repo/sync/run.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, childDir, "doctor/child-check/run.sh", "#!/bin/sh\nexit 0\n")
+
+	writeTestFile(t, parentDir, "pack.toml", `
+[pack]
+name = "parent"
+schema = 1
+
+[imports.child]
+source = "./child"
+
+[[agent]]
+name = "direct"
+scope = "rig"
+`)
+	writeTestFile(t, parentDir, "commands/status/run.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, parentDir, "doctor/parent-check/run.sh", "#!/bin/sh\nexit 0\n")
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "frontend"
+path = "../rig"
+
+[rigs.imports.ops]
+source = "../parent"
+transitive = false
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	if len(cfg.PackCommands) != 1 {
+		t.Fatalf("got %d PackCommands, want 1 direct rig import command", len(cfg.PackCommands))
+	}
+	if !reflect.DeepEqual(cfg.PackCommands[0].Command, []string{"status"}) {
+		t.Fatalf("command words = %#v, want %#v", cfg.PackCommands[0].Command, []string{"status"})
+	}
+	if cfg.PackCommands[0].BindingName != "ops" {
+		t.Fatalf("command BindingName = %q, want %q", cfg.PackCommands[0].BindingName, "ops")
+	}
+
+	if len(cfg.PackDoctors) != 1 {
+		t.Fatalf("got %d PackDoctors, want 1 direct rig import doctor", len(cfg.PackDoctors))
+	}
+	if cfg.PackDoctors[0].Name != "parent-check" {
+		t.Fatalf("doctor Name = %q, want %q", cfg.PackDoctors[0].Name, "parent-check")
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	found := map[string]bool{}
+	for _, a := range explicit {
+		found[a.QualifiedName()] = true
+	}
+	if !found["frontend/ops.direct"] {
+		t.Errorf("missing frontend/ops.direct; got: %v", found)
+	}
+	if found["frontend/child.nested"] || found["frontend/ops.nested"] {
+		t.Errorf("nested transitive rig import agent should not appear; got: %v", found)
 	}
 }
 
