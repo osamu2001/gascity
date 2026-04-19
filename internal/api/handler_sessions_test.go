@@ -2537,6 +2537,89 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 	}
 }
 
+func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	initialDeadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(initialDeadline) {
+		if strings.Contains(rec.Body.String(), "hello") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(rec.Body.String(), "hello") {
+		t.Fatalf("stream body missing initial turn: %s", rec.Body.String())
+	}
+
+	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	logPath := filepath.Join(logDir, info.SessionKey+".jsonl")
+	appendFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	_, err = appendFile.WriteString(strings.Join([]string{
+		`{"uuid":"3","parentUuid":"2","type":"user","message":"{\"role\":\"user\",\"content\":\"wake now\"}","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"4","parentUuid":"3","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"event wake turn\"}","timestamp":"2025-01-01T00:00:03Z"}`,
+	}, "\n") + "\n")
+	if closeErr := appendFile.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("append transcript: %v", err)
+	}
+
+	fs.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: info.ID,
+	})
+
+	wakeDeadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(wakeDeadline) {
+		if strings.Contains(rec.Body.String(), "event wake turn") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	<-done
+
+	if !strings.Contains(rec.Body.String(), "event wake turn") {
+		t.Fatalf("stream body missing turn after worker operation wakeup: %s", rec.Body.String())
+	}
+}
+
 func TestHandleSessionStreamConversationFiltersNonDisplayEntries(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()

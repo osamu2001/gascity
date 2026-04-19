@@ -6,8 +6,10 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -201,6 +203,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
+	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
 
 	var lastSentID string
 	var seq uint64
@@ -293,6 +296,18 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 		writeSSE(w, "pending", seq, pendingData)
 	}
 
+	reloadSnapshot := func() {
+		snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), req)
+		switch {
+		case err == nil:
+			emitSnapshot(snapshot)
+		case errors.Is(err, worker.ErrHistoryUnavailable):
+		default:
+			log.Printf("session stream raw: history reload failed for %s: %v", info.ID, err)
+		}
+		emitPending()
+	}
+
 	emitSnapshot(initial)
 
 	for {
@@ -300,15 +315,13 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 		case <-ctx.Done():
 			return
 		case <-poll.C:
-			snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), req)
-			switch {
-			case err == nil:
-				emitSnapshot(snapshot)
-			case errors.Is(err, worker.ErrHistoryUnavailable):
-			default:
-				log.Printf("session stream raw: history reload failed for %s: %v", info.ID, err)
+			reloadSnapshot()
+		case _, ok := <-workerOps:
+			if !ok {
+				workerOps = nil
+				continue
 			}
-			emitPending()
+			reloadSnapshot()
 		case <-keepalive.C:
 			writeSSEComment(w)
 		}
@@ -320,6 +333,7 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
+	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
 
 	var lastSentID string
 	var seq uint64
@@ -379,6 +393,17 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 		}
 	}
 
+	reloadSnapshot := func() {
+		snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{})
+		switch {
+		case err == nil:
+			emitSnapshot(snapshot)
+		case errors.Is(err, worker.ErrHistoryUnavailable):
+		default:
+			log.Printf("session stream: history reload failed for %s: %v", info.ID, err)
+		}
+	}
+
 	emitSnapshot(initial)
 
 	for {
@@ -386,14 +411,13 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 		case <-ctx.Done():
 			return
 		case <-poll.C:
-			snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{})
-			switch {
-			case err == nil:
-				emitSnapshot(snapshot)
-			case errors.Is(err, worker.ErrHistoryUnavailable):
-			default:
-				log.Printf("session stream: history reload failed for %s: %v", info.ID, err)
+			reloadSnapshot()
+		case _, ok := <-workerOps:
+			if !ok {
+				workerOps = nil
+				continue
 			}
+			reloadSnapshot()
 		case <-keepalive.C:
 			writeSSEComment(w)
 		}
@@ -412,6 +436,7 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
+	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
 
 	var lastOutput string
 	var seq uint64
@@ -468,6 +493,12 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 			return
 		case <-poll.C:
 			emitPeek()
+		case _, ok := <-workerOps:
+			if !ok {
+				workerOps = nil
+				continue
+			}
+			emitPeek()
 		case <-keepalive.C:
 			writeSSEComment(w)
 		}
@@ -479,6 +510,7 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
+	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
 
 	var lastOutput string
 	var seq uint64
@@ -518,8 +550,62 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 			return
 		case <-poll.C:
 			emitPeek()
+		case _, ok := <-workerOps:
+			if !ok {
+				workerOps = nil
+				continue
+			}
+			emitPeek()
 		case <-keepalive.C:
 			writeSSEComment(w)
 		}
 	}
+}
+
+func (s *Server) watchSessionWorkerOperationSignals(ctx context.Context, info session.Info) <-chan struct{} {
+	if s == nil || s.state == nil {
+		return nil
+	}
+	ep := s.state.EventProvider()
+	if ep == nil {
+		return nil
+	}
+	afterSeq, err := ep.LatestSeq()
+	if err != nil {
+		return nil
+	}
+	watcher, err := ep.Watch(ctx, afterSeq)
+	if err != nil {
+		return nil
+	}
+	signals := make(chan struct{}, 1)
+	go func() {
+		defer close(signals)
+		defer watcher.Close() //nolint:errcheck // best-effort cleanup
+		for {
+			event, err := watcher.Next()
+			if err != nil {
+				return
+			}
+			if !sessionMatchesWorkerOperationEvent(info, event) {
+				continue
+			}
+			select {
+			case signals <- struct{}{}:
+			default:
+			}
+		}
+	}()
+	return signals
+}
+
+func sessionMatchesWorkerOperationEvent(info session.Info, event events.Event) bool {
+	if event.Type != events.WorkerOperation {
+		return false
+	}
+	subject := strings.TrimSpace(event.Subject)
+	if subject == "" {
+		return false
+	}
+	return subject == strings.TrimSpace(info.ID) || subject == strings.TrimSpace(info.SessionName)
 }
