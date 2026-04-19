@@ -33,7 +33,8 @@ gc [flags]
 | [gc events](#gc-events) | Show events from the GC API |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
-| [gc handoff](#gc-handoff) | Send handoff mail and restart this session |
+| [gc halt](#gc-halt) | Pause the supervisor reconciliation tick |
+| [gc handoff](#gc-handoff) | Send handoff mail and restart controller-managed sessions |
 | [gc help](#gc-help) | Help about any command |
 | [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
 | [gc import](#gc-import) | Manage pack imports |
@@ -755,10 +756,11 @@ gc dashboard serve [flags]
 
 Run diagnostic health checks on the city workspace.
 
-Checks city structure, config validity, binary dependencies (tmux, git,
-bd, dolt), controller status, agent sessions, zombie/orphan sessions,
-bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix to attempt automatic repairs.
+Checks city structure, config validity, session-backend dependencies
+(including tmux when required), git, bd, dolt, controller status,
+agent sessions, zombie/orphan sessions, bead stores, Dolt server
+health, event log integrity, and per-rig health. Use --fix to
+attempt automatic repairs.
 
 ```
 gc doctor [flags]
@@ -944,19 +946,45 @@ gc graph gc-42               # expand convoy children
 | `--mermaid` | bool |  | output Mermaid.js flowchart |
 | `--tree` | bool |  | output Unicode dependency tree |
 
+## gc halt
+
+Halt the supervisor reconciliation tick for a city by creating
+a flag file at &lt;city&gt;/.gc/runtime/halt. While the flag is present the
+supervisor loop skips tick work (no session wakes, no convergence,
+no order dispatch) but keeps the process alive, logs, and control
+socket responsive.
+
+This is a soft circuit breaker for emergencies: it stops disk thrash
+from a runaway reconciler without requiring "systemctl stop". The
+supervisor process itself is not killed.
+
+Idempotent. Use "gc resume" to clear the flag.
+
+```
+gc halt [path]
+```
+
 ## gc handoff
 
 Convenience command for context handoff.
 
-Self-handoff (default): sends mail to self and blocks until controller
-restarts the session. Equivalent to:
+Self-handoff (default): sends mail to self. If the current session is
+controller-restartable, requests a restart and blocks until the controller
+stops the session. For on-demand configured named sessions, sends mail and
+returns without requesting restart because the controller cannot restart the
+user-attended process.
+
+For controller-restartable sessions, equivalent to:
 
   gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
-Remote handoff (--target): sends mail to a target session and kills its
-session. The reconciler restarts it with the handoff mail waiting.
-Returns immediately. Equivalent to:
+Remote handoff (--target): sends mail to a target session. If the target is
+controller-restartable, kills it so the reconciler restarts it with the handoff
+mail waiting. For on-demand configured named targets, sends mail and returns
+without killing the session.
+
+For controller-restartable targets, equivalent to:
 
   gc mail send &lt;target&gt; &lt;subject&gt; [message]
   gc session kill &lt;target&gt;
@@ -970,7 +998,7 @@ gc handoff <subject> [message] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--target` | string |  | Remote session alias or ID to handoff (sends mail + kills session) |
+| `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
 
 ## gc help
 
@@ -1112,7 +1140,7 @@ gc init
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
-| `--name` | string |  | workspace name (default: target directory basename) |
+| `--name` | string |  | workspace name (default: source template's workspace.name if set, else target directory basename) |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 
@@ -1568,6 +1596,8 @@ gc restart [path]
 ## gc resume
 
 Resume a suspended city by clearing workspace.suspended in city.toml.
+Also clears the halt flag file (if any) created by "gc halt", so this
+is the single verb that takes a city out of every soft-pause state.
 
 Restores normal operation: the reconciler will spawn agents again and
 gc hook/prime will return work. Use "gc agent resume" to resume
@@ -1841,6 +1871,11 @@ The controller will stop the session on its next reconcile tick and
 restart it fresh. The blocking prevents the agent from consuming more
 context while waiting.
 
+For on-demand configured named sessions, the controller cannot restart the
+user-attended process. In that case this command reports that restart was
+skipped and returns without blocking. No session.draining event is emitted
+when restart is skipped.
+
 This command is designed to be called from within a session context.
 It emits a session.draining event before blocking.
 
@@ -1936,8 +1971,8 @@ gc session
 
 Attach to a running session or resume a suspended one.
 
-If the session is active with a live tmux session, reattaches.
-If the session is suspended or the tmux session died, resumes
+If the session is active with a live runtime session, reattaches.
+If the session is suspended or the runtime session disappeared, resumes
 using the provider's resume mechanism (if supported) or restarts.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).

@@ -814,8 +814,8 @@ func newSessionAttachCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Attach to (or resume) a chat session",
 		Long: `Attach to a running session or resume a suspended one.
 
-If the session is active with a live tmux session, reattaches.
-If the session is suspended or the tmux session died, resumes
+If the session is active with a live runtime session, reattaches.
+If the session is suspended or the runtime session disappeared, resumes
 using the provider's resume mechanism (if supported) or restarts.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
