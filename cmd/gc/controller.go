@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -438,62 +439,231 @@ func controllerAlive(cityPath string) int {
 // single dirty signal. Tests may override this for faster response.
 var debounceDelay = 200 * time.Millisecond
 
-// watchConfigDirs starts an fsnotify watcher on the given directories and
-// sets dirty to true after a debounce window. Watches directories instead
-// of individual files to handle vim/emacs rename-swap atomic saves.
+// watchConfigTargets starts an fsnotify watcher on the given config paths and
+// sets dirty to true after a debounce window. Config source directories are
+// watched shallowly to handle vim/emacs rename-swap atomic saves; pack and
+// convention roots are watched recursively because fsnotify is non-recursive.
 // Returns a cleanup function. If the watcher cannot be created, returns a
 // no-op cleanup (degraded to tick-only, no file watching).
-// addWatchRecursive walks root and adds every directory it finds to the
-// watcher, skipping subtrees that shouldIgnoreConfigWatchEvent flags
-// (.gc/, .beads/, and their descendants). Non-existent roots and permission
-// errors are logged and skipped — a missing subdir is not fatal because
-// fsnotify only needs the parent to observe the create event.
-func addWatchRecursive(watcher *fsnotify.Watcher, root string, stderr io.Writer) {
+type configWatchRegistrar struct {
+	watcher        *fsnotify.Watcher
+	stderr         io.Writer
+	mu             sync.Mutex
+	recursiveRoots map[string]struct{}
+	discoveryRoots map[string]struct{}
+}
+
+func newConfigWatchRegistrar(watcher *fsnotify.Watcher, stderr io.Writer) *configWatchRegistrar {
+	return &configWatchRegistrar{
+		watcher:        watcher,
+		stderr:         stderr,
+		recursiveRoots: make(map[string]struct{}),
+		discoveryRoots: make(map[string]struct{}),
+	}
+}
+
+func (r *configWatchRegistrar) addPath(root string, recursive bool, done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return false
+	default:
+	}
 	info, err := os.Stat(root)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc start: config watcher: cannot stat %s: %v\n", root, err) //nolint:errcheck // best-effort stderr
-		return
+		fmt.Fprintf(r.stderr, "config watcher: cannot stat %s: %v\n", root, err) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	if !r.addOne(root, done) {
+		return false
 	}
 	if !info.IsDir() {
-		return
+		return true
 	}
-	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+	if !recursive {
+		return true
+	}
+	walkRoot := root
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		walkRoot = resolved
+	}
+	walkErr := filepath.WalkDir(walkRoot, func(path string, d os.DirEntry, walkErr error) error {
+		select {
+		case <-done:
+			return filepath.SkipAll
+		default:
+		}
 		if walkErr != nil {
-			fmt.Fprintf(stderr, "gc start: config watcher: walk %s: %v\n", path, walkErr) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(r.stderr, "config watcher: walk %s: %v\n", path, walkErr) //nolint:errcheck // best-effort stderr
 			return nil
 		}
 		if !d.IsDir() {
 			return nil
 		}
+		if samePath(path, root) {
+			return nil
+		}
 		if path != root && shouldIgnoreConfigWatchEvent(path) {
 			return filepath.SkipDir
 		}
-		if err := watcher.Add(path); err != nil {
-			fmt.Fprintf(stderr, "gc start: config watcher: cannot watch %s: %v\n", path, err) //nolint:errcheck // best-effort stderr
-		}
+		r.addOne(path, done)
 		return nil
 	})
 	if walkErr != nil {
-		fmt.Fprintf(stderr, "gc start: config watcher: walk %s: %v\n", root, walkErr) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(r.stderr, "config watcher: walk %s: %v\n", walkRoot, walkErr) //nolint:errcheck // best-effort stderr
 	}
+	return true
 }
 
-func watchConfigDirs(dirs []string, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {
+func (r *configWatchRegistrar) addOne(path string, done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return false
+	default:
+	}
+	if err := r.watcher.Add(path); err != nil {
+		if errors.Is(err, syscall.ENOSPC) {
+			fmt.Fprintf(r.stderr, "config watcher: cannot watch %s: inotify watch limit reached; increase fs.inotify.max_user_watches or reduce watched pack size: %v\n", path, err) //nolint:errcheck // best-effort stderr
+			return false
+		}
+		fmt.Fprintf(r.stderr, "config watcher: cannot watch %s: %v\n", path, err) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	return true
+}
+
+func (r *configWatchRegistrar) markRecursiveRoot(root string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.recursiveRoots[normalizePathForCompare(root)] = struct{}{}
+}
+
+func (r *configWatchRegistrar) unmarkRecursiveRoot(root string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.recursiveRoots, normalizePathForCompare(root))
+}
+
+func (r *configWatchRegistrar) markDiscoveryRoot(root string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.discoveryRoots[normalizePathForCompare(root)] = struct{}{}
+}
+
+func (r *configWatchRegistrar) watchesRecursively(path string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for root := range r.recursiveRoots {
+		if pathIsWithin(root, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *configWatchRegistrar) isConventionRootCreate(path string) bool {
+	parent := filepath.Dir(path)
+	base := filepath.Base(filepath.Clean(path))
+	if !isConventionDiscoveryDirName(base) {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for root := range r.discoveryRoots {
+		if samePath(root, parent) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathIsWithin(root, path string) bool {
+	root = normalizePathForCompare(root)
+	path = normalizePathForCompare(path)
+	if samePath(root, path) {
+		return true
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func isConventionDiscoveryDirName(base string) bool {
+	for _, name := range config.ConventionDiscoveryDirNames() {
+		if base == name {
+			return true
+		}
+	}
+	return false
+}
+
+func watchConfigTargets(targets []config.WatchTarget, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: config watcher: %v (reload on tick only)\n", err) //nolint:errcheck // best-effort stderr
 		return func() {}
 	}
-	// fsnotify is non-recursive — watcher.Add(dir) covers only the immediate
-	// directory. Pack v2's convention layout pushes agent prompts, commands,
-	// and formulas into subdirectories that exist at startup, and v1 pack
-	// dirs usually do the same. Walk each seed recursively so nested edits
-	// trigger reloads. Regression guard: gastownhall/gascity#780.
-	for _, dir := range dirs {
-		addWatchRecursive(watcher, dir, stderr)
+	registrar := newConfigWatchRegistrar(watcher, stderr)
+
+	markDirty := func() {
+		dirty.Store(true)
+		if pokeCh != nil {
+			select {
+			case pokeCh <- struct{}{}:
+			default:
+			}
+		}
+	}
+
+	done := make(chan struct{})
+	eventLoopDone := make(chan struct{})
+	var registrationWG sync.WaitGroup
+	var enqueueMu sync.Mutex
+	enqueueRecursiveWatch := func(root string, trackRoot bool) {
+		enqueueMu.Lock()
+		select {
+		case <-done:
+			enqueueMu.Unlock()
+			return
+		default:
+		}
+		if trackRoot {
+			registrar.markRecursiveRoot(root)
+		}
+		registrationWG.Add(1)
+		enqueueMu.Unlock()
+		go func() {
+			defer registrationWG.Done()
+			if ok := registrar.addPath(root, true, done); !ok && trackRoot {
+				registrar.unmarkRecursiveRoot(root)
+			}
+		}()
+	}
+
+	// fsnotify is non-recursive. Watch config source directories shallowly,
+	// but recurse through pack and convention roots where config-bearing
+	// files live below pre-existing subdirectories. Regression guard:
+	// gastownhall/gascity#780.
+	for _, target := range targets {
+		if target.DiscoverConventions {
+			registrar.markDiscoveryRoot(target.Path)
+		}
+		if target.Recursive {
+			registrar.markRecursiveRoot(target.Path)
+		}
+		if ok := registrar.addPath(target.Path, target.Recursive, done); !ok && target.Recursive {
+			registrar.unmarkRecursiveRoot(target.Path)
+		}
 	}
 	go func() {
+		defer close(eventLoopDone)
 		var debounce *time.Timer
+		defer func() {
+			if debounce != nil {
+				debounce.Stop()
+			}
+		}()
 		for {
 			select {
 			case event, ok := <-watcher.Events:
@@ -505,15 +675,13 @@ func watchConfigDirs(dirs []string, dirty *atomic.Bool, pokeCh chan struct{}, st
 				}
 				if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
 					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-						// Walk the newly created subtree so anything pre-populated
-						// inside it is watched too (gastownhall/gascity#780).
-						addWatchRecursive(watcher, event.Name, stderr)
-						dirty.Store(true)
-						if pokeCh != nil {
-							select {
-							case pokeCh <- struct{}{}:
-							default:
-							}
+						// Convention roots may appear after startup, and nested
+						// dirs inside recursive roots may be pre-populated. Queue
+						// the walk so fsnotify consumption stays fast.
+						if registrar.isConventionRootCreate(event.Name) {
+							enqueueRecursiveWatch(event.Name, true)
+						} else if registrar.watchesRecursively(event.Name) {
+							enqueueRecursiveWatch(event.Name, false)
 						}
 					}
 				}
@@ -522,13 +690,7 @@ func watchConfigDirs(dirs []string, dirty *atomic.Bool, pokeCh chan struct{}, st
 					debounce.Stop()
 				}
 				debounce = time.AfterFunc(debounceDelay, func() {
-					dirty.Store(true)
-					if pokeCh != nil {
-						select {
-						case pokeCh <- struct{}{}:
-						default:
-						}
-					}
+					markDirty()
 				})
 			case _, ok := <-watcher.Errors:
 				if !ok {
@@ -537,7 +699,17 @@ func watchConfigDirs(dirs []string, dirty *atomic.Bool, pokeCh chan struct{}, st
 			}
 		}
 	}()
-	return func() { watcher.Close() } //nolint:errcheck // best-effort cleanup
+	var cleanupOnce sync.Once
+	return func() {
+		cleanupOnce.Do(func() {
+			enqueueMu.Lock()
+			close(done)
+			enqueueMu.Unlock()
+			registrationWG.Wait()
+			watcher.Close() //nolint:errcheck // best-effort cleanup
+			<-eventLoopDone
+		})
+	}
 }
 
 func shouldIgnoreConfigWatchEvent(path string) bool {
@@ -778,7 +950,7 @@ func controllerLoop(
 	cfg *config.City,
 	cityName string,
 	tomlPath string,
-	watchDirs []string,
+	watchTargets []config.WatchTarget,
 	buildFn func(*config.City, runtime.Provider, beads.Store) DesiredStateResult,
 	sp runtime.Provider,
 	dops drainOps,
@@ -809,7 +981,7 @@ func controllerLoop(
 		cityPath:            cityPath,
 		cityName:            cityName,
 		tomlPath:            tomlPath,
-		watchDirs:           watchDirs,
+		watchTargets:        watchTargets,
 		cfg:                 loopCfg,
 		sp:                  sp,
 		buildFn:             buildFn,
@@ -865,8 +1037,8 @@ func configReloadSummary(oldAgents, oldRigs, newAgents, newRigs int) string {
 
 // runController runs the persistent controller loop. It acquires a lock,
 // opens a control socket, runs the reconciliation loop, and on shutdown
-// stops all agents. Returns an exit code. initialWatchDirs is the set of
-// directories to watch for config changes (from initial provenance).
+// stops all agents. Returns an exit code. initialWatchTargets is the set of
+// paths to watch for config changes (from initial provenance).
 func runController(
 	cityPath string,
 	tomlPath string,
@@ -878,7 +1050,7 @@ func runController(
 	dops drainOps,
 	poolSessions map[string]time.Duration,
 	poolDeathHandlers map[string]poolDeathInfo,
-	initialWatchDirs []string,
+	initialWatchTargets []config.WatchTarget,
 	rec events.Recorder,
 	eventProv events.Provider,
 	stdout, stderr io.Writer,
@@ -946,7 +1118,7 @@ func runController(
 		CityPath:                cityPath,
 		CityName:                cityName,
 		TomlPath:                tomlPath,
-		WatchDirs:               initialWatchDirs,
+		WatchTargets:            initialWatchTargets,
 		ConfigRev:               configRev,
 		ConfigDirty:             configDirty,
 		Cfg:                     cfg,

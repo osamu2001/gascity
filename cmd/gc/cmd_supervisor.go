@@ -1097,7 +1097,7 @@ func reconcileCities(
 			}
 		}
 
-		// Load city config with provenance so WatchDirs covers included files.
+		// Load city config with provenance so WatchTargets covers included files.
 		// System packs are appended as extra includes for normal pack expansion.
 		cfg, prov, loadErr := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, builtinPackIncludes(path)...)
 		if loadErr != nil {
@@ -1217,7 +1217,7 @@ func reconcileCities(
 		dops := newDrainOps(sp)
 		poolSessions := computePoolSessions(cfg, cityName, path, sp)
 		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, path, sp, stderr)
-		watchDirs := config.WatchDirs(prov, cfg, path)
+		watchTargets := config.WatchTargets(prov, cfg, path)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
 		pokeCh := make(chan struct{}, 1)
 		configDirty := &atomic.Bool{}
@@ -1235,7 +1235,7 @@ func reconcileCities(
 				CityPath:                path,
 				CityName:                cityName,
 				TomlPath:                tomlPath,
-				WatchDirs:               watchDirs,
+				WatchTargets:            watchTargets,
 				ConfigRev:               configRev,
 				ConfigDirty:             configDirty,
 				Cfg:                     cfg,

@@ -1648,6 +1648,96 @@ func TestCityRuntimeManualReloadReplyWaitsForTickCompletion(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfigWithIncludes(t, tomlPath, nil)
+
+	packFile := filepath.Join(cityPath, "packs", "extra", "docs", "note.txt")
+	if err := os.MkdirAll(filepath.Dir(packFile), 0o755); err != nil {
+		t.Fatalf("mkdir pack docs: %v", err)
+	}
+	if err := os.WriteFile(packFile, []byte("first\n"), 0o644); err != nil {
+		t.Fatalf("seed pack file: %v", err)
+	}
+
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
+
+	sp := runtime.NewFake()
+	dirty := &atomic.Bool{}
+	pokeCh := make(chan struct{}, 8)
+	var stdout, stderr bytes.Buffer
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath:     cityPath,
+		CityName:     "test-city",
+		TomlPath:     tomlPath,
+		WatchTargets: config.WatchTargets(prov, cfg, cityPath),
+		ConfigRev:    configRev,
+		ConfigDirty:  dirty,
+		Cfg:          cfg,
+		SP:           sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		PokeCh: pokeCh,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	cr.restartConfigWatcher()
+	defer cr.stopConfigWatcher()
+
+	writeCityRuntimeConfigWithIncludes(t, tomlPath, []string{"packs/extra"})
+	lastProviderName := "fake"
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+
+	packDir := filepath.Join(cityPath, "packs", "extra")
+	foundPackTarget := false
+	for _, target := range cr.watchTargets {
+		if target.Path == packDir && target.Recursive {
+			foundPackTarget = true
+			break
+		}
+	}
+	if !foundPackTarget {
+		t.Fatalf("watchTargets = %#v, want recursive pack target %q", cr.watchTargets, packDir)
+	}
+
+	drainPokes := func() {
+		for {
+			select {
+			case <-pokeCh:
+			default:
+				return
+			}
+		}
+	}
+	time.Sleep(25 * time.Millisecond)
+	drainPokes()
+	dirty.Store(false)
+
+	if err := os.WriteFile(packFile, []byte("second\n"), 0o644); err != nil {
+		t.Fatalf("edit pack file: %v", err)
+	}
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for watcher poke after editing newly watched pack file; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after editing newly watched pack file; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -1771,4 +1861,20 @@ func warningsContain(warnings []string, substr string) bool {
 		}
 	}
 	return false
+}
+
+func writeCityRuntimeConfigWithIncludes(t *testing.T, tomlPath string, includes []string) {
+	t.Helper()
+	var quoted []string
+	for _, include := range includes {
+		quoted = append(quoted, fmt.Sprintf("%q", include))
+	}
+	includesLine := ""
+	if len(quoted) > 0 {
+		includesLine = "includes = [" + strings.Join(quoted, ", ") + "]\n"
+	}
+	data := []byte("[workspace]\nname = \"test-city\"\n" + includesLine + "\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n")
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 }

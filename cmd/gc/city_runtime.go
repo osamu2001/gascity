@@ -27,13 +27,15 @@ import (
 // across runController and controllerLoop. A machine-wide supervisor can
 // instantiate multiple CityRuntimes — one per registered city.
 type CityRuntime struct {
-	cityPath    string
-	cityName    string
-	configName  string
-	tomlPath    string
-	watchDirs   []string
-	configRev   string
-	configDirty *atomic.Bool
+	cityPath     string
+	cityName     string
+	configName   string
+	tomlPath     string
+	watchTargets []config.WatchTarget
+	configRev    string
+	configDirty  *atomic.Bool
+	watchMu      sync.Mutex
+	watchCleanup func()
 
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
@@ -82,12 +84,12 @@ type CityRuntime struct {
 // CityRuntime. Internal components (crashTracker, etc.) are built by the
 // constructor from these inputs.
 type CityRuntimeParams struct {
-	CityPath    string
-	CityName    string
-	TomlPath    string
-	WatchDirs   []string
-	ConfigRev   string
-	ConfigDirty *atomic.Bool
+	CityPath     string
+	CityName     string
+	TomlPath     string
+	WatchTargets []config.WatchTarget
+	ConfigRev    string
+	ConfigDirty  *atomic.Bool
 
 	Cfg                     *config.City
 	SP                      runtime.Provider
@@ -162,7 +164,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		cityName:                p.CityName,
 		configName:              lockedConfigName(p.Cfg, p.CityPath),
 		tomlPath:                p.TomlPath,
-		watchDirs:               p.WatchDirs,
+		watchTargets:            p.WatchTargets,
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
 		cfg:                     p.Cfg,
@@ -237,22 +239,8 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	}
 
 	if cr.tomlPath != "" {
-		watchPaths := append([]string{}, cr.watchDirs...)
-		if len(watchPaths) == 0 {
-			watchPaths = []string{filepath.Dir(cr.tomlPath)}
-		}
-		var hasTomlPath bool
-		for _, path := range watchPaths {
-			if samePath(path, cr.tomlPath) {
-				hasTomlPath = true
-				break
-			}
-		}
-		if !hasTomlPath {
-			watchPaths = append(watchPaths, cr.tomlPath)
-		}
-		cleanup := watchConfigDirs(watchPaths, dirty, cr.pokeCh, cr.stderr)
-		defer cleanup()
+		cr.restartConfigWatcher()
+		defer cr.stopConfigWatcher()
 	}
 
 	// Track effective provider name for hot-reload detection.
@@ -826,6 +814,8 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.sessionDrains = newDrainTracker()
 	}
 	cr.configRev = result.Revision
+	cr.watchTargets = config.WatchTargets(result.Prov, nextCfg, cityRoot)
+	cr.restartConfigWatcher()
 	if trace != nil {
 		trace.configRevision = result.Revision
 		trace.syncArms(time.Now().UTC(), nextCfg)
@@ -852,6 +842,56 @@ func lockedConfigName(cfg *config.City, cityPath string) string {
 		return cfg.Workspace.Name
 	}
 	return filepath.Base(cityPath)
+}
+
+func (cr *CityRuntime) configWatcherTargets() []config.WatchTarget {
+	watchTargets := append([]config.WatchTarget{}, cr.watchTargets...)
+	if len(watchTargets) == 0 && cr.tomlPath != "" {
+		watchTargets = []config.WatchTarget{{
+			Path:                filepath.Dir(cr.tomlPath),
+			DiscoverConventions: true,
+		}}
+	}
+
+	var hasTomlPath bool
+	for _, target := range watchTargets {
+		if samePath(target.Path, cr.tomlPath) {
+			hasTomlPath = true
+			break
+		}
+	}
+	if cr.tomlPath != "" && !hasTomlPath {
+		watchTargets = append(watchTargets, config.WatchTarget{Path: cr.tomlPath})
+	}
+	return watchTargets
+}
+
+func (cr *CityRuntime) restartConfigWatcher() {
+	if cr.tomlPath == "" {
+		return
+	}
+	cr.stopConfigWatcher()
+
+	dirty := cr.configDirty
+	if dirty == nil {
+		dirty = &atomic.Bool{}
+		cr.configDirty = dirty
+	}
+	cleanup := watchConfigTargets(cr.configWatcherTargets(), dirty, cr.pokeCh, cr.stderr)
+
+	cr.watchMu.Lock()
+	cr.watchCleanup = cleanup
+	cr.watchMu.Unlock()
+}
+
+func (cr *CityRuntime) stopConfigWatcher() {
+	cr.watchMu.Lock()
+	cleanup := cr.watchCleanup
+	cr.watchCleanup = nil
+	cr.watchMu.Unlock()
+	if cleanup != nil {
+		cleanup()
+	}
 }
 
 // beadReconcileTick runs one reconciliation tick using the bead-driven

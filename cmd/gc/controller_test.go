@@ -533,7 +533,7 @@ func TestControllerReloadsConventionDiscoveredAgentOnWatchEvent(t *testing.T) {
 // fsnotify → debounce → dirty flag wiring. This is the integration
 // complement to the reload-logic unit test above: if this test breaks
 // but the unit test passes, the watcher glue has regressed
-// independently. Focuses on the primitive (watchConfigDirs) rather
+// independently. Focuses on the primitive (watchConfigTargets) rather
 // than a full controllerLoop to keep the test fast and free of
 // bead-store dependencies.
 func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
@@ -550,7 +550,7 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigDirs([]string{dir}, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, &dirty, pokeCh, &stderr)
 	defer cleanup()
 
 	// Rewrite city.toml — fsnotify watches the dir, so the write fires
@@ -594,7 +594,7 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 
 	// Now prove the subtree-add path actually registered agents/: create
 	// a file INSIDE agents/ and verify the watcher fires again. Without
-	// the watcher.Add(event.Name) in watchConfigDirs's event loop, this
+	// the watcher.Add(event.Name) in watchConfigTargets's event loop, this
 	// write would silently miss and a real-world regression (conv-agent
 	// file showing up after startup) would be invisible.
 	dirty.Store(false)
@@ -617,6 +617,185 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 	}
 }
 
+func TestWatchConfigDirs_FileSeedStillWatchesFile(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	var dirty atomic.Bool
+	pokeCh := make(chan struct{}, 1)
+	var stderr bytes.Buffer
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: tomlPath}}, &dirty, pokeCh, &stderr)
+	defer cleanup()
+
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test-v2\"\n"), 0o644); err != nil {
+		t.Fatalf("rewrite city.toml: %v", err)
+	}
+
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for watcher poke after direct file seed changed; stderr=%q", stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after direct file seed changed; stderr=%q", stderr.String())
+	}
+}
+
+func TestWatchConfigDirs_CityRootDoesNotWatchUnrelatedNestedSubdir(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := t.TempDir()
+	nestedDir := filepath.Join(dir, "rigs", "checkout")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll nested unrelated dir: %v", err)
+	}
+	nestedFile := filepath.Join(nestedDir, "generated.txt")
+	if err := os.WriteFile(nestedFile, []byte("first\n"), 0o644); err != nil {
+		t.Fatalf("seed nested file: %v", err)
+	}
+
+	var dirty atomic.Bool
+	pokeCh := make(chan struct{}, 1)
+	var stderr bytes.Buffer
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, &dirty, pokeCh, &stderr)
+	defer cleanup()
+
+	select {
+	case <-pokeCh:
+	default:
+	}
+	dirty.Store(false)
+
+	if err := os.WriteFile(nestedFile, []byte("second\n"), 0o644); err != nil {
+		t.Fatalf("rewrite nested unrelated file: %v", err)
+	}
+
+	select {
+	case <-pokeCh:
+		t.Fatalf("unexpected watcher poke after unrelated nested city-root file changed; stderr=%q", stderr.String())
+	case <-time.After(250 * time.Millisecond):
+	}
+	if dirty.Load() {
+		t.Fatalf("dirty flag set after unrelated nested city-root file changed; stderr=%q", stderr.String())
+	}
+}
+
+func TestWatchConfigDirs_SymlinkSeedDirWatchesNestedPreExistingDir(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := t.TempDir()
+	targetDir := filepath.Join(dir, "agents-target")
+	nestedAgentDir := filepath.Join(targetDir, "sample-agent")
+	if err := os.MkdirAll(nestedAgentDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll nested symlink target dir: %v", err)
+	}
+	linkDir := filepath.Join(dir, "agents")
+	if err := os.Symlink(targetDir, linkDir); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	promptPath := filepath.Join(nestedAgentDir, "prompt.template.md")
+	if err := os.WriteFile(promptPath, []byte("original\n"), 0o644); err != nil {
+		t.Fatalf("seed nested symlink target file: %v", err)
+	}
+
+	var dirty atomic.Bool
+	pokeCh := make(chan struct{}, 1)
+	var stderr bytes.Buffer
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: linkDir, Recursive: true}}, &dirty, pokeCh, &stderr)
+	defer cleanup()
+
+	if err := os.WriteFile(promptPath, []byte("edited\n"), 0o644); err != nil {
+		t.Fatalf("rewrite symlink target file: %v", err)
+	}
+
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for watcher poke after nested symlink seed dir changed; stderr=%q", stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after nested symlink seed dir changed; stderr=%q", stderr.String())
+	}
+}
+
+func TestWatchConfigDirs_RecreatedRecursiveSubdirStillWatched(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := t.TempDir()
+	agentsDir := filepath.Join(dir, "agents")
+	agentDir := filepath.Join(agentsDir, "sample-agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll agent dir: %v", err)
+	}
+	promptPath := filepath.Join(agentDir, "prompt.template.md")
+	if err := os.WriteFile(promptPath, []byte("original\n"), 0o644); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
+	var dirty atomic.Bool
+	pokeCh := make(chan struct{}, 1)
+	var stderr bytes.Buffer
+	cleanup := watchConfigTargets([]config.WatchTarget{{Path: agentsDir, Recursive: true}}, &dirty, pokeCh, &stderr)
+	defer cleanup()
+
+	if err := os.RemoveAll(agentDir); err != nil {
+		t.Fatalf("RemoveAll agent dir: %v", err)
+	}
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for watcher poke after recursive subdir removal; stderr=%q", stderr.String())
+	}
+
+	dirty.Store(false)
+	select {
+	case <-pokeCh:
+	default:
+	}
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("recreate agent dir: %v", err)
+	}
+	if err := os.WriteFile(promptPath, []byte("recreated\n"), 0o644); err != nil {
+		t.Fatalf("seed recreated prompt: %v", err)
+	}
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for watcher poke after recursive subdir recreation; stderr=%q", stderr.String())
+	}
+
+	dirty.Store(false)
+	select {
+	case <-pokeCh:
+	default:
+	}
+	if err := os.WriteFile(promptPath, []byte("edited\n"), 0o644); err != nil {
+		t.Fatalf("edit recreated prompt: %v", err)
+	}
+	select {
+	case <-pokeCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for watcher poke after edit in recreated recursive subdir; stderr=%q", stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after edit in recreated recursive subdir; stderr=%q", stderr.String())
+	}
+}
+
 // Regression for gastownhall/gascity#780:
 // fsnotify watches are non-recursive — watcher.Add(dir) covers only the
 // immediate directory. Pack v2's convention layout pushes agent prompts,
@@ -631,7 +810,8 @@ func TestWatchConfigDirs_Regression780_DetectsEditInPreExistingNestedSubdir(t *t
 	dir := t.TempDir()
 	// Pre-existing nested layout (mirrors pack v2 convention discovery):
 	// agents/<name>/prompt.template.md and agents/<name>/overlay/settings.json.
-	nestedAgentDir := filepath.Join(dir, "agents", "mayor")
+	agentsDir := filepath.Join(dir, "agents")
+	nestedAgentDir := filepath.Join(agentsDir, "sample-agent")
 	if err := os.MkdirAll(filepath.Join(nestedAgentDir, "overlay"), 0o755); err != nil {
 		t.Fatalf("MkdirAll nested: %v", err)
 	}
@@ -647,7 +827,10 @@ func TestWatchConfigDirs_Regression780_DetectsEditInPreExistingNestedSubdir(t *t
 	var dirty atomic.Bool
 	pokeCh := make(chan struct{}, 1)
 	var stderr bytes.Buffer
-	cleanup := watchConfigDirs([]string{dir}, &dirty, pokeCh, &stderr)
+	cleanup := watchConfigTargets([]config.WatchTarget{
+		{Path: dir, DiscoverConventions: true},
+		{Path: agentsDir, Recursive: true},
+	}, &dirty, pokeCh, &stderr)
 	defer cleanup()
 
 	// Drain any startup poke.
@@ -770,7 +953,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, config.WatchDirs(prov, cfg, dir),
+		controllerLoop(ctx, 20*time.Millisecond, cfg, "test", tomlPath, config.WatchTargets(prov, cfg, dir),
 			buildFn, sp, nil, nil, nil, nil, nil, events.Discard, nil, nil, nil, nil, &stdout, &stderr)
 		close(done)
 	}()
