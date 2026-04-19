@@ -328,22 +328,22 @@ func TestAgentOutputStreamNewTurns(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
-	h := newTestCityHandlerWith(t, state, srv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
 
 	done := make(chan struct{})
 	go func() {
-		h.ServeHTTP(rec, req)
+		srv.ServeHTTP(rec, req)
 		close(done)
 	}()
 
-	// Wait for initial burst.
-	time.Sleep(100 * time.Millisecond)
+	if body := waitForRecorderSubstring(t, rec, "first", time.Second); !strings.Contains(body, "first") {
+		t.Fatalf("stream body missing initial turn: %s", body)
+	}
 
 	// Append a new entry to the session file.
 	slug := strings.ReplaceAll(rigDir, "/", "-")
@@ -359,12 +359,12 @@ func TestAgentOutputStreamNewTurns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait for poll to pick up the change (poll interval is 2s).
-	time.Sleep(3 * time.Second)
+	// fsnotify should wake this quickly, but keep enough budget for the
+	// fallback poll path in environments where file watching is unavailable.
+	body := waitForRecorderSubstring(t, rec, "second", 3*time.Second)
 	cancel()
 	<-done
 
-	body := rec.Body.String()
 	// Should have two SSE events: initial "first" and new "second".
 	if !strings.Contains(body, "first") {
 		t.Errorf("body should contain initial turn, got: %s", body)
