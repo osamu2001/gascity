@@ -590,6 +590,22 @@ func resolveDefaultMailTargetsForCommand(stderr io.Writer, cmdName string) (reso
 	return resolvedMailTarget{}, false
 }
 
+func resolveDefaultMailSenderForCommand(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer, cmdName string) (string, bool) {
+	candidates := defaultMailIdentityCandidates()
+	for _, c := range candidates {
+		sender, err := resolveMailIdentityWithConfig(cityPath, cfg, store, c)
+		if err == nil {
+			return sender, true
+		}
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			fmt.Fprintf(stderr, "%s: invalid sender %q: %v\n", cmdName, c, err) //nolint:errcheck // best-effort stderr
+			return "", false
+		}
+	}
+	fmt.Fprintf(stderr, "%s: no sender identity resolved (tried %v)\n", cmdName, candidates) //nolint:errcheck // best-effort stderr
+	return "", false
+}
+
 func resolveMailTargetFromArgs(args []string, stderr io.Writer, cmdName string) (resolvedMailTarget, bool) {
 	if len(args) > 0 {
 		return resolveMailTargetsForCommand(args[0], stderr, cmdName)
@@ -1214,9 +1230,8 @@ func cmdMailReply(args []string, subject, message string, notify bool, stdout, s
 				return 1
 			}
 			cfg, _ := loadCityConfig(cityPath)
-			resolved, err := resolveMailIdentityWithConfig(cityPath, cfg, store, sender)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc mail reply: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
+			resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc mail reply")
+			if !ok {
 				return 1
 			}
 			sender = resolved

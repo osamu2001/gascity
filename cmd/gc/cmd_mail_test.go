@@ -1132,6 +1132,54 @@ func TestMailReplyNotifyNudgeError(t *testing.T) {
 	}
 }
 
+func TestCmdMailReply_FallsBackToGCSessionIDWhenAliasMissing(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "",
+			"session_name": "codeprobe-worker-gc-1941",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	mp := beadmail.New(store)
+	if _, err := mp.Send("alice", sessionBead.ID, "Hello", "first"); err != nil {
+		t.Fatalf("mp.Send(): %v", err)
+	}
+
+	t.Setenv("GC_ALIAS", "codeprobe-worker-1")
+	t.Setenv("GC_SESSION_ID", "codeprobe-worker-gc-1941")
+	t.Setenv("GC_AGENT", "codeprobe-worker")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailReply([]string{"gc-2", "reply body"}, "", "", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Replied to gc-2") {
+		t.Fatalf("stdout = %q, want reply confirmation", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "to alice") {
+		t.Fatalf("stdout = %q, want reply addressed to alice", stdout.String())
+	}
+}
+
 // --- gc mail mark-read / mark-unread ---
 
 func TestMailMarkReadSuccess(t *testing.T) {
