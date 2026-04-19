@@ -207,7 +207,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			}
 			d.Register(doctor.NewRigPathCheck(rig))
 			d.Register(doctor.NewRigGitCheck(rig))
-			d.Register(doctor.NewRigBDSplitStoreCheck(rig))
+			d.Register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			d.Register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
 			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || os.Getenv("GC_DOLT") == "skip"))
 			// Custom types check — rig store.
