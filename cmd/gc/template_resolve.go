@@ -259,8 +259,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WorkDir:       workDir,
 		IssuePrefix:   findRigPrefix(rigName, p.rigs),
 		DefaultBranch: defaultBranchFor(workDir),
-		WorkQuery:     cfgAgent.EffectiveWorkQuery(),
-		SlingQuery:    cfgAgent.EffectiveSlingQuery(),
+		WorkQuery:     expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
+		SlingQuery:    expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		Env:           cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)

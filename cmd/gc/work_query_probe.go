@@ -123,7 +123,7 @@ func prefixedWorkQueryForProbeWithEnv(
 	// rig-specific metadata. Mirrors the scale_check expansion in
 	// build_desired_state.go; #793. Malformed templates are logged to
 	// stderr (when supplied) and fall back to the raw command.
-	command = expandProbeCommandTemplate(cityPath, cityName, agentCfg, cfg.Rigs, command, stderr)
+	command = expandAgentCommandTemplate(cityPath, cityName, agentCfg, cfg.Rigs, "work_query", command, stderr)
 	if command == "" || agentCfg.SupportsMultipleSessions() {
 		return prefixShellEnv(queryEnv, command)
 	}

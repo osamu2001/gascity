@@ -2505,8 +2505,8 @@ func TestBuildDesiredState_PoolBeadIdentityAgreesAcrossRealizeAndCanonicalHelper
 //
 // The scale_check grep-counts the expanded rig name. Literal "{{.Rig}}"
 // never matches the target rig name, so the broken (pre-fix) behavior
-// returns 0; the fixed behavior returns 1 for the rig whose name matches
-// and 0 for the other, proving per-rig substitution is happening.
+// returns 0; the fixed behavior returns 1 for both rig-specific commands,
+// proving per-rig substitution is happening on each branch.
 func TestBuildDesiredState_RigScopedScaleCheckExpandsRigTemplate(t *testing.T) {
 	cityPath := t.TempDir()
 	rigAlpha := filepath.Join(cityPath, "alpha")
@@ -2539,7 +2539,7 @@ func TestBuildDesiredState_RigScopedScaleCheckExpandsRigTemplate(t *testing.T) {
 				StartCommand:      "true",
 				MinActiveSessions: intPtr(0),
 				MaxActiveSessions: intPtr(5),
-				ScaleCheck:        "echo {{.Rig}} | grep -c alpha",
+				ScaleCheck:        "echo {{.Rig}} | grep -c beta",
 			},
 		},
 	}
@@ -2558,8 +2558,8 @@ func TestBuildDesiredState_RigScopedScaleCheckExpandsRigTemplate(t *testing.T) {
 	if !ok {
 		t.Fatalf("ScaleCheckCounts missing beta/ant; got %#v", dsResult.ScaleCheckCounts)
 	}
-	if betaCount != 0 {
-		t.Errorf("beta/ant scale_check count = %d, want 0 (expansion of {{.Rig}} -> beta makes grep miss 'alpha')", betaCount)
+	if betaCount != 1 {
+		t.Errorf("beta/ant scale_check count = %d, want 1 (expansion of {{.Rig}} -> beta makes grep match)", betaCount)
 	}
 }
 

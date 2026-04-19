@@ -1205,7 +1205,7 @@ func reconcileCities(
 
 		dops := newDrainOps(sp)
 		poolSessions := computePoolSessions(cfg, cityName, path, sp)
-		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, path, sp)
+		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, path, sp, stderr)
 		watchDirs := config.WatchDirs(prov, cfg, path)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
 		pokeCh := make(chan struct{}, 1)

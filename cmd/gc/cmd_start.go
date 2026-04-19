@@ -116,9 +116,10 @@ func computePoolSessions(cfg *config.City, cityName, _ string, sp runtime.Provid
 	return ps
 }
 
-// poolDeathInfo holds the on_death command and working directory for a pool instance.
+// poolDeathInfo holds the pre-expanded on_death command and working
+// directory for a pool instance.
 type poolDeathInfo struct {
-	Command string            // on_death shell command (pre-baked with instance QN)
+	Command string            // on_death shell command pre-expanded for the instance
 	Dir     string            // working directory for bd commands
 	Env     map[string]string // canonical runtime env for the agent scope
 }
@@ -126,7 +127,7 @@ type poolDeathInfo struct {
 // computePoolDeathHandlers builds a map from session name to death handler
 // for every pool instance (static for bounded pools, currently running for
 // unlimited). Used to detect and handle pool deaths.
-func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp runtime.Provider) map[string]poolDeathInfo {
+func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp runtime.Provider, stderr io.Writer) map[string]poolDeathInfo {
 	handlers := make(map[string]poolDeathInfo)
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
@@ -142,6 +143,7 @@ func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp ru
 			if cmd == "" {
 				continue
 			}
+			cmd = expandAgentCommandTemplate(cityPath, cityName, &instance, cfg.Rigs, "on_death", cmd, stderr)
 			dir := agentCommandDir(cityPath, &a, cfg.Rigs)
 			sn := startupSessionName(cityName, qualifiedInstance, st)
 			handlers[sn] = poolDeathInfo{Command: cmd, Dir: dir, Env: agentEnv}
@@ -563,7 +565,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	if controllerMode {
 		poolSessions := computePoolSessions(cfg, cityName, cityPath, sp)
-		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp)
+		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp, stderr)
 		watchDirs := config.WatchDirs(prov, cfg, cityPath)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
 		return runController(cityPath, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,

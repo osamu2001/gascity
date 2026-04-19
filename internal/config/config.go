@@ -1448,15 +1448,23 @@ type Agent struct {
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
 	// ScaleCheck is a shell command whose output determines desired session count.
 	// Optional override — when set, its output is the desired count (still clamped
-	// by all cap levels).
+	// by all cap levels). If it contains Go template placeholders, gc expands them
+	// using the same PathContext fields as work_dir (Agent, AgentBase, Rig,
+	// RigRoot, CityRoot, CityName) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".
 	DrainTimeout string `toml:"drain_timeout,omitempty" jsonschema:"default=5m"`
 	// OnBoot is a shell command run once at controller startup for this agent.
+	// If it contains Go template placeholders, gc expands them using work_dir's
+	// PathContext fields (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
+	// before running the command.
 	OnBoot string `toml:"on_boot,omitempty"`
 	// OnDeath is a shell command run when a session dies unexpectedly.
+	// If it contains Go template placeholders, gc expands them using work_dir's
+	// PathContext fields (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
+	// before running the command.
 	OnDeath string `toml:"on_death,omitempty"`
 	// Namepool is the path to a plain text file with one name per line.
 	// When set, sessions use names from the file as display aliases.
@@ -1466,6 +1474,10 @@ type Agent struct {
 	NamepoolNames []string `toml:"-"`
 	// WorkQuery is the shell command to find available work for this agent.
 	// Used by gc hook and available in prompt templates as {{.WorkQuery}}.
+	// If it contains Go template placeholders, gc expands them using work_dir's
+	// PathContext fields (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)
+	// before probe, hook, and prompt-context execution. Prompt templates
+	// receive the expanded command, not the raw template literal.
 	// If unset, Gas City uses a three-tier default query:
 	//   1. in_progress work assigned to this session/alias (crash recovery)
 	//   2. ready work assigned to this session/alias (pre-assigned work)
@@ -1475,9 +1487,15 @@ type Agent struct {
 	WorkQuery string `toml:"work_query,omitempty"`
 	// SlingQuery is the command template to route a bead to this session config.
 	// Used by gc sling to make a bead visible to the target's work_query.
-	// The placeholder {} is replaced with the bead ID at runtime.
+	// Custom sling_query values may also use work_dir's PathContext fields
+	// (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName); gc expands those
+	// first, then replaces {} with the bead ID at runtime. Prompt and dry-run
+	// surfaces receive the expanded command before bead-ID substitution.
 	// Default for all agents:
 	// "bd update {} --set-metadata gc.routed_to=<qualified-name>".
+	// Explicit pins of that default preserve the built-in metadata-routing and
+	// idempotency fast path. bd-based custom commands with additional side
+	// effects are treated as custom and rerun when invoked.
 	// Routing is metadata-based; sling stamps the target template and the
 	// reconciler/scale_check paths decide when sessions are created.
 	// Custom sling_query and work_query can be overridden independently.
@@ -1761,6 +1779,13 @@ func (a *Agent) EffectiveSlingQuery() string {
 	if a.SlingQuery != "" {
 		return a.SlingQuery
 	}
+	return a.DefaultSlingQuery()
+}
+
+// DefaultSlingQuery returns the built-in metadata-routing sling query for
+// this agent. Callers outside config should prefer this helper over rebuilding
+// the command string to preserve the bd boundary invariant.
+func (a *Agent) DefaultSlingQuery() string {
 	return "bd update {} --set-metadata gc.routed_to=" + a.QualifiedName()
 }
 

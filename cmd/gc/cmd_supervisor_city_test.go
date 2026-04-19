@@ -1050,7 +1050,7 @@ func TestStartupSessionComputationsDoNotQueryBeadStore(t *testing.T) {
 	sp := runtime.NewFake()
 	suspended := computeSuspendedNames(&cfg, "bright-lights", "/fake/city")
 	poolSessions := computePoolSessions(&cfg, "bright-lights", "/fake/city", sp)
-	poolDeathHandlers := computePoolDeathHandlers(&cfg, "bright-lights", "/fake/city", sp)
+	poolDeathHandlers := computePoolDeathHandlers(&cfg, "bright-lights", "/fake/city", sp, nil)
 	idleTracker := buildIdleTracker(&cfg, "bright-lights", "/fake/city", sp)
 
 	if len(suspended) == 0 {

@@ -1067,7 +1067,7 @@ func TestCityRuntimeTickRunsOnDeathWithCanonicalRigEnv(t *testing.T) {
 		MaxActiveSessions: intPtr(2),
 	}
 
-	handlers := computePoolDeathHandlers(cfg, "my-city", cityPath, runtime.NewFake())
+	handlers := computePoolDeathHandlers(cfg, "my-city", cityPath, runtime.NewFake(), nil)
 	if len(handlers) == 0 {
 		t.Fatal("computePoolDeathHandlers returned no handlers")
 	}

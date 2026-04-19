@@ -321,9 +321,9 @@ func TestBuildSlingCommand(t *testing.T) {
 		{"custom {} script {}", "ID-1", "custom 'ID-1' script 'ID-1'"},
 	}
 	for _, tt := range tests {
-		got := buildSlingCommand(tt.template, tt.beadID)
+		got := sling.BuildSlingCommand(tt.template, tt.beadID)
 		if got != tt.want {
-			t.Errorf("buildSlingCommand(%q, %q) = %q, want %q", tt.template, tt.beadID, got, tt.want)
+			t.Errorf("BuildSlingCommand(%q, %q) = %q, want %q", tt.template, tt.beadID, got, tt.want)
 		}
 	}
 }
@@ -343,6 +343,38 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("got %d runner calls, want 0 for built-in routing: %v", len(runner.calls), runner.calls)
+	}
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if bead.Metadata["gc.routed_to"] != "mayor" {
+		t.Errorf("gc.routed_to = %q, want mayor", bead.Metadata["gc.routed_to"])
+	}
+	if !strings.Contains(stdout.String(), "Slung BL-42") {
+		t.Errorf("stdout = %q, want to contain 'Slung BL-42'", stdout.String())
+	}
+}
+
+func TestDoSlingPinnedDefaultSlingQueryUsesBuiltInRouting(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{
+		Name:              "mayor",
+		MaxActiveSessions: intPtr(1),
+		SlingQuery:        "bd update {} --set-metadata gc.routed_to=mayor",
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("got %d runner calls, want 0 for pinned default sling_query: %v", len(runner.calls), runner.calls)
 	}
 	bead, err := deps.Store.Get("BL-42")
 	if err != nil {
@@ -813,6 +845,36 @@ func TestDoSlingCustomSlingQuery(t *testing.T) {
 		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	want := "custom-dispatch 'BL-99' --queue=priority"
+	if runner.calls[0] != want {
+		t.Errorf("runner call = %q, want %q", runner.calls[0], want)
+	}
+}
+
+func TestDoSlingCustomSlingQueryExpandsTemplateContext(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	rigPath := filepath.Join(cityPath, "frontend")
+	a := config.Agent{
+		Name:       "worker",
+		Dir:        "frontend",
+		SlingQuery: "custom-dispatch {} --route={{.Rig}}/{{.AgentBase}} --city={{.CityName}}",
+	}
+	cfg := &config.City{
+		Rigs:   []config.Rig{{Name: "frontend", Path: rigPath}},
+		Agents: []config.Agent{a},
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.CityPath = cityPath
+	deps.CityName = ""
+	opts := testOpts(a, "FR-99")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	want := "custom-dispatch 'FR-99' --route=frontend/worker --city=demo-city"
 	if runner.calls[0] != want {
 		t.Errorf("runner call = %q, want %q", runner.calls[0], want)
 	}
@@ -3002,6 +3064,34 @@ func TestDryRunSingleBead(t *testing.T) {
 	// Zero mutations.
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0 (dry-run): %v", len(runner.calls), runner.calls)
+	}
+}
+
+func TestDryRunSingleBeadExpandsSlingQuerySummary(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "frontend", Path: "/city/frontend"}},
+	}
+	a := config.Agent{
+		Name:       "worker",
+		Dir:        "frontend",
+		SlingQuery: "custom-dispatch {} --route={{.Rig}}/{{.AgentBase}} --city={{.CityName}}",
+	}
+	q := &fakeQuerier{bead: beads.Bead{ID: "FR-42", Title: "Implement login page", Type: "task", Status: "open"}}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "FR-42")
+	opts.DryRun = true
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Sling query: custom-dispatch {} --route=frontend/worker --city=test-city") {
+		t.Fatalf("stdout missing expanded sling query: %s", out)
 	}
 }
 

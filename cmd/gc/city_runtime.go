@@ -623,7 +623,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 
 	cr.poolSessions = computePoolSessions(nextCfg, cr.cityName, cr.cityPath, nextSp)
-	cr.poolDeathHandlers = computePoolDeathHandlers(nextCfg, cr.cityName, cityRoot, nextSp)
+	cr.poolDeathHandlers = computePoolDeathHandlers(nextCfg, cr.cityName, cityRoot, nextSp, cr.stderr)
 	cr.suspendedNames = computeSuspendedNames(nextCfg, cr.cityName, cr.cityPath)
 
 	// Rebuild crash tracker if config values changed, otherwise clear all

@@ -19,7 +19,6 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -343,6 +342,7 @@ func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars 
 			}
 			return out, nil
 		},
+		Stderr: stderr,
 	}
 
 	return doSlingBatch(opts, deps, store, stdout, stderr)
@@ -462,7 +462,7 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 			if r.deps.Runner == nil {
 				return fmt.Errorf("custom sling_query requires a runner")
 			}
-			slingCmd := buildSlingCommand(agentCfg.EffectiveSlingQuery(), req.BeadID)
+			slingCmd := sling.BuildSlingCommandForAgent("sling_query", agentCfg.EffectiveSlingQuery(), req.BeadID, r.deps.CityPath, r.deps.CityName, agentCfg, r.deps.Cfg.Rigs, r.deps.Stderr)
 			_, err := r.deps.Runner(req.WorkDir, slingCmd, req.Env)
 			return err
 		}
@@ -882,11 +882,6 @@ func slingFormulaUsesTargetBranch(formula string) bool {
 // the bead store and returns it as GC_SLING_TARGET. Default routing uses
 // gc.routed_to metadata for all agents, but custom sling_query templates may
 // still rely on the resolved concrete session target.
-// buildSlingCommand replaces {} in the sling query template with the bead ID.
-// The bead ID is shell-quoted to prevent command injection.
-func buildSlingCommand(template, beadID string) string {
-	return strings.ReplaceAll(template, "{}", shellquote.Quote(beadID))
-}
 
 // formatBeadLabel formats a bead ID with optional title for display.
 func formatBeadLabel(id, title string) string {
@@ -1387,7 +1382,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 	w("")
 
 	// Target section.
-	printTarget(w, a)
+	printTarget(w, a, deps.CityPath, deps.CityName, deps.Cfg.Rigs, io.Discard)
 
 	// Formula mode.
 	if opts.IsFormula {
@@ -1405,7 +1400,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 		w("  This creates a wisp and returns its root bead ID.")
 		w("")
 
-		routeCmd := sling.BuildSlingCommand(a.EffectiveSlingQuery(), "<wisp-root>")
+		routeCmd := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), "<wisp-root>", deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, stderr)
 		w("Route command (not executed):")
 		w("  " + routeCmd)
 		w("  The wisp root bead (not the formula name) is routed to the agent.")
@@ -1466,7 +1461,7 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			w("")
 		}
 
-		routeCmd := sling.BuildSlingCommand(a.EffectiveSlingQuery(), opts.BeadOrFormula)
+		routeCmd := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), opts.BeadOrFormula, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, stderr)
 		w("Route command (not executed):")
 		w("  " + routeCmd)
 		if !sling.IsCustomSlingQuery(a) {
@@ -1501,7 +1496,7 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	w("")
 
 	// Target section.
-	printTarget(w, a)
+	printTarget(w, a, deps.CityPath, deps.CityName, deps.Cfg.Rigs, io.Discard)
 
 	// Work section — container.
 	w("Work:")
@@ -1558,7 +1553,7 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	// Route commands.
 	w("Route commands (not executed):")
 	for _, c := range open {
-		routeCmd := sling.BuildSlingCommand(a.EffectiveSlingQuery(), c.ID)
+		routeCmd := sling.BuildSlingCommandForAgent("sling_query", a.EffectiveSlingQuery(), c.ID, deps.CityPath, deps.CityName, a, deps.Cfg.Rigs, io.Discard)
 		w("  " + routeCmd)
 	}
 	w("")
@@ -1573,7 +1568,7 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 }
 
 // printTarget prints the Target section for dry-run output.
-func printTarget(w func(string), a config.Agent) {
+func printTarget(w func(string), a config.Agent, cityPath, cityName string, rigs []config.Rig, stderr io.Writer) {
 	w("Target:")
 	if a.SupportsInstanceExpansion() {
 		sp := scaleParamsFor(&a)
@@ -1585,7 +1580,7 @@ func printTarget(w func(string), a config.Agent) {
 	} else {
 		w("  Agent:       " + a.QualifiedName() + " (non-expanding template)")
 	}
-	sq := a.EffectiveSlingQuery()
+	sq := expandAgentCommandTemplate(cityPath, cityName, &a, rigs, "sling_query", a.EffectiveSlingQuery(), stderr)
 	w("  Sling query: " + sq)
 	if !isCustomSlingQuery(a) {
 		if a.SupportsInstanceExpansion() {
@@ -1647,7 +1642,7 @@ func printNudgePreview(w func(string), a config.Agent, cityName string,
 // isCustomSlingQuery returns true if the agent has a user-defined sling_query
 // (not the auto-generated default).
 func isCustomSlingQuery(a config.Agent) bool {
-	return a.SlingQuery != ""
+	return sling.IsCustomSlingQuery(a)
 }
 
 // looksLikeBeadID reports whether s matches the bead ID pattern: an
