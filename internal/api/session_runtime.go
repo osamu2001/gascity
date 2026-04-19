@@ -125,6 +125,26 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config) 
 	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir)
 }
 
+func (s *Server) resolveWorkerSessionRuntime(info session.Info, _ string) (*worker.ResolvedRuntime, error) {
+	resolved, workDir := s.resolveSessionRuntime(info)
+	if resolved == nil {
+		return nil, nil
+	}
+	return &worker.ResolvedRuntime{
+		Command:    firstNonEmptyString(resolved.CommandString(), info.Command),
+		WorkDir:    firstNonEmptyString(workDir, info.WorkDir),
+		Provider:   firstNonEmptyString(resolved.Name, info.Provider),
+		SessionEnv: resolved.Env,
+		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir)),
+		Resume: session.ProviderResume{
+			ResumeFlag:    resolved.ResumeFlag,
+			ResumeStyle:   resolved.ResumeStyle,
+			ResumeCommand: resolved.ResumeCommand,
+			SessionIDFlag: resolved.SessionIDFlag,
+		},
+	}, nil
+}
+
 func (s *Server) resolveSessionRuntime(info session.Info) (*config.ResolvedProvider, string) {
 	kind := s.sessionKind(info.ID)
 	if kind != "provider" {

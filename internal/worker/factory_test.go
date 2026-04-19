@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -115,7 +116,7 @@ func TestFactoryTranscriptMethodsUseConfiguredSearchPaths(t *testing.T) {
 	}
 }
 
-func TestFactorySessionByIDDecoratesSessionSpec(t *testing.T) {
+func TestFactorySessionByIDResolvesSessionRuntime(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	manager := sessionpkg.NewManager(store, sp)
@@ -145,17 +146,19 @@ func TestFactorySessionByIDDecoratesSessionSpec(t *testing.T) {
 	factory, err := NewFactory(FactoryConfig{
 		Store:    store,
 		Provider: sp,
-		DecorateSessionSpec: func(_ sessionpkg.Info, sessionKind string, spec *SessionSpec) {
+		ResolveSessionRuntime: func(_ sessionpkg.Info, sessionKind string) (*ResolvedRuntime, error) {
 			gotSessionKind = sessionKind
-			gotProfile = spec.Profile
-			spec.Command = "/bin/echo"
-			spec.Provider = "stub"
-			spec.Resume = sessionpkg.ProviderResume{SessionIDFlag: "--session-id"}
-			spec.Hints = runtime.Config{
-				ReadyPromptPrefix: "stub-ready>",
-				ReadyDelayMs:      250,
-			}
-			spec.Env = map[string]string{"STUB_ENV": "present"}
+			return &ResolvedRuntime{
+				Command:  "/bin/echo",
+				WorkDir:  t.TempDir(),
+				Provider: "stub",
+				Resume:   sessionpkg.ProviderResume{SessionIDFlag: "--session-id"},
+				Hints: runtime.Config{
+					ReadyPromptPrefix: "stub-ready>",
+					ReadyDelayMs:      250,
+				},
+				SessionEnv: map[string]string{"STUB_ENV": "present"},
+			}, nil
 		},
 	})
 	if err != nil {
@@ -166,6 +169,11 @@ func TestFactorySessionByIDDecoratesSessionSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SessionByID(%q): %v", info.ID, err)
 	}
+	sessionHandle, ok := handle.(*SessionHandle)
+	if !ok {
+		t.Fatalf("SessionByID(%q) returned %T, want *SessionHandle", info.ID, handle)
+	}
+	gotProfile = sessionHandle.session.Profile
 	if err := handle.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -192,6 +200,43 @@ func TestFactorySessionByIDDecoratesSessionSpec(t *testing.T) {
 	}
 	if got := start.Env["STUB_ENV"]; got != "present" {
 		t.Fatalf("Env[STUB_ENV] = %q, want present", got)
+	}
+}
+
+func TestFactorySessionByIDPropagatesResolvedRuntimeError(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	manager := sessionpkg.NewManager(store, sp)
+
+	info, err := manager.CreateBeadOnly(
+		"worker",
+		"Probe",
+		"",
+		t.TempDir(),
+		"legacy-provider",
+		"",
+		nil,
+		sessionpkg.ProviderResume{SessionIDFlag: "--stale-session-id"},
+	)
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+
+	wantErr := errors.New("resolve runtime boom")
+	factory, err := NewFactory(FactoryConfig{
+		Store:    store,
+		Provider: sp,
+		ResolveSessionRuntime: func(sessionpkg.Info, string) (*ResolvedRuntime, error) {
+			return nil, wantErr
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	_, err = factory.SessionByID(info.ID)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("SessionByID(%q) error = %v, want %v", info.ID, err, wantErr)
 	}
 }
 

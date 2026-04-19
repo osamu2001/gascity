@@ -9,29 +9,29 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// SessionSpecDecorator enriches a session-backed worker spec with caller-owned
-// resolution logic such as provider defaults or runtime hints.
-type SessionSpecDecorator func(info sessionpkg.Info, sessionKind string, spec *SessionSpec)
+// SessionRuntimeResolver resolves provider/runtime details for an existing
+// session-backed worker without exposing SessionSpec mutation to callers.
+type SessionRuntimeResolver func(info sessionpkg.Info, sessionKind string) (*ResolvedRuntime, error)
 
 // FactoryConfig constructs worker-owned session handles and catalogs without
 // leaking session.Manager setup into higher layers.
 type FactoryConfig struct {
-	Store               beads.Store
-	Provider            runtime.Provider
-	CityPath            string
-	SearchPaths         []string
-	ResolveTransport    func(template string) string
-	DecorateSessionSpec SessionSpecDecorator
+	Store                 beads.Store
+	Provider              runtime.Provider
+	CityPath              string
+	SearchPaths           []string
+	ResolveTransport      func(template string) string
+	ResolveSessionRuntime SessionRuntimeResolver
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
 // the API server and gc CLI.
 type Factory struct {
-	manager             *sessionpkg.Manager
-	store               beads.Store
-	provider            runtime.Provider
-	searchPaths         []string
-	decorateSessionSpec SessionSpecDecorator
+	manager               *sessionpkg.Manager
+	store                 beads.Store
+	provider              runtime.Provider
+	searchPaths           []string
+	resolveSessionRuntime SessionRuntimeResolver
 }
 
 // NewFactory constructs a Factory backed by a session.Manager configured for
@@ -46,7 +46,7 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	default:
 		manager = sessionpkg.NewManager(cfg.Store, cfg.Provider)
 	}
-	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.DecorateSessionSpec)
+	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.ResolveSessionRuntime)
 }
 
 // NewFactoryFromManager wraps an already-constructed session manager behind the
@@ -55,16 +55,16 @@ func NewFactoryFromManager(manager *sessionpkg.Manager, searchPaths []string) (*
 	return newFactory(manager, nil, nil, searchPaths, nil)
 }
 
-func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime.Provider, searchPaths []string, decorate SessionSpecDecorator) (*Factory, error) {
+func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime.Provider, searchPaths []string, resolveRuntime SessionRuntimeResolver) (*Factory, error) {
 	if manager == nil {
 		return nil, fmt.Errorf("%w: manager is required", ErrHandleConfig)
 	}
 	return &Factory{
-		manager:             manager,
-		store:               store,
-		provider:            provider,
-		searchPaths:         append([]string(nil), searchPaths...),
-		decorateSessionSpec: decorate,
+		manager:               manager,
+		store:                 store,
+		provider:              provider,
+		searchPaths:           append([]string(nil), searchPaths...),
+		resolveSessionRuntime: resolveRuntime,
 	}, nil
 }
 
@@ -85,7 +85,7 @@ func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 }
 
 // SessionByID rebuilds a session-backed worker handle from persisted session
-// metadata and the factory's optional spec decorator.
+// metadata and the factory's optional resolved-runtime hook.
 func (f *Factory) SessionByID(id string) (Handle, error) {
 	info, err := f.manager.Get(id)
 	if err != nil {
@@ -112,8 +112,12 @@ func (f *Factory) SessionByID(id string) (Handle, error) {
 			}
 		}
 	}
-	if f.decorateSessionSpec != nil {
-		f.decorateSessionSpec(info, sessionKind, &spec)
+	if f.resolveSessionRuntime != nil {
+		resolved, err := f.resolveSessionRuntime(info, sessionKind)
+		if err != nil {
+			return nil, err
+		}
+		applyResolvedRuntimeToSessionSpec(&spec, resolved)
 	}
 	return f.Session(spec)
 }

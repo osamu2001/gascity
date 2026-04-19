@@ -75,6 +75,29 @@ func SessionSpecForResolvedRuntime(cfg ResolvedSessionConfig) (SessionSpec, erro
 	}, nil
 }
 
+func applyResolvedRuntimeToSessionSpec(spec *SessionSpec, runtime *ResolvedRuntime) {
+	if spec == nil || runtime == nil {
+		return
+	}
+
+	if command := strings.TrimSpace(runtime.Command); command != "" {
+		spec.Command = command
+	}
+	if provider := strings.TrimSpace(runtime.Provider); provider != "" {
+		spec.Provider = provider
+	}
+	if workDir := strings.TrimSpace(runtime.WorkDir); workDir != "" {
+		spec.WorkDir = workDir
+	}
+
+	spec.Env = cloneStringMap(runtime.SessionEnv)
+	spec.Resume = runtime.Resume
+	spec.Hints = cloneRuntimeConfig(runtime.Hints)
+	if strings.TrimSpace(spec.Hints.WorkDir) == "" {
+		spec.Hints.WorkDir = strings.TrimSpace(spec.WorkDir)
+	}
+}
+
 // SessionForResolvedRuntime constructs a session-backed handle from caller-
 // resolved runtime inputs without forcing the caller to rebuild SessionSpec.
 func (f *Factory) SessionForResolvedRuntime(cfg ResolvedSessionConfig) (Handle, error) {

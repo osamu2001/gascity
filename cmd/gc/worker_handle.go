@@ -40,21 +40,21 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
 	return worker.NewFactory(worker.FactoryConfig{
-		Store:               store,
-		Provider:            sp,
-		CityPath:            cityPath,
-		SearchPaths:         searchPaths,
-		ResolveTransport:    resolveTransport,
-		DecorateSessionSpec: workerSessionSpecDecoratorWithConfig(cityPath, cfg),
+		Store:                 store,
+		Provider:              sp,
+		CityPath:              cityPath,
+		SearchPaths:           searchPaths,
+		ResolveTransport:      resolveTransport,
+		ResolveSessionRuntime: workerSessionRuntimeResolverWithConfig(cityPath, cfg),
 	})
 }
 
-func workerSessionSpecDecoratorWithConfig(cityPath string, cfg *config.City) worker.SessionSpecDecorator {
+func workerSessionRuntimeResolverWithConfig(cityPath string, cfg *config.City) worker.SessionRuntimeResolver {
 	if cfg == nil {
 		return nil
 	}
-	return func(info session.Info, sessionKind string, spec *worker.SessionSpec) {
-		applyResolvedWorkerRuntimeWithConfig(cityPath, cfg, info, sessionKind, spec)
+	return func(info session.Info, sessionKind string) (*worker.ResolvedRuntime, error) {
+		return resolvedWorkerRuntimeWithConfig(cityPath, cfg, info, sessionKind), nil
 	}
 }
 
@@ -262,13 +262,13 @@ func workerRespondSessionTargetWithConfig(cityPath string, store beads.Store, sp
 	return handle.Respond(context.Background(), response)
 }
 
-func applyResolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info session.Info, sessionKind string, spec *worker.SessionSpec) {
-	if cfg == nil || spec == nil {
-		return
+func resolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info session.Info, sessionKind string) *worker.ResolvedRuntime {
+	if cfg == nil {
+		return nil
 	}
 	resolved := resolveWorkerRuntimeWithConfig(cfg, info, sessionKind)
 	if resolved == nil {
-		return
+		return nil
 	}
 
 	command := resolved.CommandString()
@@ -279,24 +279,28 @@ func applyResolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, inf
 		command = command + " " + sa
 	}
 
-	spec.Command = command
-	spec.Provider = resolved.Name
-	if strings.TrimSpace(spec.WorkDir) == "" {
-		spec.WorkDir = cityPath
+	workDir := strings.TrimSpace(info.WorkDir)
+	if workDir == "" {
+		workDir = cityPath
 	}
-	spec.Hints = runtime.Config{
-		WorkDir:                spec.WorkDir,
-		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-		ReadyDelayMs:           resolved.ReadyDelayMs,
-		ProcessNames:           resolved.ProcessNames,
-		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		Env:                    resolved.Env,
-	}
-	spec.Resume = session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
+	return &worker.ResolvedRuntime{
+		Command:    command,
+		WorkDir:    workDir,
+		Provider:   resolved.Name,
+		SessionEnv: resolved.Env,
+		Hints: runtime.Config{
+			WorkDir:                workDir,
+			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
+			ReadyDelayMs:           resolved.ReadyDelayMs,
+			ProcessNames:           resolved.ProcessNames,
+			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
+		},
+		Resume: session.ProviderResume{
+			ResumeFlag:    resolved.ResumeFlag,
+			ResumeStyle:   resolved.ResumeStyle,
+			ResumeCommand: resolved.ResumeCommand,
+			SessionIDFlag: resolved.SessionIDFlag,
+		},
 	}
 }
 

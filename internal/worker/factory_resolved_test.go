@@ -82,6 +82,26 @@ func TestSessionSpecForResolvedRuntimeDerivesProviderAndCopiesFields(t *testing.
 	}
 }
 
+func TestSessionSpecForResolvedRuntimeUsesHintsWorkDirFallback(t *testing.T) {
+	spec, err := SessionSpecForResolvedRuntime(ResolvedSessionConfig{
+		Runtime: ResolvedRuntime{
+			Command: "/bin/echo",
+			Hints: runtime.Config{
+				WorkDir: "/tmp/hints-workdir",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SessionSpecForResolvedRuntime: %v", err)
+	}
+	if spec.WorkDir != "/tmp/hints-workdir" {
+		t.Fatalf("WorkDir = %q, want /tmp/hints-workdir", spec.WorkDir)
+	}
+	if spec.Hints.WorkDir != "/tmp/hints-workdir" {
+		t.Fatalf("Hints.WorkDir = %q, want /tmp/hints-workdir", spec.Hints.WorkDir)
+	}
+}
+
 func TestFactorySessionForResolvedRuntimeStartsResolvedSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -137,5 +157,46 @@ func TestFactorySessionForResolvedRuntimeStartsResolvedSession(t *testing.T) {
 	}
 	if got := start.Env["STUB_ENV"]; got != "present" {
 		t.Fatalf("Env[STUB_ENV] = %q, want present", got)
+	}
+}
+
+func TestFactorySessionForResolvedRuntimeCreatesDeferredSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+
+	factory, err := NewFactory(FactoryConfig{
+		Store:    store,
+		Provider: sp,
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	handle, err := factory.SessionForResolvedRuntime(ResolvedSessionConfig{
+		Alias:    "worker",
+		Template: "probe",
+		Title:    "Probe",
+		Runtime: ResolvedRuntime{
+			Command:  "/bin/echo",
+			WorkDir:  t.TempDir(),
+			Provider: "stub",
+			Resume: sessionpkg.ProviderResume{
+				SessionIDFlag: "--session-id",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SessionForResolvedRuntime: %v", err)
+	}
+
+	info, err := handle.Create(context.Background(), CreateModeDeferred)
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if info.ID == "" {
+		t.Fatal("Create(deferred) returned empty session ID")
+	}
+	if len(sp.Calls) != 0 {
+		t.Fatalf("runtime calls = %#v, want none for deferred create", sp.Calls)
 	}
 }
