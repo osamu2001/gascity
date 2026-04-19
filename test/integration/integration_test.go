@@ -1132,16 +1132,28 @@ func TestRenderE2ETomlPlainAgentUsesNamedSessionWithoutSingletonCap(t *testing.T
 	}
 }
 
-func TestUpdateE2EAgentInCityTomlPreservesNamedSessions(t *testing.T) {
+func TestRewriteE2ETomlPreservingNamedSessionsRestoresInlineAgent(t *testing.T) {
 	cityDir := t.TempDir()
-	writeE2EToml(t, cityDir, e2eCity{
-		Workspace: e2eWorkspace{Name: "test-city"},
-		Agents:    []e2eAgent{{Name: "worker", StartCommand: "VERSION=v1 sleep 3600"}},
-	})
+	initial := `[workspace]
+name = "test-city"
 
-	updateE2EAgentInCityToml(t, cityDir, "worker", func(agent *config.Agent) {
-		agent.StartCommand = "VERSION=v2 sleep 3600"
-		agent.OverlayDir = "overlays/test"
+[beads]
+provider = "file"
+
+[[named_session]]
+template = "worker"
+mode = "always"
+
+[[named_session]]
+template = "control-dispatcher"
+mode = "always"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(initial), 0o644); err != nil {
+		t.Fatalf("writing city.toml: %v", err)
+	}
+
+	rewriteE2ETomlPreservingNamedSessions(t, cityDir, e2eCity{
+		Agents: []e2eAgent{{Name: "worker", StartCommand: "VERSION=v2 sleep 3600"}},
 	})
 
 	data, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
@@ -1152,17 +1164,20 @@ func TestUpdateE2EAgentInCityTomlPreservesNamedSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsing city.toml: %v", err)
 	}
-	if len(cfg.NamedSessions) != 1 {
-		t.Fatalf("len(NamedSessions) = %d, want 1\n%s", len(cfg.NamedSessions), data)
+	if cfg.Workspace.Name != "test-city" {
+		t.Fatalf("Workspace.Name = %q, want test-city", cfg.Workspace.Name)
 	}
-	if got := strings.Count(string(data), "[[named_session]]"); got != 1 {
-		t.Fatalf("named_session blocks = %d, want 1\n%s", got, data)
+	if len(cfg.Agents) != 1 || cfg.Agents[0].Name != "worker" {
+		t.Fatalf("Agents = %+v, want restored worker", cfg.Agents)
 	}
 	if got := cfg.Agents[0].StartCommand; got != "VERSION=v2 sleep 3600" {
 		t.Fatalf("StartCommand = %q, want updated command", got)
 	}
-	if got := cfg.Agents[0].OverlayDir; got != "overlays/test" {
-		t.Fatalf("OverlayDir = %q, want overlays/test", got)
+	if len(cfg.NamedSessions) != 2 {
+		t.Fatalf("len(NamedSessions) = %d, want 2\n%s", len(cfg.NamedSessions), data)
+	}
+	if got := strings.Count(string(data), "[[named_session]]"); got != 2 {
+		t.Fatalf("named_session blocks = %d, want 2\n%s", got, data)
 	}
 }
 

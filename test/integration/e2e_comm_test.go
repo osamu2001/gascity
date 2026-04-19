@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/config"
 )
 
 // TestE2E_Drain_SetAndCheck verifies that gc runtime drain sets the GC_DRAIN
@@ -208,9 +206,8 @@ func TestE2E_ConfigDrift(t *testing.T) {
 	// Change config by mutating the fingerprinted start_command. Custom env
 	// keys are intentionally ignored by the runtime fingerprint, so changing
 	// Env alone should not imply restart.
-	updateE2EAgentInCityToml(t, cityDir, "drifter", func(agent *config.Agent) {
-		agent.StartCommand = "CUSTOM_VERSION=v2 " + e2eReportScript()
-	})
+	city.Agents[0].StartCommand = "CUSTOM_VERSION=v2 " + e2eReportScript()
+	rewriteE2ETomlPreservingNamedSessions(t, cityDir, city)
 
 	// Remove old report so we can detect a new one.
 	reportPath := strings.ReplaceAll("drifter", "/", "__")

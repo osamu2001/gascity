@@ -275,30 +275,55 @@ func writeE2ETomlFile(t *testing.T, tomlPath string, city e2eCity) {
 	writeFileAtomic(t, tomlPath, []byte(renderE2EToml(city)))
 }
 
-func updateE2EAgentInCityToml(t *testing.T, cityDir, agentName string, update func(*config.Agent)) {
+func rewriteE2ETomlPreservingNamedSessions(t *testing.T, cityDir string, city e2eCity) {
 	t.Helper()
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	data, err := os.ReadFile(tomlPath)
 	if err != nil {
 		t.Fatalf("reading city.toml: %v", err)
 	}
-	cfg, err := config.Parse(data)
+	current, err := config.Parse(data)
 	if err != nil {
 		t.Fatalf("parsing city.toml: %v", err)
 	}
-	for i := range cfg.Agents {
-		if cfg.Agents[i].Name != agentName {
+	if strings.TrimSpace(city.Workspace.Name) == "" {
+		city.Workspace.Name = current.Workspace.Name
+	}
+	if strings.TrimSpace(city.Workspace.Name) == "" {
+		city.Workspace.Name = filepath.Base(cityDir)
+	}
+	nextCfg, err := config.Parse([]byte(renderE2EToml(city)))
+	if err != nil {
+		t.Fatalf("parsing rendered city.toml: %v", err)
+	}
+	nextCfg.NamedSessions = mergeNamedSessions(current.NamedSessions, nextCfg.NamedSessions)
+	next, err := nextCfg.Marshal()
+	if err != nil {
+		t.Fatalf("marshaling city.toml: %v", err)
+	}
+	writeFileAtomic(t, tomlPath, next)
+}
+
+func mergeNamedSessions(existing, desired []config.NamedSession) []config.NamedSession {
+	merged := make([]config.NamedSession, 0, len(existing)+len(desired))
+	seen := make(map[string]bool, len(existing)+len(desired))
+	for _, ns := range existing {
+		key := ns.QualifiedName()
+		if seen[key] {
 			continue
 		}
-		update(&cfg.Agents[i])
-		next, err := cfg.Marshal()
-		if err != nil {
-			t.Fatalf("marshaling city.toml: %v", err)
-		}
-		writeFileAtomic(t, tomlPath, next)
-		return
+		seen[key] = true
+		merged = append(merged, ns)
 	}
-	t.Fatalf("agent %q not found in city.toml", agentName)
+	for _, ns := range desired {
+		key := ns.QualifiedName()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		merged = append(merged, ns)
+	}
+	return merged
 }
 
 func writeFileAtomic(t *testing.T, path string, data []byte) {
