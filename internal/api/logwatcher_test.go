@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 )
@@ -101,5 +102,46 @@ func TestLogFileWatcherPollingWithoutProgressStillFiresStall(t *testing.T) {
 	case <-stalls:
 	case <-time.After(time.Second):
 		t.Fatal("stall did not fire while fallback polling observed no progress")
+	}
+}
+
+func TestLogFileWatcherPollsWhileFsnotifyActive(t *testing.T) {
+	path := t.TempDir() + "/session.jsonl"
+	if err := os.WriteFile(path, []byte("initial\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	lw := newLogFileWatcher(path)
+	defer lw.Close()
+	if lw.watcher == nil {
+		t.Skip("fsnotify unavailable")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	emits := make(chan struct{}, 2)
+	go lw.Run(
+		ctx,
+		func() bool {
+			select {
+			case emits <- struct{}{}:
+			default:
+			}
+			return false
+		},
+		func() {},
+	)
+
+	select {
+	case <-emits:
+	case <-time.After(time.Second):
+		t.Fatal("initial readAndEmit did not run")
+	}
+
+	select {
+	case <-emits:
+	case <-time.After(outputStreamPollInterval + time.Second):
+		t.Fatal("active fsnotify watcher did not perform backup polling")
 	}
 }
