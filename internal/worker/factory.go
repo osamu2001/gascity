@@ -158,6 +158,7 @@ func (f *Factory) HandleForTarget(target string, processNames []string) (Handle,
 		SessionName:  target,
 		ProviderName: target,
 		ProcessNames: append([]string(nil), processNames...),
+		Recorder:     f.recorder,
 	})
 }
 

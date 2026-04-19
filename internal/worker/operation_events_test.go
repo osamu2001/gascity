@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 type recordingEventRecorder struct {
@@ -226,6 +227,78 @@ func TestSessionHandleCloseKeepsRuntimeSessionNameInWorkerOperationEvent(t *test
 	}
 	if got, want := payload.SessionName, info.SessionName; got != want {
 		t.Fatalf("payload.SessionName = %q, want %q", got, want)
+	}
+}
+
+func TestRuntimeHandleInterruptRecordsWorkerOperationEvent(t *testing.T) {
+	recorder := &recordingEventRecorder{}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "claude",
+		Transport:    "tmux-cli",
+		Recorder:     recorder,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	if err := handle.Interrupt(context.Background(), InterruptRequest{}); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+
+	var payload operationEventPayload
+	if err := json.Unmarshal(lastRecordedWorkerOperation(t, recorder).Payload, &payload); err != nil {
+		t.Fatalf("Unmarshal(payload): %v", err)
+	}
+	if got, want := payload.Operation, string(workerOperationInterrupt); got != want {
+		t.Fatalf("payload.Operation = %q, want %q", got, want)
+	}
+	if got, want := payload.Result, operationResultSucceeded; got != want {
+		t.Fatalf("payload.Result = %q, want %q", got, want)
+	}
+	if got, want := payload.SessionName, "legacy-worker"; got != want {
+		t.Fatalf("payload.SessionName = %q, want %q", got, want)
+	}
+	if got, want := payload.Provider, "claude"; got != want {
+		t.Fatalf("payload.Provider = %q, want %q", got, want)
+	}
+}
+
+func TestRuntimeHandleHistoryRecordsFailureEvent(t *testing.T) {
+	recorder := &recordingEventRecorder{}
+	sp := runtime.NewFake()
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "claude",
+		Transport:    "tmux-cli",
+		Recorder:     recorder,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	if _, err := handle.History(context.Background(), HistoryRequest{}); !errors.Is(err, ErrHistoryUnavailable) {
+		t.Fatalf("History err = %v, want %v", err, ErrHistoryUnavailable)
+	}
+
+	var payload operationEventPayload
+	if err := json.Unmarshal(lastRecordedWorkerOperation(t, recorder).Payload, &payload); err != nil {
+		t.Fatalf("Unmarshal(payload): %v", err)
+	}
+	if got, want := payload.Operation, string(workerOperationHistory); got != want {
+		t.Fatalf("payload.Operation = %q, want %q", got, want)
+	}
+	if got, want := payload.Result, operationResultFailed; got != want {
+		t.Fatalf("payload.Result = %q, want %q", got, want)
+	}
+	if payload.Error == "" {
+		t.Fatal("payload.Error is empty")
 	}
 }
 

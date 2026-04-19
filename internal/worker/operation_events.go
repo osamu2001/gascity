@@ -54,8 +54,14 @@ type operationEventPayload struct {
 	Error       string          `json:"error,omitempty"`
 }
 
+type operationEventTarget interface {
+	operationEventRecordingEnabled() bool
+	populateOperationEventIdentity(*operationEventPayload)
+	recordWorkerOperationEvent(operationEventPayload)
+}
+
 type operationEvent struct {
-	handle     *SessionHandle
+	target     operationEventTarget
 	payload    operationEventPayload
 	suppressed bool
 }
@@ -71,29 +77,32 @@ func WithoutOperationEvents(ctx context.Context) context.Context {
 	return context.WithValue(ctx, operationEventsSuppressedKey{}, true)
 }
 
-func (h *SessionHandle) beginOperationEvent(ctx context.Context, op workerOperation) *operationEvent {
-	if operationEventsSuppressed(ctx) || !h.operationEventRecordingEnabled() {
-		return &operationEvent{handle: h, suppressed: true}
+func newOperationEvent(ctx context.Context, target operationEventTarget, op workerOperation, provider, transport, template string) *operationEvent {
+	if operationEventsSuppressed(ctx) || target == nil || !target.operationEventRecordingEnabled() {
+		return &operationEvent{target: target, suppressed: true}
 	}
 	startedAt := time.Now().UTC()
 	payload := operationEventPayload{
 		OpID:      newWorkerOperationID(),
 		Operation: string(op),
-		Provider:  h.providerLabel(),
-		Transport: strings.TrimSpace(h.session.Transport),
-		Template:  strings.TrimSpace(h.session.Template),
+		Provider:  strings.TrimSpace(provider),
+		Transport: strings.TrimSpace(transport),
+		Template:  strings.TrimSpace(template),
 		StartedAt: startedAt,
 	}
-	h.populateOperationEventIdentity(&payload)
+	target.populateOperationEventIdentity(&payload)
 	return &operationEvent{
-		handle:     h,
-		payload:    payload,
-		suppressed: operationEventsSuppressed(ctx),
+		target:  target,
+		payload: payload,
 	}
 }
 
+func (h *SessionHandle) beginOperationEvent(ctx context.Context, op workerOperation) *operationEvent {
+	return newOperationEvent(ctx, h, op, h.providerLabel(), h.session.Transport, h.session.Template)
+}
+
 func (e *operationEvent) finish(err error) {
-	if e == nil || e.handle == nil || e.suppressed {
+	if e == nil || e.target == nil || e.suppressed {
 		return
 	}
 	e.payload.FinishedAt = time.Now().UTC()
@@ -104,8 +113,8 @@ func (e *operationEvent) finish(err error) {
 	} else {
 		e.payload.Result = operationResultSucceeded
 	}
-	e.handle.populateOperationEventIdentity(&e.payload)
-	e.handle.recordWorkerOperationEvent(e.payload)
+	e.target.populateOperationEventIdentity(&e.payload)
+	e.target.recordWorkerOperationEvent(e.payload)
 }
 
 func (h *SessionHandle) populateOperationEventIdentity(payload *operationEventPayload) {
@@ -162,23 +171,7 @@ func (h *SessionHandle) currentOperationSessionInfo() (sessionpkg.Info, bool) {
 }
 
 func (h *SessionHandle) recordWorkerOperationEvent(payload operationEventPayload) {
-	if h == nil || h.recorder == nil {
-		return
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
-	subject := payload.SessionID
-	if strings.TrimSpace(subject) == "" {
-		subject = payload.SessionName
-	}
-	h.recorder.Record(events.Event{
-		Type:    events.WorkerOperation,
-		Actor:   "worker",
-		Subject: subject,
-		Payload: raw,
-	})
+	recordOperationEvent(h.recorder, payload)
 }
 
 func operationEventsSuppressed(ctx context.Context) bool {
@@ -207,6 +200,26 @@ func (h *SessionHandle) operationEventFallbackSessionName() string {
 func boolPointer(v bool) *bool {
 	b := v
 	return &b
+}
+
+func recordOperationEvent(recorder events.Recorder, payload operationEventPayload) {
+	if recorder == nil {
+		return
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	subject := payload.SessionID
+	if strings.TrimSpace(subject) == "" {
+		subject = payload.SessionName
+	}
+	recorder.Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: subject,
+		Payload: raw,
+	})
 }
 
 func newWorkerOperationID() string {
