@@ -515,6 +515,12 @@ const (
 // sees the actual error.
 func checkHardDependencies(cityPath string) []missingDep {
 	beadsProvider := rawBeadsProvider(cityPath)
+	if cfg, err := loadCityConfig(cityPath); err == nil {
+		resolveRigPaths(cityPath, cfg.Rigs)
+		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
+			beadsProvider = "bd"
+		}
+	}
 	sessionProvider := effectiveSessionProviderForCity(cityPath)
 	deps := coreBinaryDependencies(sessionProvider, beadsProvider, coreBinaryDependencyOptions{
 		includePackManaged: true,

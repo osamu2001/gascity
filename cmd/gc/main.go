@@ -704,6 +704,10 @@ func openExistingScopeLocalFileStore(scopeRoot string) (*beads.FileStore, error)
 }
 
 func openCompatibleFileStore(scopeRoot, cityPath string) (*beads.FileStore, error) {
+	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
+	if !samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot) {
+		return openExistingScopeLocalFileStore(scopeRoot)
+	}
 	if fileStoreUsesScopedRoots(cityPath) {
 		return openExistingScopeLocalFileStore(scopeRoot)
 	}

@@ -62,7 +62,7 @@ func syncManagedDoltPortMirrors(cityPath string) error {
 		removeDoltPortFile(cityPath)
 		return nil
 	}
-	return syncConfiguredDoltPortFiles(cityPath, rawBeadsProvider(cityPath), cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs)
+	return syncConfiguredDoltPortFiles(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg), cfg.Rigs)
 }
 
 func publishManagedDoltRuntimeState(cityPath string) error {
