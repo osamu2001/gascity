@@ -199,11 +199,14 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 	worker.InteractionHandle
 }, initial *worker.HistorySnapshot, req worker.HistoryRequest,
 ) {
+	logPath := sessionStreamTranscriptPath(ctx, handle)
 	poll := time.NewTicker(outputStreamPollInterval)
-	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
-	defer keepalive.Stop()
 	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
+	if logPath == "" {
+		defer poll.Stop()
+		defer keepalive.Stop()
+	}
 
 	var lastSentID string
 	var seq uint64
@@ -309,6 +312,14 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 	}
 
 	emitSnapshot(initial)
+	if logPath != "" {
+		poll.Stop()
+		keepalive.Stop()
+		lw := newLogFileWatcher(logPath)
+		defer lw.Close()
+		lw.Run(ctx, reloadSnapshot, func() { writeSSEComment(w) }, RunOpts{Wake: workerOps})
+		return
+	}
 
 	for {
 		select {
@@ -329,11 +340,14 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 }
 
 func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.ResponseWriter, info session.Info, handle worker.HistoryHandle, initial *worker.HistorySnapshot) {
+	logPath := sessionStreamTranscriptPath(ctx, handle)
 	poll := time.NewTicker(outputStreamPollInterval)
-	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
-	defer keepalive.Stop()
 	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
+	if logPath == "" {
+		defer poll.Stop()
+		defer keepalive.Stop()
+	}
 
 	var lastSentID string
 	var seq uint64
@@ -405,6 +419,14 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 	}
 
 	emitSnapshot(initial)
+	if logPath != "" {
+		poll.Stop()
+		keepalive.Stop()
+		lw := newLogFileWatcher(logPath)
+		defer lw.Close()
+		lw.Run(ctx, reloadSnapshot, func() { writeSSEComment(w) }, RunOpts{Wake: workerOps})
+		return
+	}
 
 	for {
 		select {
@@ -608,4 +630,18 @@ func sessionMatchesWorkerOperationEvent(info session.Info, event events.Event) b
 		return false
 	}
 	return subject == strings.TrimSpace(info.ID) || subject == strings.TrimSpace(info.SessionName)
+}
+
+func sessionStreamTranscriptPath(ctx context.Context, handle any) string {
+	pathHandle, ok := handle.(interface {
+		TranscriptPath(context.Context) (string, error)
+	})
+	if !ok {
+		return ""
+	}
+	path, err := pathHandle.TranscriptPath(worker.WithoutOperationEvents(ctx))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(path)
 }

@@ -77,6 +77,10 @@ type RunOpts struct {
 	// Used to detect stuck sessions (e.g., waiting for tool approval).
 	OnStall      func()
 	StallTimeout time.Duration // defaults to 5s
+	// Wake triggers an immediate readAndEmit outside file-write or poll ticks.
+	// Used to fold external signals like worker operation events into the same
+	// stream loop without adding another ticker.
+	Wake <-chan struct{}
 }
 
 // Run executes the main event loop. It calls readAndEmit on file changes
@@ -90,11 +94,15 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeep
 	var stallC <-chan time.Time
 	var onStall func()
 	stallTimeout := 5 * time.Second
+	var wake <-chan struct{}
 	if len(opts) > 0 && opts[0].OnStall != nil {
 		onStall = opts[0].OnStall
 		if opts[0].StallTimeout > 0 {
 			stallTimeout = opts[0].StallTimeout
 		}
+	}
+	if len(opts) > 0 {
+		wake = opts[0].Wake
 	}
 	stallTicker := time.NewTicker(stallTimeout)
 	stallTicker.Stop() // start stopped — armed after first data
@@ -139,6 +147,12 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeep
 					return
 				}
 				lw.switchToPolling("watcher error: " + err.Error())
+			case _, ok := <-wake:
+				if !ok {
+					wake = nil
+					continue
+				}
+				readAndEmit()
 			case <-keepalive.C:
 				writeKeepalive()
 			case <-stallC:
@@ -151,6 +165,12 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeep
 			case <-lw.fallbackPoll.C:
 				readAndEmit()
 				dataArrived()
+			case _, ok := <-wake:
+				if !ok {
+					wake = nil
+					continue
+				}
+				readAndEmit()
 			case <-keepalive.C:
 				writeKeepalive()
 			case <-stallC:
