@@ -227,10 +227,23 @@ run_host_script() {
 }
 
 session_exists() {
-  if [ -z "$1" ]; then
+  local target="$1"
+  local session_name
+
+  if [ -z "$target" ]; then
     return 1
   fi
-  zmx list --short 2>/dev/null | grep -Fxq "$1"
+
+  # Avoid grep -q here: with pipefail enabled, an early match can SIGPIPE the
+  # upstream zmx list process and incorrectly report "not running" for valid
+  # sessions that appear before the final line.
+  while IFS= read -r session_name; do
+    if [ "$session_name" = "$target" ]; then
+      return 0
+    fi
+  done < <(list_running_names)
+
+  return 1
 }
 
 list_running_names() {
