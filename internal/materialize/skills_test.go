@@ -249,6 +249,73 @@ func TestLoadCityCatalogBootstrapMerge(t *testing.T) {
 	}
 }
 
+func TestLoadCityCatalogImportedPackSkills(t *testing.T) {
+	t.Setenv("GC_HOME", "")
+	cityPack := t.TempDir()
+	importedPack := t.TempDir()
+
+	cityDir := filepath.Join(cityPack, "skills")
+	importedDir := filepath.Join(importedPack, "skills")
+	mkSkill(t, cityDir, "city-only")
+	mkSkill(t, importedDir, "plan")
+
+	cat, err := LoadCityCatalog(cityDir, config.DiscoveredSkillCatalog{
+		SourceDir:   importedDir,
+		PackDir:     importedPack,
+		PackName:    "tools",
+		BindingName: "ops",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(map[string]string, len(cat.Entries))
+	for _, e := range cat.Entries {
+		got[e.Name] = e.Origin
+	}
+	want := map[string]string{
+		"city-only": "city",
+		"ops.plan":  "ops",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("entries: got %v, want %v", got, want)
+	}
+
+	if len(cat.OwnedRoots) != 2 {
+		t.Fatalf("owned roots = %v, want 2 roots", cat.OwnedRoots)
+	}
+}
+
+func TestLoadCityCatalogPreservesOwnedRootsOnReadError(t *testing.T) {
+	t.Setenv("GC_HOME", "")
+	pack := t.TempDir()
+	skillsDir := filepath.Join(pack, "skills")
+	mkSkill(t, skillsDir, "alpha")
+
+	if err := os.Chmod(skillsDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsDir, 0o755) })
+	if _, err := os.ReadDir(skillsDir); err == nil {
+		t.Skip("environment ignores chmod 000 (likely running as root)")
+	}
+
+	cat, err := LoadCityCatalog(skillsDir)
+	if err == nil {
+		t.Fatal("LoadCityCatalog should fail when skills dir is unreadable")
+	}
+	if len(cat.OwnedRoots) != 1 {
+		t.Fatalf("owned roots = %v, want 1 root preserved on error", cat.OwnedRoots)
+	}
+	wantRoot, absErr := filepath.Abs(skillsDir)
+	if absErr != nil {
+		t.Fatal(absErr)
+	}
+	if cat.OwnedRoots[0] != wantRoot {
+		t.Fatalf("owned root = %q, want %q", cat.OwnedRoots[0], wantRoot)
+	}
+}
+
 func TestLoadCityCatalogIgnoresUnknownImplicitImport(t *testing.T) {
 	requireBootstrapNames(t, "core")
 	gcHome := setupBootstrapHome(t, map[string][]string{

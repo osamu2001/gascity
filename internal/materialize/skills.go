@@ -153,11 +153,15 @@ type AgentCatalog struct {
 // cfg.PackSkillsDir from the loaded config). Pass "" if the city pack
 // has no skills/ subdirectory.
 //
+// imported catalogs are binding-qualified shared skills roots composed
+// from pack imports. Each catalog contributes `<binding>.<name>`
+// entries to the shared city catalog.
+//
 // Bootstrap implicit-import packs are read from
 // ~/.gc/implicit-import.toml via config.ReadImplicitImports. Each
 // pack's skills/ subdirectory is enumerated and added to the catalog.
 // City-pack entries win on name collision with bootstrap entries.
-func LoadCityCatalog(packSkillsDir string) (CityCatalog, error) {
+func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCatalog) (CityCatalog, error) {
 	var (
 		cat       CityCatalog
 		nameOwner = make(map[string]int) // name → index into cat.Entries
@@ -194,12 +198,34 @@ func LoadCityCatalog(packSkillsDir string) (CityCatalog, error) {
 
 	// City pack first — wins precedence over bootstrap entries.
 	if packSkillsDir != "" {
+		addRoot(packSkillsDir)
 		entries, err := readSkillDir(packSkillsDir, "city")
 		if err != nil {
-			return CityCatalog{}, fmt.Errorf("reading city pack skills %q: %w", packSkillsDir, err)
+			return cat, fmt.Errorf("reading city pack skills %q: %w", packSkillsDir, err)
 		}
-		addRoot(packSkillsDir)
 		for _, e := range entries {
+			addEntry(e)
+		}
+	}
+
+	for _, catalog := range imported {
+		origin := strings.TrimSpace(catalog.BindingName)
+		if origin == "" {
+			origin = strings.TrimSpace(catalog.PackName)
+		}
+		if origin == "" {
+			origin = "import"
+		}
+		addRoot(catalog.SourceDir)
+		entries, err := readSkillDir(catalog.SourceDir, origin)
+		if err != nil {
+			return cat, fmt.Errorf("reading imported pack %q skills %q: %w", origin, catalog.SourceDir, err)
+		}
+		for _, e := range entries {
+			if catalog.BindingName != "" {
+				e.Name = catalog.BindingName + "." + e.Name
+				e.Origin = catalog.BindingName
+			}
 			addEntry(e)
 		}
 	}
@@ -209,11 +235,11 @@ func LoadCityCatalog(packSkillsDir string) (CityCatalog, error) {
 		return CityCatalog{}, err
 	}
 	for _, bd := range bootstrapDirs {
+		addRoot(bd.Dir)
 		entries, err := readSkillDir(bd.Dir, bd.Name)
 		if err != nil {
-			return CityCatalog{}, fmt.Errorf("reading bootstrap pack %q skills %q: %w", bd.Name, bd.Dir, err)
+			return cat, fmt.Errorf("reading bootstrap pack %q skills %q: %w", bd.Name, bd.Dir, err)
 		}
-		addRoot(bd.Dir)
 		for _, e := range entries {
 			addEntry(e)
 		}
