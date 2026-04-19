@@ -893,12 +893,11 @@ func reconcileSessionBeadsTraced(
 			}
 		}
 		if poolFreeable && !hasAssignedWork {
-			// Close directly rather than via closeSessionBeadIfUnassigned: the
-			// live sessionHasOpenAssignedWork query above already established
-			// hasAssignedWork=false. Routing through closeSessionBeadIfUnassigned
-			// would re-consult ownershipWorkIndex (the stale pre-tick snapshot)
-			// and let it veto the close — exactly the behaviour the PR set out
-			// to kill in the drain-ack handler.
+			// Close directly rather than via closeSessionBeadIfUnassigned.
+			// That helper also runs a live sessionHasOpenAssignedWork query
+			// and would redundantly re-query a store we just hit — skip the
+			// duplicate I/O and pass through the preserved sleep_reason as
+			// the close_reason below.
 			//
 			// Preserve the original sleep_reason (idle / idle-timeout / drained)
 			// on the closed bead for forensic fidelity; fall back to "drained"

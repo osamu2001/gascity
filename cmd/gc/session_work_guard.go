@@ -3,29 +3,10 @@ package main
 import (
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
-
-func buildAssignedWorkIndex(workBeads []beads.Bead) map[string]bool {
-	if workBeads == nil {
-		return nil
-	}
-	index := make(map[string]bool, len(workBeads))
-	for _, wb := range workBeads {
-		if wb.Status != "open" && wb.Status != "in_progress" {
-			continue
-		}
-		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee == "" {
-			continue
-		}
-		index[assignee] = true
-	}
-	return index
-}
 
 // closeSessionBeadIfUnassigned closes a session bead only when the live
 // store confirms no open or in-progress work is assigned to it. Callers
@@ -34,6 +15,11 @@ func buildAssignedWorkIndex(workBeads []beads.Bead) map[string]bool {
 // taken earlier in the tick (see the PR that retired the snapshot-based
 // variant). Live-query failures fail closed: the bead stays open until
 // assignment can be re-verified.
+//
+// Scope: consults only the provided store. Cross-store assignment
+// (work in rig stores assigned to a city-stored session) is not
+// inspected here. Callers that need cross-store coverage must chain
+// queries per store themselves.
 func closeSessionBeadIfUnassigned(
 	store beads.Store,
 	session beads.Bead,

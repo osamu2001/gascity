@@ -118,20 +118,4 @@ func assigneePreservesNamedSessionRoute(cfg *config.City, template, assignee str
 	return namedSessionBackingTemplate(spec) == template
 }
 
-// sessionHasAssignedWork checks whether any work bead is assigned to this
-// session bead via any of its identifiers: bead ID, session name, or
-// named identity (alias).
-func sessionHasAssignedWork(sb beads.Bead, assigneeHasWork map[string]bool) bool {
-	if assigneeHasWork[sb.ID] {
-		return true
-	}
-	if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" && assigneeHasWork[sn] {
-		return true
-	}
-	if ni := strings.TrimSpace(sb.Metadata["configured_named_identity"]); ni != "" && assigneeHasWork[ni] {
-		return true
-	}
-	return false
-}
-
 func stringPtr(s string) *string { return &s }
