@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -583,54 +582,6 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 			writeSSEComment(w)
 		}
 	}
-}
-
-func (s *Server) watchSessionWorkerOperationSignals(ctx context.Context, info session.Info) <-chan struct{} {
-	if s == nil || s.state == nil {
-		return nil
-	}
-	ep := s.state.EventProvider()
-	if ep == nil {
-		return nil
-	}
-	afterSeq, err := ep.LatestSeq()
-	if err != nil {
-		return nil
-	}
-	watcher, err := ep.Watch(ctx, afterSeq)
-	if err != nil {
-		return nil
-	}
-	signals := make(chan struct{}, 1)
-	go func() {
-		defer close(signals)
-		defer watcher.Close() //nolint:errcheck // best-effort cleanup
-		for {
-			event, err := watcher.Next()
-			if err != nil {
-				return
-			}
-			if !sessionMatchesWorkerOperationEvent(info, event) {
-				continue
-			}
-			select {
-			case signals <- struct{}{}:
-			default:
-			}
-		}
-	}()
-	return signals
-}
-
-func sessionMatchesWorkerOperationEvent(info session.Info, event events.Event) bool {
-	if event.Type != events.WorkerOperation {
-		return false
-	}
-	subject := strings.TrimSpace(event.Subject)
-	if subject == "" {
-		return false
-	}
-	return subject == strings.TrimSpace(info.ID) || subject == strings.TrimSpace(info.SessionName)
 }
 
 func sessionStreamTranscriptPath(ctx context.Context, handle any) string {

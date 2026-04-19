@@ -304,18 +304,10 @@ const outputStreamPollInterval = 2 * time.Second
 // streamSessionLog polls a session log file and emits new turns as SSE events.
 // Uses file size tracking to skip re-reads when the file hasn't grown, and
 // UUID-based cursor to correctly identify new turns after DAG resolution.
-func (s *Server) streamSessionLog(ctx context.Context, send sse.Sender, name string, logPath string) {
+func (s *Server) streamSessionLog(ctx context.Context, send sse.Sender, name, provider, logPath string, wake <-chan struct{}) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
-
-	// Derive provider from agent config for session log parsing.
-	cfg := s.state.Config()
-	agentCfg, _ := findAgent(cfg, name)
-	provider := strings.TrimSpace(agentCfg.Provider)
-	if provider == "" && cfg != nil {
-		provider = strings.TrimSpace(cfg.Workspace.Provider)
-	}
 	lw := newLogFileWatcher(logPath)
 	defer lw.Close()
 
@@ -413,11 +405,12 @@ func (s *Server) streamSessionLog(ctx context.Context, send sse.Sender, name str
 
 	lw.Run(ctx, readAndEmit, func() {
 		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
-	})
+	}, RunOpts{Wake: wake})
 }
 
-// streamPeekOutput polls Peek() and emits changes as SSE events.
-func (s *Server) streamPeekOutput(ctx context.Context, send sse.Sender, name string, handle agentPeekHandle) {
+// streamPeekOutput polls Peek() through the worker boundary and emits changes
+// as SSE events.
+func (s *Server) streamPeekOutput(ctx context.Context, send sse.Sender, name string, handle agentPeekHandle, wake <-chan struct{}) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
@@ -460,6 +453,12 @@ func (s *Server) streamPeekOutput(ctx context.Context, send sse.Sender, name str
 		case <-ctx.Done():
 			return
 		case <-poll.C:
+			emitPeek()
+		case _, ok := <-wake:
+			if !ok {
+				wake = nil
+				continue
+			}
 			emitPeek()
 		case <-keepalive.C:
 			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})

@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // writeSessionJSONL creates a JSONL session file at the slug path for
@@ -411,5 +414,103 @@ func TestAgentOutputStreamStoppedAgent(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "hello") {
 		t.Errorf("body should contain session data, got: %s", rec.Body.String())
+	}
+}
+
+func TestAgentOutputStreamWorkerOperationEventWakesPeekFallback(t *testing.T) {
+	state := newFakeState(t)
+	if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	state.sp.SetPeekOutput("myrig--worker", "first output")
+	srv := New(state)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "first output", time.Second); !strings.Contains(body, "first output") {
+		t.Fatalf("stream body missing initial output: %s", body)
+	}
+
+	state.sp.SetPeekOutput("myrig--worker", "wake from runtime event")
+	state.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: "myrig--worker",
+	})
+
+	body := waitForRecorderSubstring(t, rec, "wake from runtime event", 1500*time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "wake from runtime event") {
+		t.Fatalf("stream body missing output after worker operation wakeup: %s", body)
+	}
+}
+
+func TestAgentOutputStreamWorkerOperationSessionIDWakesPeekFallback(t *testing.T) {
+	state := newSessionFakeState(t)
+	mgr := session.NewManager(state.cityBeadStore, state.sp)
+	sessionName := agentSessionName(state.CityName(), "myrig/worker", state.cfg.Workspace.SessionTemplate)
+	info, err := mgr.CreateAliasedNamedWithTransport(
+		context.Background(),
+		"",
+		sessionName,
+		"myrig/worker",
+		"Chat",
+		"claude",
+		t.TempDir(),
+		"claude",
+		"",
+		nil,
+		session.ProviderResume{},
+		runtime.Config{},
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	state.sp.SetPeekOutput(info.SessionName, "first output")
+	srv := New(state)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "first output", time.Second); !strings.Contains(body, "first output") {
+		t.Fatalf("stream body missing initial output: %s", body)
+	}
+
+	state.sp.SetPeekOutput(info.SessionName, "wake from session id")
+	state.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: info.ID,
+	})
+
+	body := waitForRecorderSubstring(t, rec, "wake from session id", 1500*time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "wake from session id") {
+		t.Fatalf("stream body missing output after session worker operation wakeup: %s", body)
 	}
 }
