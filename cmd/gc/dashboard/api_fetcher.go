@@ -640,7 +640,7 @@ func isInternalBead(b apiBead) bool {
 	}
 	for _, l := range b.Labels {
 		switch l {
-		case "gc:message", "gc:convoy", "gc:queue", "gc:merge-request", "gc:wisp", "gc:agent":
+		case "gc:convoy", "gc:queue", "gc:merge-request", "gc:wisp", "gc:agent":
 			return true
 		}
 	}

@@ -25,9 +25,14 @@ func New(store beads.Store) *Provider {
 }
 
 // Send creates a message bead with subject in Title and body in Description.
+// Returns an error if to is empty: blank recipients produce messages that never
+// appear in any inbox but still inflate global counts.
 func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
+	if to == "" {
+		return mail.Message{}, fmt.Errorf("beadmail send: recipient is required")
+	}
 	threadID := generateThreadID()
-	labels := []string{"gc:message", "thread:" + threadID}
+	labels := []string{"thread:" + threadID}
 
 	title := subject
 	if title == "" && body != "" {
@@ -63,7 +68,7 @@ func (p *Provider) Get(id string) (mail.Message, error) {
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail get: %w", err)
 	}
-	if b.Type != "" && b.Type != "message" {
+	if b.Type != "message" {
 		return mail.Message{}, fmt.Errorf("beadmail get: bead %s is type %q, not message", id, b.Type)
 	}
 	return beadToMessage(b), nil
@@ -143,13 +148,16 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail reply: %w", err)
 	}
+	if original.From == "" {
+		return mail.Message{}, fmt.Errorf("beadmail reply: original message %s has no sender to reply to", id)
+	}
 
 	threadID := extractLabel(original.Labels, "thread:")
 	if threadID == "" {
 		threadID = generateThreadID()
 	}
 
-	labels := []string{"gc:message", "thread:" + threadID, "reply-to:" + id}
+	labels := []string{"thread:" + threadID, "reply-to:" + id}
 
 	b, err := p.store.Create(beads.Bead{
 		Title:       subject,
@@ -236,11 +244,11 @@ func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Me
 // on stores with many beads.
 //
 // For per-recipient queries, list by assignee+type+status — targeted to the
-// recipient's open messages. Beadmail send paths write Type="message", so the
-// label is decoration, not the authoritative discriminator.
+// recipient's open messages. For global queries (recipient==""), falls back
+// to type-based listing since no assignee filter can be applied.
 //
-// For global queries (recipient==""), falls back to type-based listing since
-// no assignee filter can be applied.
+// Type="message" is the authoritative discriminator; the legacy gc:message
+// label supplement was removed in #862 along with writes to that label.
 func (p *Provider) messageCandidates(recipient string) ([]beads.Bead, error) {
 	seen := make(map[string]beads.Bead)
 	order := make([]string, 0)
@@ -283,9 +291,10 @@ func (p *Provider) messageCandidates(recipient string) ([]beads.Bead, error) {
 	return result, nil
 }
 
-// isMessage returns true if the bead is a message (by Type or gc:message label).
+// isMessage reports whether the bead is a message. Type="message" is the
+// authoritative discriminator; the legacy gc:message label is no longer read.
 func isMessage(b beads.Bead) bool {
-	return b.Type == "message" || hasLabel(b.Labels, "gc:message")
+	return b.Type == "message"
 }
 
 // beadToMessage converts a bead to a mail.Message.

@@ -180,8 +180,36 @@ func TestSend(t *testing.T) {
 	if b.Status != "open" {
 		t.Errorf("bead Status = %q, want %q", b.Status, "open")
 	}
-	if !hasLabel(b.Labels, "gc:message") {
-		t.Error("bead missing gc:message label")
+	if hasLabel(b.Labels, "gc:message") {
+		t.Error("bead should no longer carry the legacy gc:message label")
+	}
+}
+
+func TestSendRejectsEmptyRecipient(t *testing.T) {
+	p := New(beads.NewMemStore())
+	if _, err := p.Send("human", "", "subject", "body"); err == nil {
+		t.Fatal("Send with empty recipient should error")
+	}
+}
+
+func TestGetRejectsNonMessageType(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	b, err := store.Create(beads.Bead{Title: "task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Get(b.ID); err == nil {
+		t.Error("Get should reject non-message bead")
+	}
+
+	untyped, err := store.Create(beads.Bead{Title: "legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Get(untyped.ID); err == nil {
+		t.Error("Get should reject bead with empty type (Type=\"message\" is now required)")
 	}
 }
 
