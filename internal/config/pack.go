@@ -89,6 +89,11 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				return fmt.Errorf("rig %q pack %q: [[service]] is only allowed in city-scoped packs", rig.Name, ref)
 			}
 			rigGlobals = append(rigGlobals, globals...)
+			packName := tcPackName(fs, topoPath)
+			cfg.PackCommands = appendDiscoveredCommands(
+				cfg.PackCommands,
+				stampDefaultBinding(cachedPackCommands(cache, topoDir), packName)...,
+			)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, cachedPackDoctors(cache, topoDir)...)
 
 			// Validate rig-scoped requirements.
@@ -166,6 +171,7 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				if len(services) > 0 {
 					return fmt.Errorf("rig %q import %q: [[service]] is only allowed in city-scoped packs", rig.Name, bindingName)
 				}
+				commands := cachedPackCommands(cache, impDir)
 				rigGlobals = append(rigGlobals, globals...)
 				cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, cachedPackDoctors(cache, impDir)...)
 
@@ -177,6 +183,13 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				}
 				for i := range namedSessions {
 					namedSessions[i].BindingName = bindingName
+				}
+				for i := range commands {
+					if commands[i].BindingName == "" {
+						commands[i].BindingName = bindingName
+					} else if imp.Export {
+						commands[i].BindingName = bindingName
+					}
 				}
 
 				// Re-qualify depends_on with binding name now that it's stamped.
@@ -214,6 +227,11 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 						agents[i].PackName = packName
 					}
 				}
+				for i := range commands {
+					if commands[i].PackName == "" {
+						commands[i].PackName = packName
+					}
+				}
 
 				// Validate rig-scoped requirements.
 				for _, req := range reqs {
@@ -248,6 +266,7 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 				rigAgents = append(rigAgents, agents...)
 				rigNamedSessions = append(rigNamedSessions, namedSessions...)
+				cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 
 				if len(providers) > 0 {
 					if cfg.Providers == nil {
