@@ -248,6 +248,25 @@ func configuredBeadsProviderValue(cityPath string) string {
 	return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
 }
 
+func configuredBeadsProviderValueFromConfig(cityPath string) string {
+	return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
+}
+
+func scopedBeadsProviderOverride(cityPath, scopeRoot string) (string, bool) {
+	provider := strings.TrimSpace(os.Getenv("GC_BEADS"))
+	if provider == "" {
+		return "", false
+	}
+	scopedRoot := strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT"))
+	if scopedRoot == "" {
+		return provider, true
+	}
+	if samePath(resolveStoreScopeRoot(cityPath, scopedRoot), scopeRoot) {
+		return provider, true
+	}
+	return "", false
+}
+
 // normalizeRawBeadsProvider maps the city-managed gc-beads-bd wrapper back to
 // the logical "bd" provider for command-time store selection. Managed sessions
 // set GC_BEADS=exec:<cityPath>/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh
@@ -276,6 +295,13 @@ func rawBeadsProvider(cityPath string) string {
 	return "bd"
 }
 
+func rawBeadsProviderFromConfig(cityPath string) string {
+	if provider := configuredBeadsProviderValueFromConfig(cityPath); provider != "" {
+		return normalizeRawBeadsProvider(cityPath, provider)
+	}
+	return "bd"
+}
+
 func providerUsesBdStoreContract(provider string) bool {
 	provider = strings.TrimSpace(provider)
 	if provider == "" || provider == "bd" {
@@ -296,11 +322,14 @@ func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(scopeRoot)
 	}
-	if explicit := strings.TrimSpace(os.Getenv("GC_BEADS")); explicit != "" {
+	resolvedScopeRoot := resolveStoreScopeRoot(runtimeCityPath, scopeRoot)
+	if explicit, ok := scopedBeadsProviderOverride(runtimeCityPath, resolvedScopeRoot); ok {
 		return normalizeRawBeadsProvider(runtimeCityPath, explicit)
 	}
 	provider := rawBeadsProvider(runtimeCityPath)
-	resolvedScopeRoot := resolveStoreScopeRoot(runtimeCityPath, scopeRoot)
+	if strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "" {
+		provider = rawBeadsProviderFromConfig(runtimeCityPath)
+	}
 	if samePath(resolvedScopeRoot, runtimeCityPath) {
 		return provider
 	}
@@ -318,6 +347,29 @@ func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
 		return "file"
 	}
 	return provider
+}
+
+func scopeUsesManagedBdStoreContract(cityPath, scopeRoot string) bool {
+	return providerUsesBdStoreContract(rawBeadsProviderForScope(scopeRoot, cityPath))
+}
+
+func rigUsesManagedBdStoreContract(cityPath string, rig config.Rig) bool {
+	if strings.TrimSpace(rig.Path) == "" {
+		return false
+	}
+	return scopeUsesManagedBdStoreContract(cityPath, rig.Path)
+}
+
+func workspaceUsesManagedBdStoreContract(cityPath string, rigs []config.Rig) bool {
+	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+		return true
+	}
+	for _, rig := range rigs {
+		if rigUsesManagedBdStoreContract(cityPath, rig) {
+			return true
+		}
+	}
+	return false
 }
 
 func scopeUsesBdStoreContract(scopeRoot string) bool {

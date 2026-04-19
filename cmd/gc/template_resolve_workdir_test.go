@@ -208,6 +208,9 @@ func TestResolveTemplateUsesRigScopeBeadsProviderForBdBackedRig(t *testing.T) {
 	if got := tp.Env["GC_BEADS"]; got != "bd" {
 		t.Fatalf("GC_BEADS = %q, want bd for bd-backed rig", got)
 	}
+	if got := tp.Env["GC_BEADS_SCOPE_ROOT"]; got != rigRoot {
+		t.Fatalf("GC_BEADS_SCOPE_ROOT = %q, want %q", got, rigRoot)
+	}
 }
 
 func TestResolveTemplateRigScopedEnvCarriesRigRoots(t *testing.T) {

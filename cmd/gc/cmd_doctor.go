@@ -45,7 +45,15 @@ health. Use --fix to attempt automatic repairs.`,
 
 // doDoctor runs all health checks and prints results.
 func doctorSkipsDoltChecks(cityPath string) bool {
-	return !cityUsesBdStoreContract(cityPath) || os.Getenv("GC_DOLT") == "skip"
+	if os.Getenv("GC_DOLT") == "skip" {
+		return true
+	}
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		return !cityUsesBdStoreContract(cityPath)
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	return !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
 }
 
 type doltTopologyCheck struct {
@@ -156,8 +164,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
 		d.Register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
-	skipDolt := doctorSkipsDoltChecks(cityPath)
-	d.Register(doctor.NewDoltServerCheck(cityPath, skipDolt))
+	d.Register(doctor.NewDoltServerCheck(cityPath, !scopeUsesManagedBdStoreContract(cityPath, cityPath) || os.Getenv("GC_DOLT") == "skip"))
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
 
@@ -177,7 +184,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			d.Register(doctor.NewRigPathCheck(rig))
 			d.Register(doctor.NewRigGitCheck(rig))
 			d.Register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
-			d.Register(doctor.NewRigDoltServerCheck(cityPath, rig, skipDolt))
+			d.Register(doctor.NewRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || os.Getenv("GC_DOLT") == "skip"))
 			// Custom types check — rig store.
 			d.Register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
 		}

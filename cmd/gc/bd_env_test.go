@@ -1081,6 +1081,38 @@ prefix = "fe"
 	}
 }
 
+func TestOpenStoreAtForCityUsesRigFileStoreUnderBdBackedCity(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".gc", "beads.json"), []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	if _, ok := store.(*beads.FileStore); !ok {
+		t.Fatalf("openStoreAtForCity(rig) returned %T, want *beads.FileStore", store)
+	}
+}
+
 func TestOpenStoreAtForCityLegacyEmptyFileCityDoesNotFailOrCreateRigState(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
