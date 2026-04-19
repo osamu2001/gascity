@@ -113,7 +113,7 @@ $ cd ~/my-city
 
 ~/my-city
 $ ls
-agents  assets  city.toml  commands  doctor  formulas  orders  overlays  pack.toml  template-fragments
+agents  assets  city.toml  commands  doctor  formulas  orders  overlay  pack.toml  template-fragments
 ```
 
 At the top level of the city directory:

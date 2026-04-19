@@ -389,12 +389,12 @@ type Config struct {
 
 	// ProviderName is the resolved provider name (e.g., "claude", "codex").
 	// Used for per-provider overlay filtering: files from
-	// overlays/per-provider/<ProviderName>/ are copied alongside any extras
+	// overlay/per-provider/<ProviderName>/ are copied alongside any extras
 	// listed in InstallAgentHooks.
 	ProviderName string
 
 	// InstallAgentHooks lists additional provider hook slots whose
-	// overlays/per-provider/<name>/ content should be staged alongside
+	// overlay/per-provider/<name>/ content should be staged alongside
 	// ProviderName's. Populated from the agent's install_agent_hooks
 	// config, so an agent running Claude can still get a materialized
 	// .gemini/settings.json for parallel tooling.

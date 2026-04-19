@@ -12,7 +12,8 @@ import (
 // logFileWatcher wraps fsnotify for watching a session log file.
 // On creation it tries to set up inotify; if that fails, or if the
 // watched file is renamed/removed (log rotation), it falls back to
-// polling at outputStreamPollInterval.
+// polling at outputStreamPollInterval. Active fsnotify watches also keep
+// a low-frequency poll as a safety net for missed write events.
 type logFileWatcher struct {
 	watcher      *fsnotify.Watcher
 	fallbackPoll *time.Ticker
@@ -127,6 +128,8 @@ type RunOpts struct {
 func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func() bool, writeKeepalive func(), opts ...RunOpts) {
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
+	watcherPoll := time.NewTicker(outputStreamPollInterval)
+	defer watcherPoll.Stop()
 
 	// Stall detection: fires when no data arrives for stallTimeout,
 	// then repeats every stallTimeout until data resumes.
@@ -194,6 +197,10 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func() bool, writ
 					wake = nil
 					continue
 				}
+				if readAndEmit() {
+					dataArrived()
+				}
+			case <-watcherPoll.C:
 				if readAndEmit() {
 					dataArrived()
 				}

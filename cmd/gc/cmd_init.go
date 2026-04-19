@@ -71,7 +71,7 @@ var initConventionDirs = []string{
 	citylayout.FormulasRoot,
 	citylayout.OrdersRoot,
 	"template-fragments",
-	"overlays",
+	"overlay",
 	"assets",
 }
 

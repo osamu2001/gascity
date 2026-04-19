@@ -14,7 +14,7 @@ This is a companion to [doc-pack-v2.md](doc-pack-v2.md), which covers the pack/c
 
 Agent definitions are split across `[[agent]]` TOML tables and filesystem assets (prompts, overlays, scripts) scattered in separate directory trees. This creates six problems:
 v
-1. **Scattered identity.** There's no single place to understand what an agent is. Adding an agent means editing city.toml *and* creating files in multiple directories (`prompts/`, `overlays/`, `scripts/`).
+1. **Scattered identity.** There's no single place to understand what an agent is. Adding an agent means editing city.toml *and* creating files in multiple directories (`prompts/`, `overlay/`, `scripts/`).
 
 2. **Invisible prompt injection.** Every `.md` file is secretly a Go template. Fragments get injected via `global_fragments` and `inject_fragments` without appearing in the prompt file itself. You can't read a prompt and know what the agent actually sees.
 
@@ -72,7 +72,7 @@ my-city/
 │   └── mayor/
 │       ├── agent.toml
 │       └── prompt.md
-├── overlays/                  # city-wide overlays (all agents)
+├── overlay/                   # city-wide overlays (all agents)
 │   ├── per-provider/
 │   │   ├── claude/
 │   │   │   ├── .claude/
@@ -137,8 +137,8 @@ Overlays are files materialized into the agent's working directory before it sta
 
 Layering order (later wins on file collision):
 
-1. City-wide `overlays/` — universal files (everything outside `per-provider/`)
-2. City-wide `overlays/per-provider/<provider>/` — provider-matched
+1. City-wide `overlay/` — universal files (everything outside `per-provider/`)
+2. City-wide `overlay/per-provider/<provider>/` — provider-matched
 3. Agent-specific `agents/<name>/overlay/` — universal files
 4. Agent-specific `agents/<name>/overlay/per-provider/<provider>/` — provider-matched
 
