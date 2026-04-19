@@ -91,13 +91,13 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 	switch {
 	case path != "":
 		if format == "raw" {
-			s.streamSessionTranscriptLogRaw(reqCtx, send, info, path)
+			s.streamSessionTranscriptLogRawHuma(reqCtx, send, info, path)
 		} else {
-			s.streamSessionTranscriptLog(reqCtx, send, info, path)
+			s.streamSessionTranscriptLogHuma(reqCtx, send, info, path)
 		}
 	case format == "raw":
 		if running {
-			s.streamSessionPeekRaw(reqCtx, send, info)
+			s.streamSessionPeekRawHuma(reqCtx, send, info)
 		} else {
 			_ = send(sse.Message{ID: 1, Data: SessionStreamRawMessageEvent{
 				ID:       info.ID,
@@ -108,7 +108,7 @@ func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, sen
 			}})
 		}
 	default:
-		s.streamSessionPeek(reqCtx, send, info)
+		s.streamSessionPeekHuma(reqCtx, send, info)
 	}
 }
 

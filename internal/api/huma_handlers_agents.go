@@ -499,9 +499,14 @@ func (s *Server) doStreamAgentOutput(hctx huma.Context, name string, send sse.Se
 		hctx.SetHeader("GC-Agent-Status", "stopped")
 	}
 	ctx := hctx.Context()
+	provider := strings.TrimSpace(state.cfg.Workspace.Provider)
+	if agentCfg, ok := findAgent(state.cfg, state.name); ok && strings.TrimSpace(agentCfg.Provider) != "" {
+		provider = strings.TrimSpace(agentCfg.Provider)
+	}
+	workerOps := s.watchAgentWorkerOperationSignals(ctx, state.name, state.cfg)
 	if state.logPath != "" {
-		s.streamSessionLog(ctx, send, state.name, state.logPath)
+		s.streamSessionLogHuma(ctx, send, state.name, provider, state.logPath, workerOps)
 	} else {
-		s.streamPeekOutput(ctx, send, state.name, state.cfg)
+		s.streamPeekOutputHuma(ctx, send, state.name, s.agentWorkerHandle(state.name, state.cfg), workerOps)
 	}
 }

@@ -131,7 +131,7 @@ func (s *Server) resolveWorkerSessionRuntime(info session.Info, _ string) (*work
 		return nil, nil
 	}
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
-		Command:    firstNonEmptyString(resolved.CommandString(), info.Command),
+		Command:    firstNonEmptyString(resolved.CommandString(), info.Command, resolved.Name),
 		WorkDir:    firstNonEmptyString(workDir, info.WorkDir),
 		Provider:   firstNonEmptyString(resolved.Name, info.Provider),
 		SessionEnv: resolved.Env,

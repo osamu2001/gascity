@@ -6,9 +6,11 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -580,6 +582,388 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 			emitPeek()
 		case <-keepalive.C:
 			writeSSEComment(w)
+		}
+	}
+}
+
+func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse.Sender, info session.Info, logPath string) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
+	lw := newLogFileWatcher(logPath)
+	defer lw.Close()
+
+	var lastSize int64
+	var lastSentUUID string
+	var seq int
+	var lastActivity string
+	var lastPendingID string
+	sentUUIDs := make(map[string]struct{})
+	lw.onReset = func() {
+		lastSize = 0
+		lastActivity = ""
+	}
+
+	handle, _ := s.workerHandleForSession(s.state.CityBeadStore(), info.ID)
+	readAndEmit := func() {
+		stat, err := os.Stat(logPath)
+		if err != nil || stat.Size() == lastSize {
+			return
+		}
+
+		factory, err := s.workerFactory(s.state.CityBeadStore())
+		if err != nil {
+			return
+		}
+		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
+			Provider:        info.Provider,
+			TranscriptPath:  logPath,
+			TailCompactions: 1,
+			Raw:             true,
+		})
+		if err != nil {
+			return
+		}
+		sess := transcript.Session
+		lastSize = stat.Size()
+
+		activity := worker.InferTranscriptActivity(sess.Messages)
+		rawBytes := make([]json.RawMessage, 0, len(sess.Messages))
+		uuids := make([]string, 0, len(sess.Messages))
+		for _, entry := range sess.Messages {
+			if len(entry.Raw) == 0 || !json.Valid(entry.Raw) {
+				continue
+			}
+			rawBytes = append(rawBytes, entry.Raw)
+			uuids = append(uuids, entry.UUID)
+		}
+
+		if len(rawBytes) > 0 {
+			var toSend []json.RawMessage
+			if lastSentUUID == "" {
+				toSend = rawBytes
+			} else {
+				found := false
+				for i, uuid := range uuids {
+					if uuid == lastSentUUID {
+						toSend = rawBytes[i+1:]
+						found = true
+						break
+					}
+				}
+				if !found {
+					log.Printf("session stream raw: cursor %s lost, emitting only new messages", lastSentUUID)
+					for i, uuid := range uuids {
+						if _, seen := sentUUIDs[uuid]; !seen {
+							toSend = append(toSend, rawBytes[i])
+						}
+					}
+				}
+			}
+
+			if len(toSend) > 0 {
+				seq++
+				_ = send(sse.Message{ID: seq, Data: SessionStreamRawMessageEvent{
+					ID:       info.ID,
+					Template: info.Template,
+					Provider: info.Provider,
+					Format:   "raw",
+					Messages: wrapRawFrameBytes(toSend),
+				}})
+			}
+
+			lastSentUUID = uuids[len(uuids)-1]
+			for _, uuid := range uuids {
+				sentUUIDs[uuid] = struct{}{}
+			}
+			lastPendingID = ""
+		}
+
+		if activity != "" && activity != lastActivity {
+			lastActivity = activity
+			seq++
+			_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: activity}})
+		}
+	}
+
+	onStall := func() {
+		if handle == nil {
+			return
+		}
+		pending, err := handle.Pending(ctx)
+		if err != nil || pending == nil {
+			if lastPendingID != "" {
+				lastPendingID = ""
+				activity := lastActivity
+				if activity == "" {
+					activity = "in-turn"
+				}
+				seq++
+				_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: activity}})
+			}
+			return
+		}
+		if pending.RequestID == lastPendingID {
+			return
+		}
+		lastPendingID = pending.RequestID
+		seq++
+		_ = send(sse.Message{ID: seq, Data: *pending})
+	}
+
+	lw.Run(ctx, readAndEmit, func() {
+		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+	}, RunOpts{
+		OnStall:      onStall,
+		StallTimeout: 5 * time.Second,
+		Wake:         s.watchSessionWorkerOperationSignals(ctx, info),
+	})
+}
+
+func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Sender, info session.Info, logPath string) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
+	lw := newLogFileWatcher(logPath)
+	defer lw.Close()
+
+	var lastSize int64
+	var lastSentUUID string
+	var seq int
+	var lastActivity string
+	sentUUIDs := make(map[string]struct{})
+	lw.onReset = func() {
+		lastSize = 0
+		lastActivity = ""
+	}
+
+	readAndEmit := func() {
+		stat, err := os.Stat(logPath)
+		if err != nil || stat.Size() == lastSize {
+			return
+		}
+
+		factory, err := s.workerFactory(s.state.CityBeadStore())
+		if err != nil {
+			return
+		}
+		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
+			Provider:       info.Provider,
+			TranscriptPath: logPath,
+		})
+		if err != nil {
+			return
+		}
+		sess := transcript.Session
+		lastSize = stat.Size()
+
+		activity := worker.InferTranscriptActivity(sess.Messages)
+		turns := make([]outputTurn, 0, len(sess.Messages))
+		uuids := make([]string, 0, len(sess.Messages))
+		for _, entry := range sess.Messages {
+			turn := entryToTurn(entry)
+			if turn.Text == "" {
+				continue
+			}
+			turns = append(turns, turn)
+			uuids = append(uuids, entry.UUID)
+		}
+
+		if len(turns) > 0 {
+			var toSend []outputTurn
+			if lastSentUUID == "" {
+				toSend = turns
+			} else {
+				found := false
+				for i, uuid := range uuids {
+					if uuid == lastSentUUID {
+						toSend = turns[i+1:]
+						found = true
+						break
+					}
+				}
+				if !found {
+					log.Printf("session stream: cursor %s lost, emitting only new turns", lastSentUUID)
+					for i, uuid := range uuids {
+						if _, seen := sentUUIDs[uuid]; !seen {
+							toSend = append(toSend, turns[i])
+						}
+					}
+				}
+			}
+
+			if len(toSend) > 0 {
+				seq++
+				_ = send(sse.Message{ID: seq, Data: SessionStreamMessageEvent{
+					ID:       info.ID,
+					Template: info.Template,
+					Provider: info.Provider,
+					Format:   "conversation",
+					Turns:    toSend,
+				}})
+			}
+
+			lastSentUUID = uuids[len(uuids)-1]
+			for _, uuid := range uuids {
+				sentUUIDs[uuid] = struct{}{}
+			}
+		}
+
+		if activity != "" && activity != lastActivity {
+			lastActivity = activity
+			seq++
+			_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: activity}})
+		}
+	}
+
+	lw.Run(ctx, readAndEmit, func() {
+		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+	}, RunOpts{Wake: s.watchSessionWorkerOperationSignals(ctx, info)})
+}
+
+func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, info session.Info) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
+	handle, err := s.workerHandleForSession(s.state.CityBeadStore(), info.ID)
+	if err != nil {
+		return
+	}
+	poll := time.NewTicker(outputStreamPollInterval)
+	defer poll.Stop()
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
+
+	var lastOutput string
+	var seq int
+	var lastPendingID string
+
+	emitPending := func() {
+		pending, err := handle.Pending(ctx)
+		if err == nil && pending != nil && pending.RequestID != lastPendingID {
+			lastPendingID = pending.RequestID
+			seq++
+			_ = send(sse.Message{ID: seq, Data: *pending})
+		} else if pending == nil && lastPendingID != "" {
+			lastPendingID = ""
+		}
+	}
+
+	emitPeek := func() {
+		output, err := handle.Peek(ctx, 100)
+		if errors.Is(err, session.ErrSessionInactive) {
+			return
+		}
+		if err != nil || output == lastOutput {
+			emitPending()
+			return
+		}
+		lastOutput = output
+
+		if output != "" {
+			fakeMsg, err := json.Marshal(map[string]any{
+				"role": "assistant",
+				"content": []map[string]string{
+					{"type": "text", "text": output},
+				},
+			})
+			if err == nil {
+				seq++
+				_ = send(sse.Message{ID: seq, Data: SessionStreamRawMessageEvent{
+					ID:       info.ID,
+					Template: info.Template,
+					Provider: info.Provider,
+					Format:   "raw",
+					Messages: wrapRawFrameBytes([]json.RawMessage{fakeMsg}),
+				}})
+			}
+		}
+
+		emitPending()
+	}
+
+	emitPeek()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			emitPeek()
+		case _, ok := <-workerOps:
+			if !ok {
+				workerOps = nil
+				continue
+			}
+			emitPeek()
+		case <-keepalive.C:
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+		}
+	}
+}
+
+func (s *Server) streamSessionPeekHuma(ctx context.Context, send sse.Sender, info session.Info) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
+	handle, err := s.workerHandleForSession(s.state.CityBeadStore(), info.ID)
+	if err != nil {
+		return
+	}
+	poll := time.NewTicker(outputStreamPollInterval)
+	defer poll.Stop()
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
+
+	var lastOutput string
+	var seq int
+
+	emitPeek := func() {
+		output, err := handle.Peek(ctx, 100)
+		if errors.Is(err, session.ErrSessionInactive) {
+			return
+		}
+		if err != nil || output == lastOutput {
+			return
+		}
+		lastOutput = output
+		seq++
+
+		turns := []outputTurn{}
+		if output != "" {
+			turns = append(turns, outputTurn{Role: "output", Text: output})
+		}
+		_ = send(sse.Message{ID: seq, Data: SessionStreamMessageEvent{
+			ID:       info.ID,
+			Template: info.Template,
+			Provider: info.Provider,
+			Format:   "text",
+			Turns:    turns,
+		}})
+	}
+
+	emitPeek()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			emitPeek()
+		case _, ok := <-workerOps:
+			if !ok {
+				workerOps = nil
+				continue
+			}
+			emitPeek()
+		case <-keepalive.C:
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -245,6 +246,158 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 			emitPeek()
 		case <-keepalive.C:
 			writeSSEComment(w)
+		}
+	}
+}
+
+func (s *Server) streamSessionLogHuma(ctx context.Context, send sse.Sender, name, provider, logPath string, wake <-chan struct{}) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
+	lw := newLogFileWatcher(logPath)
+	defer lw.Close()
+
+	var lastSize int64
+	lw.onReset = func() { lastSize = 0 }
+	var lastSentUUID string
+	var seq int
+	sentUUIDs := make(map[string]struct{})
+
+	readAndEmit := func() {
+		info, err := os.Stat(logPath)
+		if err != nil {
+			return
+		}
+		currentSize := info.Size()
+		if currentSize == lastSize {
+			return
+		}
+
+		factory, err := s.workerFactory(s.state.CityBeadStore())
+		if err != nil {
+			return
+		}
+		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
+			Provider:        provider,
+			TranscriptPath:  logPath,
+			TailCompactions: 1,
+		})
+		if err != nil {
+			return
+		}
+		sess := transcript.Session
+		lastSize = currentSize
+
+		turns := make([]outputTurn, 0, len(sess.Messages))
+		uuids := make([]string, 0, len(sess.Messages))
+		for _, entry := range sess.Messages {
+			turn := entryToTurn(entry)
+			if turn.Text == "" {
+				continue
+			}
+			turns = append(turns, turn)
+			uuids = append(uuids, entry.UUID)
+		}
+		if len(turns) == 0 {
+			return
+		}
+
+		var toSend []outputTurn
+		if lastSentUUID == "" {
+			toSend = turns
+		} else {
+			found := false
+			for i, uuid := range uuids {
+				if uuid == lastSentUUID {
+					toSend = turns[i+1:]
+					found = true
+					break
+				}
+			}
+			if !found {
+				log.Printf("agent stream: cursor %s lost, emitting only new turns", lastSentUUID)
+				for i, uuid := range uuids {
+					if _, seen := sentUUIDs[uuid]; !seen {
+						toSend = append(toSend, turns[i])
+					}
+				}
+			}
+		}
+
+		lastSentUUID = uuids[len(uuids)-1]
+		for _, uuid := range uuids {
+			sentUUIDs[uuid] = struct{}{}
+		}
+
+		if len(toSend) == 0 {
+			return
+		}
+		seq++
+		_ = send(sse.Message{ID: seq, Data: agentOutputResponse{
+			Agent:  name,
+			Format: "conversation",
+			Turns:  toSend,
+		}})
+	}
+
+	lw.Run(ctx, readAndEmit, func() {
+		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+	}, RunOpts{Wake: wake})
+}
+
+func (s *Server) streamPeekOutputHuma(ctx context.Context, send sse.Sender, name string, handle agentPeekHandle, wake <-chan struct{}) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	send = cancelOnSendError(send, cancel)
+
+	poll := time.NewTicker(outputStreamPollInterval)
+	defer poll.Stop()
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+
+	var lastOutput string
+	var seq int
+
+	emitPeek := func() {
+		running, err := workerHandleRunning(ctx, handle)
+		if err != nil || !running {
+			return
+		}
+		output, err := handle.Peek(ctx, 100)
+		if err != nil || output == lastOutput {
+			return
+		}
+		lastOutput = output
+		seq++
+
+		turns := []outputTurn{}
+		if output != "" {
+			turns = append(turns, outputTurn{Role: "output", Text: output})
+		}
+		_ = send(sse.Message{ID: seq, Data: agentOutputResponse{
+			Agent:  name,
+			Format: "text",
+			Turns:  turns,
+		}})
+	}
+
+	emitPeek()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			emitPeek()
+		case _, ok := <-wake:
+			if !ok {
+				wake = nil
+				continue
+			}
+			emitPeek()
+		case <-keepalive.C:
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}
 	}
 }
