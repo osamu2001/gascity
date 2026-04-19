@@ -518,6 +518,80 @@ func TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot(t *testing.T) {
 // decision. Live store errors still fail closed, but the path that
 // produced the ownership_snapshot_partial reason is gone.)
 
+// listErrStore wraps a beads.Store and returns a configured error from
+// List. Used by the drain-ack fail-closed regression test below.
+type listErrStore struct {
+	beads.Store
+	err error
+}
+
+func (s *listErrStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.Store.List(q)
+}
+
+// TestReconcileSessionBeads_DrainAckLiveStoreErrorFailsClosed guards the
+// drain-ack live-query error path. When sessionHasOpenAssignedWork returns
+// an error, drain-ack treats hasAssignedWork as true (fail-closed) so the
+// session lands in CompleteDrainPatch (asleep+idle) rather than
+// AcknowledgeDrainPatch (drained). This prevents a transient store failure
+// from silently closing a session whose assignment status we cannot verify.
+func TestReconcileSessionBeads_DrainAckLiveStoreErrorFailsClosed(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	// Wrap the store so List returns an error for the live-query check.
+	erroring := &listErrStore{Store: env.store, err: fmt.Errorf("store is unavailable")}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		"",
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		erroring,
+		dops,
+		nil,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Metadata["state"] != "asleep" || got.Metadata["sleep_reason"] != "idle" {
+		t.Fatalf("state=%q sleep_reason=%q, want asleep/idle — live-query error must fail closed (hasAssignedWork=true) so the session does not enter drained state",
+			got.Metadata["state"], got.Metadata["sleep_reason"])
+	}
+}
+
 func TestReconcileSessionBeads_DrainAckResumeModePreservesSessionIdentity(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
