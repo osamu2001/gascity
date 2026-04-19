@@ -75,6 +75,7 @@ func startControllerSocket(
 	cityPath string,
 	cancelFn context.CancelFunc,
 	dirty *atomic.Bool,
+	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
@@ -95,7 +96,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, cancelFn, dirty, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, cancelFn, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 		}
 	}()
 	return lis, nil
@@ -109,6 +110,7 @@ func handleControllerConn(
 	cityPath string,
 	cancelFn context.CancelFunc,
 	dirty *atomic.Bool,
+	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
@@ -143,6 +145,8 @@ func handleControllerConn(
 			default:
 			}
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
+		case strings.HasPrefix(line, "reload:"):
+			handleReloadSocketCmd(conn, line[len("reload:"):], reloadReqCh)
 		case line == "control-dispatcher":
 			select {
 			case controlDispatcherCh <- struct{}{}:
@@ -169,6 +173,128 @@ func handleControllerConn(
 			handleTraceStatusSocketCmd(conn, cityPath)
 		}
 	}
+}
+
+func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest) {
+	if ch == nil {
+		writeJSONLine(conn, reloadControlReply{
+			Outcome: reloadOutcomeFailed,
+			Error:   "reload control unavailable",
+		})
+		return
+	}
+
+	var wire reloadControlRequest
+	if err := json.Unmarshal([]byte(payload), &wire); err != nil {
+		writeJSONLine(conn, reloadControlReply{
+			Outcome: reloadOutcomeFailed,
+			Error:   fmt.Sprintf("invalid reload request: %v", err),
+		})
+		return
+	}
+
+	var timeout time.Duration
+	if wire.Timeout != "" {
+		parsed, err := time.ParseDuration(wire.Timeout)
+		if err != nil {
+			writeJSONLine(conn, reloadControlReply{
+				Outcome: reloadOutcomeFailed,
+				Error:   fmt.Sprintf("invalid reload timeout %q: %v", wire.Timeout, err),
+			})
+			return
+		}
+		timeout = parsed
+	}
+	if wire.Wait && timeout <= 0 {
+		writeJSONLine(conn, reloadControlReply{
+			Outcome: reloadOutcomeFailed,
+			Error:   "reload timeout must be greater than 0",
+		})
+		return
+	}
+
+	totalDeadline := controllerReloadAcceptTimeout + 5*time.Second
+	if wire.Wait {
+		totalDeadline += timeout
+	}
+	conn.SetDeadline(time.Now().Add(totalDeadline)) //nolint:errcheck // command-specific override
+
+	req := reloadRequest{
+		wait:       wire.Wait,
+		timeout:    timeout,
+		acceptedCh: make(chan reloadControlReply, 1),
+		doneCh:     make(chan reloadControlReply, 1),
+	}
+
+	deadline := time.Now().Add(controllerReloadAcceptTimeout)
+	remaining := func() time.Duration {
+		d := time.Until(deadline)
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+
+	waitFor := func(ch <-chan reloadControlReply, timeout time.Duration) (reloadControlReply, bool) {
+		if timeout <= 0 {
+			return reloadControlReply{}, false
+		}
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case reply := <-ch:
+			return reply, true
+		case <-timer.C:
+			return reloadControlReply{}, false
+		}
+	}
+
+	acceptTimeout := remaining()
+	if acceptTimeout <= 0 {
+		writeJSONLine(conn, reloadControlReply{
+			Outcome: reloadOutcomeBusy,
+			Message: "Reload request could not be accepted because the controller is busy.",
+		})
+		return
+	}
+	timer := time.NewTimer(acceptTimeout)
+	defer timer.Stop()
+	select {
+	case ch <- req:
+	case <-timer.C:
+		writeJSONLine(conn, reloadControlReply{
+			Outcome: reloadOutcomeBusy,
+			Message: "Reload request could not be accepted because the controller is busy.",
+		})
+		return
+	}
+
+	reply, ok := waitFor(req.acceptedCh, remaining())
+	if !ok {
+		writeJSONLine(conn, reloadControlReply{
+			Outcome: reloadOutcomeBusy,
+			Message: "Reload request could not be accepted because the controller is busy.",
+		})
+		return
+	}
+	if reply.Outcome != reloadOutcomeAccepted {
+		writeJSONLine(conn, reply)
+		return
+	}
+	if !req.wait {
+		writeJSONLine(conn, reply)
+		return
+	}
+
+	finalReply, ok := waitFor(req.doneCh, req.timeout)
+	if !ok {
+		writeJSONLine(conn, reloadControlReply{
+			Outcome: reloadOutcomeTimeout,
+			Message: "Reload did not finish before timeout; it may still complete later.",
+		})
+		return
+	}
+	writeJSONLine(conn, finalReply)
 }
 
 // handleConvergeSocketCmd parses a convergence JSON request, enqueues it
@@ -210,26 +336,7 @@ func writeJSONLine(w net.Conn, v any) {
 // returns the raw response bytes. Used by CLI commands that need to
 // route through the controller.
 func sendControllerCommand(cityPath, command string) ([]byte, error) {
-	sockPath := controllerSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("connecting to controller: %w (is the controller running?)", err)
-	}
-	defer conn.Close()                                     //nolint:errcheck
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-	conn.SetReadDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // Must exceed server-side 30s enqueue + 60s reply
-	if _, err := conn.Write([]byte(command + "\n")); err != nil {
-		return nil, fmt.Errorf("sending command: %w", err)
-	}
-	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return nil, fmt.Errorf("reading response: %w", err)
-		}
-		return nil, fmt.Errorf("reading response: connection closed")
-	}
-	return scanner.Bytes(), nil
+	return sendControllerCommandWithReadTimeout(cityPath, command, 95*time.Second)
 }
 
 // controllerAlive checks whether a controller is running by connecting
@@ -345,13 +452,14 @@ type reloadResult struct {
 	Cfg      *config.City
 	Prov     *config.Provenance
 	Revision string
+	Warnings []string
 }
 
 // tryReloadConfig attempts to reload city.toml with includes and patches.
-// Returns the new config, provenance, and revision on success, or an error
-// on failure (parse error, validation error, cityName changed). Callers
-// should keep the old config on error. Warnings are written to stderr;
-// strict mode (default) makes them fatal — use --no-strict to disable.
+// Returns the new config, provenance, revision, and non-fatal warnings on
+// success, or an error on failure (parse error, validation error, cityName
+// changed). Callers should keep the old config on error. Strict mode
+// (default) makes composition warnings fatal — use --no-strict to disable.
 func tryReloadConfig(tomlPath, lockedCityName, cityRoot string, stderr io.Writer) (*reloadResult, error) {
 	// Auto-fetch remote packs before full config load (mirrors cmd_start).
 	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
@@ -372,9 +480,6 @@ func tryReloadConfig(tomlPath, lockedCityName, cityRoot string, stderr io.Writer
 		fmt.Fprintln(stderr, "gc start: use --no-strict to disable strict checking") //nolint:errcheck // best-effort stderr
 		return nil, fmt.Errorf("strict mode: %d collision warning(s)", len(prov.Warnings))
 	}
-	for _, w := range prov.Warnings {
-		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
-	}
 	if err := config.ValidateAgents(newCfg.Agents); err != nil {
 		return nil, fmt.Errorf("validating agents: %w", err)
 	}
@@ -392,7 +497,7 @@ func tryReloadConfig(tomlPath, lockedCityName, cityRoot string, stderr io.Writer
 		return nil, fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedCityName, newName)
 	}
 	rev := config.Revision(fsys.OSFS{}, prov, newCfg, cityRoot)
-	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev}, nil
+	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: prov.Warnings}, nil
 }
 
 // gracefulStopAll performs two-pass graceful shutdown:
@@ -639,12 +744,13 @@ func runController(
 	}()
 
 	convergenceReqCh := make(chan convergenceRequest, 16)
+	reloadReqCh := make(chan reloadRequest)
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
 
 	sockPath := controllerSocketPath(cityPath)
-	lis, err := startControllerSocket(cityPath, cancel, configDirty, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, cancel, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -694,6 +800,7 @@ func runController(
 		Rec:                     rec,
 		PoolSessions:            poolSessions,
 		PoolDeathHandlers:       poolDeathHandlers,
+		ReloadReqCh:             reloadReqCh,
 		ConvergenceReqCh:        convergenceReqCh,
 		PokeCh:                  pokeCh,
 		ControlDispatcherCh:     controlDispatcherCh,

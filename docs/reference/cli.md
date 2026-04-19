@@ -46,6 +46,7 @@ gc [flags]
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
+| [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
 | [gc rig](#gc-rig) | Manage rigs (projects) |
@@ -1537,6 +1538,24 @@ gc register [path] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--name` | string |  | machine-local alias for this city registration |
+
+## gc reload
+
+Force the current city controller to re-read effective config and
+process one reload tick without restarting the city/controller.
+
+Reload may fetch configured remote packs before recomputing effective
+config. Existing per-session restarts may still happen if normal config
+drift rules require them.
+
+```
+gc reload [path] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--async` | bool |  | Return after the controller accepts the reload request |
+| `--timeout` | string | `5m` | How long to wait for reload completion |
 
 ## gc restart
 

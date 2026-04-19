@@ -145,6 +145,7 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	root.AddCommand(
 		newStartCmd(stdout, stderr),
 		newInitCmd(stdout, stderr),
+		newReloadCmd(stdout, stderr),
 		newStopCmd(stdout, stderr),
 		newRestartCmd(stdout, stderr),
 		newStatusCmd(stdout, stderr),

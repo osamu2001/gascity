@@ -1209,7 +1209,7 @@ func TestCityRuntimeReloadProviderSwapPreservesDrainTracker(t *testing.T) {
 	}
 }
 
-func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
+func TestCityRuntimeReloadLifecycleFailureWarnsAndAppliesConfig(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
@@ -1254,30 +1254,36 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 		cityRuntimeStartBeadsLifecycle = prev
 	})
 
-	writeCityRuntimeConfig(t, tomlPath, "fail")
+	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\nshutdown_timeout = \"1s\"\n")
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 	lastProviderName := "fake"
 	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
 
-	if cr.cfg != oldCfg {
-		t.Fatal("cfg changed after lifecycle reload failure")
+	if cr.cfg == oldCfg {
+		t.Fatal("cfg did not change after lifecycle reload warning")
 	}
 	if cr.sp != oldSP {
-		t.Fatal("provider changed after lifecycle reload failure")
+		t.Fatal("provider changed after lifecycle reload warning")
 	}
 	if cr.dops != oldDops {
-		t.Fatal("drain ops changed after lifecycle reload failure")
+		t.Fatal("drain ops changed after lifecycle reload warning")
 	}
-	if cr.configRev != oldRev {
-		t.Fatalf("configRev = %q, want %q", cr.configRev, oldRev)
+	if cr.configRev == oldRev {
+		t.Fatalf("configRev = %q, want it to change", cr.configRev)
 	}
 	if lastProviderName != "fake" {
 		t.Fatalf("lastProviderName = %q, want fake", lastProviderName)
 	}
-	if !strings.Contains(stderr.String(), "keeping old config") {
-		t.Fatalf("stderr = %q, want keeping old config message", stderr.String())
+	if !strings.Contains(stderr.String(), "config reload: boom") {
+		t.Fatalf("stderr = %q, want lifecycle warning", stderr.String())
 	}
 	if strings.Contains(stdout.String(), "Session provider swapped") {
 		t.Fatalf("stdout = %q, want no provider swap message", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Config reloaded:") {
+		t.Fatalf("stdout = %q, want reload success message", stdout.String())
 	}
 }
 
