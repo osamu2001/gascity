@@ -81,6 +81,11 @@ func registeredCityName(cityPath, nameOverride string) (string, error) {
 	if alias := strings.TrimSpace(nameOverride); alias != "" {
 		return alias, nil
 	}
+	if entry, registered, err := registeredCityEntry(cityPath); err != nil {
+		return "", err
+	} else if registered {
+		return entry.EffectiveName(), nil
+	}
 	return effectiveCityName(cityPath)
 }
 

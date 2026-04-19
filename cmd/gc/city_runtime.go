@@ -29,6 +29,7 @@ import (
 type CityRuntime struct {
 	cityPath    string
 	cityName    string
+	configName  string
 	tomlPath    string
 	watchDirs   []string
 	configRev   string
@@ -159,6 +160,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	cr := &CityRuntime{
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,
+		configName:              lockedConfigName(p.Cfg, p.CityPath),
 		tomlPath:                p.TomlPath,
 		watchDirs:               p.WatchDirs,
 		configRev:               p.ConfigRev,
@@ -616,7 +618,11 @@ func (cr *CityRuntime) reloadConfigTraced(
 		fmt.Fprintf(cr.stderr, "%s: warning: %s\n", cr.logPrefix, message) //nolint:errcheck // best-effort stderr
 	}
 
-	result, err := tryReloadConfig(cr.tomlPath, cr.cityName, cityRoot)
+	configName := cr.configName
+	if configName == "" {
+		configName = cr.cityName
+	}
+	result, err := tryReloadConfig(cr.tomlPath, configName, cityRoot)
 	if err != nil {
 		if result != nil {
 			for _, warning := range result.Warnings {
@@ -839,6 +845,13 @@ func (cr *CityRuntime) reloadConfigTraced(
 		Revision: result.Revision,
 		Warnings: warnings,
 	}
+}
+
+func lockedConfigName(cfg *config.City, cityPath string) string {
+	if cfg != nil && cfg.Workspace.Name != "" {
+		return cfg.Workspace.Name
+	}
+	return filepath.Base(cityPath)
 }
 
 // beadReconcileTick runs one reconciliation tick using the bead-driven

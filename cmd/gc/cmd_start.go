@@ -262,6 +262,10 @@ Use "gc supervisor run" for foreground operation.`,
 }
 
 func doStart(args []string, controllerMode bool, stdout, stderr io.Writer) int {
+	return doStartWithNameOverride(args, controllerMode, stdout, stderr, "")
+}
+
+func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
 	if controllerMode || dryRunMode {
 		return doStartStandalone(args, controllerMode, stdout, stderr)
 	}
@@ -298,7 +302,7 @@ func doStart(args []string, controllerMode bool, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "gc start: install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if code := registerCityWithSupervisor(cityPath, stdout, stderr, "gc start", true); code != 0 {
+	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc start", true); code != 0 {
 		return code
 	}
 	fmt.Fprintln(stdout, "City started under supervisor.") //nolint:errcheck // best-effort stdout

@@ -107,6 +107,62 @@ func TestDoRegisterWithNameOverrideStoresAliasInRegistryWithoutMutatingCityToml(
 	}
 }
 
+func TestRegisteredCityNamePreservesExistingRegistryAlias(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "my-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"workspace-name\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("[pack]\nname = \"pack-name\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_HOME", dir)
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "machine-alias"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := registeredCityName(cityPath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "machine-alias" {
+		t.Fatalf("registeredCityName = %q, want existing machine-local alias", got)
+	}
+}
+
+func TestRestartRegistrationNameCapturesExistingRegistryAlias(t *testing.T) {
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "my-city")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"workspace-name\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("[pack]\nname = \"pack-name\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_HOME", dir)
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "machine-alias"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := restartRegistrationName([]string{cityPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "machine-alias" {
+		t.Fatalf("restartRegistrationName = %q, want existing machine-local alias", got)
+	}
+}
+
 func TestDoRegisterWithoutNameStillUsesWorkspaceName(t *testing.T) {
 	oldRegister := registerCityWithSupervisorTestHook
 	registerCityWithSupervisorTestHook = nil
@@ -215,6 +271,43 @@ func TestDoRegisterWithoutNameErrorsWhenWorkspaceAndPackNameMissing(t *testing.T
 	}
 	if !strings.Contains(stderr.String(), "missing [pack].name") {
 		t.Fatalf("stderr = %q, want missing [pack].name", stderr.String())
+	}
+}
+
+func TestDoRegisterWithNameOverrideRejectsInvalidCityTomlBeforeRegistryWrite(t *testing.T) {
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = nil
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	dir := t.TempDir()
+	cityPath := filepath.Join(dir, "my-city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("[pack]\nname = \"pack-name\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_HOME", dir)
+
+	var stdout, stderr bytes.Buffer
+	code := doRegisterWithOptions([]string{cityPath}, "machine-alias", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "city.toml") {
+		t.Fatalf("stderr = %q, want city.toml parse error", stderr.String())
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("registry entries = %v, want none after invalid city.toml", entries)
 	}
 }
 

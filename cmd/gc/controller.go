@@ -558,11 +558,11 @@ func reloadWarningsFromError(err error) []string {
 
 // tryReloadConfig attempts to reload city.toml with includes and patches.
 // Returns the new config, provenance, revision, and non-fatal warnings on
-// success, or an error on failure (parse error, validation error, cityName
-// changed). Some failures after composition also return warning metadata via
-// the result and error; callers should report those details while keeping the
-// old config. Strict mode (default) makes composition warnings fatal.
-func tryReloadConfig(tomlPath, lockedCityName, cityRoot string) (*reloadResult, error) {
+// success, or an error on failure (parse error, validation error, workspace
+// name changed). Some failures after composition also return warning metadata
+// via the result and error; callers should report those details while keeping
+// the old config. Strict mode (default) makes composition warnings fatal.
+func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadResult, error) {
 	// Auto-fetch remote packs before full config load (mirrors cmd_start).
 	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
 		if fErr := config.FetchPacks(quickCfg.Packs, cityRoot); fErr != nil {
@@ -613,8 +613,8 @@ func tryReloadConfig(tomlPath, lockedCityName, cityRoot string) (*reloadResult, 
 	if newName == "" {
 		newName = filepath.Base(filepath.Dir(tomlPath))
 	}
-	if newName != lockedCityName {
-		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedCityName, newName))
+	if newName != lockedWorkspaceName {
+		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedWorkspaceName, newName))
 	}
 	rev := config.Revision(fsys.OSFS{}, prov, newCfg, cityRoot)
 	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: reloadWarnings}, nil

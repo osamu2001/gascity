@@ -40,7 +40,7 @@ gc [flags]
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
-| [gc mcp](#gc-mcp) | List MCP catalog visibility |
+| [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
@@ -1008,7 +1008,7 @@ Checks for available work using the agent's work_query config.
 Without --inject: prints raw output, exits 0 if work exists, 1 if empty.
 With --inject: wraps output in &lt;system-reminder&gt; for hook injection, always exits 0.
 
-The agent is determined from $GC_AGENT or a positional argument.
+		The agent is determined from $GC_AGENT or a positional argument.
 
 ```
 gc hook [agent] [flags]
@@ -1016,6 +1016,7 @@ gc hook [agent] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--hook-format` | string |  | format hook output for a provider |
 | `--inject` | bool |  | output &lt;system-reminder&gt; block for hook injection |
 
 ## gc import
@@ -1196,6 +1197,7 @@ gc mail check
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--hook-format` | string |  | format hook output for a provider |
 | `--inject` | bool |  | output &lt;system-reminder&gt; block for hook injection |
 
 ## gc mail count
@@ -1327,15 +1329,11 @@ gc mail thread <thread-id>
 
 ## gc mcp
 
-Inspect projected MCP config for a concrete target.
+Inspect the projected MCP catalog for a concrete target.
 
-Projected MCP is target-specific. Use `gc mcp list --agent <name>` when
+Projected MCP is target-specific. Use "gc mcp list --agent &lt;name&gt;" when
 the agent has a single deterministic projection target from config, or
-`gc mcp list --session <id>` for a live session target.
-
-When effective MCP exists for a target, GC adopts that provider-native
-MCP surface as managed runtime state. Later cleanup only removes files
-that GC already adopted.
+"gc mcp list --session &lt;id&gt;" for a live session target.
 
 ```
 gc mcp
@@ -1535,16 +1533,17 @@ gc prime [agent-name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--hook` | bool |  | compatibility mode for runtime hook invocations |
+| `--hook-format` | string |  | format hook output for a provider |
 
 ## gc register
 
 Register a city directory with the machine-wide supervisor.
 
 If no path is given, registers the current city (discovered from cwd).
-Use --name to set the registration name; this also persists workspace.name
-in city.toml so later registrations stay aligned. When --name is omitted,
-workspace.name is used if present, otherwise [pack].name is used and
-backfilled into workspace.name.
+Use --name to set the machine-local registration alias. The alias is stored
+in the machine-local supervisor registry and never written back to city.toml.
+When --name is omitted, workspace.name is used if present, otherwise
+[pack].name is used — in either case city.toml is not modified.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.
 

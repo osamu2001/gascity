@@ -76,13 +76,12 @@ func doRegisterWithOptions(args []string, nameOverride string, stdout, stderr io
 // registry is the sole source of truth for registration identity
 // (gastownhall/gascity#602).
 func resolveRegistrationName(cityPath, nameOverride string) (string, error) {
-	if alias := strings.TrimSpace(nameOverride); alias != "" {
-		return alias, nil
-	}
-
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("loading city.toml: %w", err)
+	}
+	if alias := strings.TrimSpace(nameOverride); alias != "" {
+		return alias, nil
 	}
 	if current := strings.TrimSpace(cfg.Workspace.Name); current != "" {
 		return current, nil

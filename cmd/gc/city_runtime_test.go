@@ -1209,6 +1209,50 @@ func TestCityRuntimeReloadProviderSwapPreservesDrainTracker(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeReloadAllowsRegistryAliasDifferentFromWorkspaceName(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfigNamed(t, tomlPath, "workspace-name", "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "machine-alias",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "machine-alias", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	writeCityRuntimeConfigNamed(t, tomlPath, "workspace-name", "fail")
+	lastProviderName := "fake"
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+
+	if lastProviderName != "fail" {
+		t.Fatalf("lastProviderName = %q, want fail; stderr=%q", lastProviderName, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "workspace.name changed") {
+		t.Fatalf("reload treated registry alias as workspace drift: %s", stderr.String())
+	}
+}
+
 func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -1709,7 +1753,12 @@ func TestCityRuntimeRunShutsDownSessionsOnContextCancel(t *testing.T) {
 
 func writeCityRuntimeConfig(t *testing.T, tomlPath, provider string) {
 	t.Helper()
-	data := []byte("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n")
+	writeCityRuntimeConfigNamed(t, tomlPath, "test-city", provider)
+}
+
+func writeCityRuntimeConfigNamed(t *testing.T, tomlPath, name, provider string) {
+	t.Helper()
+	data := []byte("[workspace]\nname = \"" + name + "\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"" + provider + "\"\n")
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

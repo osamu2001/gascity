@@ -1105,11 +1105,11 @@ func reconcileCities(
 			continue
 		}
 
-		// Use registered name as authoritative identity. Warn if live
-		// config has a different workspace.name (name drift).
+		// Use registered name as authoritative identity. city.toml may keep a
+		// different workspace.name because registration aliases are machine-local.
 		cityName := name // from entry.EffectiveName()
 		if liveName := cfg.Workspace.Name; liveName != "" && liveName != cityName {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': workspace.name changed to %q (re-register to update)\n", //nolint:errcheck
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': using registered name; city.toml workspace.name is %q\n", //nolint:errcheck
 				cityName, liveName)
 		}
 

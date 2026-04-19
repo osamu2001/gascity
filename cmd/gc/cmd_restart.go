@@ -34,10 +34,31 @@ immediate reconcile.`,
 
 // cmdRestart stops the city, then re-starts it under the supervisor.
 func cmdRestart(args []string, stdout, stderr io.Writer) int {
+	nameOverride, err := restartRegistrationName(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if code := cmdStop(args, stdout, stderr); code != 0 {
 		return code
 	}
-	return doStart(args, false /*controllerMode*/, stdout, stderr)
+	return doStartWithNameOverride(args, false /*controllerMode*/, stdout, stderr, nameOverride)
+}
+
+func restartRegistrationName(args []string) (string, error) {
+	dir, err := resolveStartDir(args)
+	if err != nil {
+		return "", err
+	}
+	cityPath, err := requireBootstrappedCity(dir)
+	if err != nil {
+		return "", err
+	}
+	entry, registered, err := registeredCityEntry(cityPath)
+	if err != nil || !registered {
+		return "", err
+	}
+	return entry.EffectiveName(), nil
 }
 
 // newRigRestartCmd creates the "gc rig restart <name>" subcommand.
