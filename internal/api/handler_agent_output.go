@@ -30,6 +30,12 @@ type agentOutputResponse struct {
 	Pagination *worker.TranscriptPagination `json:"pagination,omitempty"`
 }
 
+type agentPeekHandle interface {
+	worker.LiveObservationHandle
+	worker.StateHandle
+	worker.PeekHandle
+}
+
 // trySessionLogOutputHuma is the Huma-compatible variant of trySessionLogOutput.
 // tail carries the client's ?tail= value; tailProvided reports whether
 // the client supplied the param at all. When tailProvided is false, we
@@ -411,11 +417,10 @@ func (s *Server) streamSessionLog(ctx context.Context, send sse.Sender, name str
 }
 
 // streamPeekOutput polls Peek() and emits changes as SSE events.
-func (s *Server) streamPeekOutput(ctx context.Context, send sse.Sender, name string, cfg *config.City) {
+func (s *Server) streamPeekOutput(ctx context.Context, send sse.Sender, name string, handle agentPeekHandle) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
-	handle := s.agentWorkerHandle(name, cfg)
 	poll := time.NewTicker(outputStreamPollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(sseKeepalive)
@@ -462,7 +467,7 @@ func (s *Server) streamPeekOutput(ctx context.Context, send sse.Sender, name str
 	}
 }
 
-func (s *Server) agentWorkerHandle(name string, cfg *config.City) worker.Handle {
+func (s *Server) agentWorkerHandle(name string, cfg *config.City) agentPeekHandle {
 	if cfg == nil {
 		return nil
 	}

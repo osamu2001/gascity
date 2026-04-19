@@ -66,6 +66,11 @@ type sessionResponse struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
+type sessionResponseHandle interface {
+	worker.StateHandle
+	worker.PeekHandle
+}
+
 func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	provider, displayName := info.Provider, ""
 	if cfg != nil {
@@ -450,6 +455,8 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 	}
 	var handle worker.Handle
 	switch v := runtimeHandle.(type) {
+	case sessionResponseHandle:
+		handle = worker.NewCapabilityHandle(v, nil, nil, nil, nil, nil)
 	case worker.Handle:
 		handle = v
 	case runtime.Provider:
