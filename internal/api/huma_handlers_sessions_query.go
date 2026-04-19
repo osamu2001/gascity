@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // Query-side session handlers (list, get, transcript, pending, agent-list,
@@ -373,9 +374,12 @@ func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgen
 // streamSession needs. It's not passed through registerSSE; instead both
 // functions re-resolve from the input, which is cheap (map lookups).
 type sessionStreamState struct {
-	info    session.Info
-	path    string
-	running bool
+	info       session.Info
+	handle     worker.Handle
+	history    *worker.HistorySnapshot
+	historyReq worker.HistoryRequest
+	hasHistory bool
+	running    bool
 }
 
 // resolveSessionStream is the shared resolution logic used by both the

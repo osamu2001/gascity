@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,6 +39,15 @@ func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title 
 		t.Fatalf("create session: %v", err)
 	}
 	return info
+}
+
+func writeGeminiHistoryFixtureForAPI(t *testing.T, path, sessionID string, messages ...string) {
+	t.Helper()
+
+	body := fmt.Sprintf("{\n  \"sessionId\": %q,\n  \"messages\": [\n    %s\n  ]\n}\n", sessionID, strings.Join(messages, ",\n    "))
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write gemini transcript %s: %v", path, err)
+	}
 }
 
 type cancelStartProvider struct {
@@ -2580,6 +2590,86 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 	}
 	if !strings.Contains(body, "after second boundary") {
 		t.Fatalf("stream body missing turn written after new compact boundary: %s", body)
+	}
+}
+
+func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	base := t.TempDir()
+	workDir := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+
+	searchRoot := filepath.Join(base, ".gemini", "tmp")
+	srv.sessionLogSearchPaths = []string{searchRoot}
+	projectDir := filepath.Join(searchRoot, "project-a")
+	chatsDir := filepath.Join(projectDir, "chats")
+	for _, dir := range []string{searchRoot, projectDir, chatsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatalf("write .project_root: %v", err)
+	}
+
+	firstTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-12-before.json")
+	writeGeminiHistoryFixtureForAPI(t, firstTranscript, "before-session",
+		`{"id":"u1","timestamp":"2026-04-17T03:12:00Z","type":"user","content":"first-remembered-input"}`,
+		`{"id":"a1","timestamp":"2026-04-17T03:12:01Z","type":"gemini","content":"first-remembered-output"}`,
+	)
+	firstTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(firstTranscript, firstTime, firstTime); err != nil {
+		t.Fatalf("chtimes(first transcript): %v", err)
+	}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "gemini", workDir, "gemini", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "first-remembered-output", time.Second); !strings.Contains(body, "first-remembered-output") {
+		t.Fatalf("stream body missing initial transcript turn: %s", body)
+	}
+
+	secondTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-15-after.json")
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-continued-input"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-continued-output"}`,
+	)
+	secondTime := time.Now().Add(-1 * time.Minute)
+	if err := os.Chtimes(secondTranscript, secondTime, secondTime); err != nil {
+		t.Fatalf("chtimes(second transcript): %v", err)
+	}
+
+	fs.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: info.ID,
+	})
+
+	body := waitForRecorderSubstring(t, rec, "second-continued-output", 1500*time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "second-continued-input") || !strings.Contains(body, "second-continued-output") {
+		t.Fatalf("city-scoped stream body missing rotated transcript turns after wake: %s", body)
 	}
 }
 

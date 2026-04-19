@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -593,82 +592,60 @@ func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, i
 	}
 }
 
-func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse.Sender, info session.Info, logPath string) {
+func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse.Sender, info session.Info, handle interface {
+	worker.HistoryHandle
+	worker.InteractionHandle
+}, initial *worker.HistorySnapshot, req worker.HistoryRequest,
+) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
 
-	lw := newLogFileWatcher(logPath)
-	defer lw.Close()
+	logPath := sessionStreamTranscriptPath(ctx, handle)
+	poll := time.NewTicker(outputStreamPollInterval)
+	keepalive := time.NewTicker(sseKeepalive)
+	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
+	if logPath == "" {
+		defer poll.Stop()
+		defer keepalive.Stop()
+	}
 
-	var lastSize int64
-	var lastSentUUID string
+	var lastSentID string
 	var seq int
 	var lastActivity string
 	var lastPendingID string
-	sentUUIDs := make(map[string]struct{})
-	lw.onReset = func() {
-		lastSize = 0
-		lastActivity = ""
-	}
+	lastProgress := time.Now()
+	sentIDs := make(map[string]struct{})
+	currentActivity := historySnapshotActivity(initial)
 
-	handle, _ := s.workerHandleForSession(s.state.CityBeadStore(), info.ID)
-	readAndEmit := func() {
-		stat, err := os.Stat(logPath)
-		if err != nil || stat.Size() == lastSize {
+	emitSnapshot := func(snapshot *worker.HistorySnapshot) {
+		if snapshot == nil {
 			return
 		}
-
-		factory, err := s.workerFactory(s.state.CityBeadStore())
-		if err != nil {
-			return
-		}
-		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
-			Provider:        info.Provider,
-			TranscriptPath:  logPath,
-			TailCompactions: 1,
-			Raw:             true,
-		})
-		if err != nil {
-			return
-		}
-		sess := transcript.Session
-		lastSize = stat.Size()
-
-		activity := worker.InferTranscriptActivity(sess.Messages)
-		rawBytes := make([]json.RawMessage, 0, len(sess.Messages))
-		uuids := make([]string, 0, len(sess.Messages))
-		for _, entry := range sess.Messages {
-			if len(entry.Raw) == 0 || !json.Valid(entry.Raw) {
-				continue
-			}
-			rawBytes = append(rawBytes, entry.Raw)
-			uuids = append(uuids, entry.UUID)
-		}
-
-		if len(rawBytes) > 0 {
+		currentActivity = historySnapshotActivity(snapshot)
+		rawMessages, ids := historySnapshotRawMessages(snapshot)
+		if len(rawMessages) > 0 {
 			var toSend []json.RawMessage
-			if lastSentUUID == "" {
-				toSend = rawBytes
+			if lastSentID == "" {
+				toSend = rawMessages
 			} else {
 				found := false
-				for i, uuid := range uuids {
-					if uuid == lastSentUUID {
-						toSend = rawBytes[i+1:]
+				for i, id := range ids {
+					if id == lastSentID {
+						toSend = rawMessages[i+1:]
 						found = true
 						break
 					}
 				}
 				if !found {
-					log.Printf("session stream raw: cursor %s lost, emitting only new messages", lastSentUUID)
-					for i, uuid := range uuids {
-						if _, seen := sentUUIDs[uuid]; !seen {
-							toSend = append(toSend, rawBytes[i])
+					log.Printf("session stream raw: cursor %s lost, emitting only new messages", lastSentID)
+					for i, id := range ids {
+						if _, seen := sentIDs[id]; !seen {
+							toSend = append(toSend, rawMessages[i])
 						}
 					}
 				}
 			}
-
 			if len(toSend) > 0 {
 				seq++
 				_ = send(sse.Message{ID: seq, Data: SessionStreamRawMessageEvent{
@@ -678,31 +655,31 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 					Format:   "raw",
 					Messages: wrapRawFrameBytes(toSend),
 				}})
+				lastProgress = time.Now()
+				lastPendingID = ""
 			}
-
-			lastSentUUID = uuids[len(uuids)-1]
-			for _, uuid := range uuids {
-				sentUUIDs[uuid] = struct{}{}
+			lastSentID = ids[len(ids)-1]
+			for _, id := range ids {
+				sentIDs[id] = struct{}{}
 			}
-			lastPendingID = ""
 		}
-
-		if activity != "" && activity != lastActivity {
-			lastActivity = activity
+		if currentActivity != "" && currentActivity != lastActivity {
+			lastActivity = currentActivity
 			seq++
-			_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: activity}})
+			_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: currentActivity}})
+			lastProgress = time.Now()
 		}
 	}
 
-	onStall := func() {
-		if handle == nil {
+	emitPending := func() {
+		if time.Since(lastProgress) < 5*time.Second {
 			return
 		}
 		pending, err := handle.Pending(ctx)
 		if err != nil || pending == nil {
 			if lastPendingID != "" {
 				lastPendingID = ""
-				activity := lastActivity
+				activity := currentActivity
 				if activity == "" {
 					activity = "in-turn"
 				}
@@ -719,82 +696,89 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 		_ = send(sse.Message{ID: seq, Data: *pending})
 	}
 
-	lw.Run(ctx, readAndEmit, func() {
-		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
-	}, RunOpts{
-		OnStall:      onStall,
-		StallTimeout: 5 * time.Second,
-		Wake:         s.watchSessionWorkerOperationSignals(ctx, info),
-	})
+	reloadSnapshot := func() {
+		snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), req)
+		switch {
+		case err == nil:
+			emitSnapshot(snapshot)
+		case errors.Is(err, worker.ErrHistoryUnavailable):
+		default:
+			log.Printf("session stream raw: history reload failed for %s: %v", info.ID, err)
+		}
+		emitPending()
+	}
+
+	emitSnapshot(initial)
+	if logPath != "" {
+		poll.Stop()
+		keepalive.Stop()
+		lw := newLogFileWatcher(logPath)
+		defer lw.Close()
+		lw.Run(ctx, reloadSnapshot, func() {
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+		}, RunOpts{Wake: workerOps})
+		return
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			reloadSnapshot()
+		case _, ok := <-workerOps:
+			if !ok {
+				workerOps = nil
+				continue
+			}
+			reloadSnapshot()
+		case <-keepalive.C:
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+		}
+	}
 }
 
-func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Sender, info session.Info, logPath string) {
+func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Sender, info session.Info, handle worker.HistoryHandle, initial *worker.HistorySnapshot) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
 
-	lw := newLogFileWatcher(logPath)
-	defer lw.Close()
-
-	var lastSize int64
-	var lastSentUUID string
-	var seq int
-	var lastActivity string
-	sentUUIDs := make(map[string]struct{})
-	lw.onReset = func() {
-		lastSize = 0
-		lastActivity = ""
+	logPath := sessionStreamTranscriptPath(ctx, handle)
+	poll := time.NewTicker(outputStreamPollInterval)
+	keepalive := time.NewTicker(sseKeepalive)
+	workerOps := s.watchSessionWorkerOperationSignals(ctx, info)
+	if logPath == "" {
+		defer poll.Stop()
+		defer keepalive.Stop()
 	}
 
-	readAndEmit := func() {
-		stat, err := os.Stat(logPath)
-		if err != nil || stat.Size() == lastSize {
+	var lastSentID string
+	var seq int
+	var lastActivity string
+	sentIDs := make(map[string]struct{})
+
+	emitSnapshot := func(snapshot *worker.HistorySnapshot) {
+		if snapshot == nil {
 			return
 		}
-
-		factory, err := s.workerFactory(s.state.CityBeadStore())
-		if err != nil {
-			return
-		}
-		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
-			Provider:       info.Provider,
-			TranscriptPath: logPath,
-		})
-		if err != nil {
-			return
-		}
-		sess := transcript.Session
-		lastSize = stat.Size()
-
-		activity := worker.InferTranscriptActivity(sess.Messages)
-		turns := make([]outputTurn, 0, len(sess.Messages))
-		uuids := make([]string, 0, len(sess.Messages))
-		for _, entry := range sess.Messages {
-			turn := entryToTurn(entry)
-			if turn.Text == "" {
-				continue
-			}
-			turns = append(turns, turn)
-			uuids = append(uuids, entry.UUID)
-		}
-
+		turns, ids := historySnapshotTurns(snapshot)
 		if len(turns) > 0 {
 			var toSend []outputTurn
-			if lastSentUUID == "" {
+			if lastSentID == "" {
 				toSend = turns
 			} else {
 				found := false
-				for i, uuid := range uuids {
-					if uuid == lastSentUUID {
+				for i, id := range ids {
+					if id == lastSentID {
 						toSend = turns[i+1:]
 						found = true
 						break
 					}
 				}
 				if !found {
-					log.Printf("session stream: cursor %s lost, emitting only new turns", lastSentUUID)
-					for i, uuid := range uuids {
-						if _, seen := sentUUIDs[uuid]; !seen {
+					log.Printf("session stream: cursor %s lost, emitting only new turns", lastSentID)
+					for i, id := range ids {
+						if _, seen := sentIDs[id]; !seen {
 							toSend = append(toSend, turns[i])
 						}
 					}
@@ -811,13 +795,13 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 					Turns:    toSend,
 				}})
 			}
-
-			lastSentUUID = uuids[len(uuids)-1]
-			for _, uuid := range uuids {
-				sentUUIDs[uuid] = struct{}{}
+			lastSentID = ids[len(ids)-1]
+			for _, id := range ids {
+				sentIDs[id] = struct{}{}
 			}
 		}
 
+		activity := historySnapshotActivity(snapshot)
 		if activity != "" && activity != lastActivity {
 			lastActivity = activity
 			seq++
@@ -825,9 +809,45 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 		}
 	}
 
-	lw.Run(ctx, readAndEmit, func() {
-		_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
-	}, RunOpts{Wake: s.watchSessionWorkerOperationSignals(ctx, info)})
+	reloadSnapshot := func() {
+		snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{})
+		switch {
+		case err == nil:
+			emitSnapshot(snapshot)
+		case errors.Is(err, worker.ErrHistoryUnavailable):
+		default:
+			log.Printf("session stream: history reload failed for %s: %v", info.ID, err)
+		}
+	}
+
+	emitSnapshot(initial)
+	if logPath != "" {
+		poll.Stop()
+		keepalive.Stop()
+		lw := newLogFileWatcher(logPath)
+		defer lw.Close()
+		lw.Run(ctx, reloadSnapshot, func() {
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+		}, RunOpts{Wake: workerOps})
+		return
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			reloadSnapshot()
+		case _, ok := <-workerOps:
+			if !ok {
+				workerOps = nil
+				continue
+			}
+			reloadSnapshot()
+		case <-keepalive.C:
+			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
+		}
+	}
 }
 
 func (s *Server) streamSessionPeekRawHuma(ctx context.Context, send sse.Sender, info session.Info) {
