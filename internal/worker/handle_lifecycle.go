@@ -220,6 +220,14 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 			return state, nil
 		}
 		state.Phase = PhaseReady
+		if strings.TrimSpace(info.SessionKey) == "" {
+			if history, histErr := h.historyWithRequest(HistoryRequest{TailCompactions: 1}); histErr == nil && history != nil {
+				if history.TailState.Activity == TailActivityInTurn {
+					state.Phase = PhaseBusy
+				}
+			}
+			return state, nil
+		}
 		if path, pathErr := h.manager.TranscriptPath(id, h.adapter.SearchPaths); pathErr == nil && strings.TrimSpace(path) != "" {
 			if activity, actErr := h.adapter.TailActivity(path); actErr == nil && activity == TailActivityInTurn {
 				state.Phase = PhaseBusy

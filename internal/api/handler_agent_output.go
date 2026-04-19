@@ -33,26 +33,69 @@ type agentPeekHandle interface {
 	worker.PeekHandle
 }
 
-// trySessionLogOutputHuma is the Huma-compatible variant of trySessionLogOutput.
-// tail carries the client's ?tail= value; tailProvided reports whether the
-// client supplied the param at all.
-func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tailInput int, tailProvided bool, before string) (*agentOutputResponse, error) {
+type agentTranscriptState struct {
+	provider    string
+	workDir     string
+	sessionName string
+	sessionID   string
+	sessionKey  string
+	path        string
+}
+
+func (s *Server) resolveAgentTranscript(name string, agentCfg config.Agent) (*agentTranscriptState, error) {
 	cfg := s.state.Config()
-	workDir := s.resolveAgentWorkDir(agentCfg, name)
-	if workDir == "" {
-		return nil, nil
+	state := &agentTranscriptState{}
+	if cfg == nil {
+		return state, nil
 	}
-	provider := strings.TrimSpace(agentCfg.Provider)
-	if provider == "" && cfg != nil {
-		provider = strings.TrimSpace(cfg.Workspace.Provider)
+
+	state.sessionName = agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
+	state.provider = strings.TrimSpace(agentCfg.Provider)
+	if state.provider == "" {
+		state.provider = strings.TrimSpace(cfg.Workspace.Provider)
 	}
+	state.workDir = s.resolveAgentWorkDir(agentCfg, name)
+	if state.workDir == "" {
+		return state, nil
+	}
+
+	if sp := s.state.SessionProvider(); sp != nil && state.sessionName != "" {
+		if sessionID, err := sp.GetMeta(state.sessionName, "GC_SESSION_ID"); err == nil {
+			state.sessionID = strings.TrimSpace(sessionID)
+		}
+	}
+	if state.sessionID != "" {
+		if store := s.state.CityBeadStore(); store != nil {
+			if catalog, err := s.workerSessionCatalog(store); err == nil {
+				if info, err := catalog.Get(state.sessionID); err == nil {
+					state.sessionKey = strings.TrimSpace(info.SessionKey)
+				}
+			}
+		}
+	}
+
 	factory, err := s.workerFactory(s.state.CityBeadStore())
 	if err != nil {
 		return nil, err
 	}
-	path := factory.DiscoverTranscript(provider, workDir, "")
-	if path == "" {
+	state.path = factory.DiscoverTranscript(state.provider, state.workDir, state.sessionKey)
+	return state, nil
+}
+
+// trySessionLogOutputHuma is the Huma-compatible variant of trySessionLogOutput.
+// tail carries the client's ?tail= value; tailProvided reports whether the
+// client supplied the param at all.
+func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tailInput int, tailProvided bool, before string) (*agentOutputResponse, error) {
+	transcriptState, err := s.resolveAgentTranscript(name, agentCfg)
+	if err != nil {
+		return nil, err
+	}
+	if transcriptState.path == "" {
 		return nil, nil
+	}
+	factory, err := s.workerFactory(s.state.CityBeadStore())
+	if err != nil {
+		return nil, err
 	}
 
 	tail := 1
@@ -61,8 +104,8 @@ func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tai
 	}
 
 	transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
-		Provider:        provider,
-		TranscriptPath:  path,
+		Provider:        transcriptState.provider,
+		TranscriptPath:  transcriptState.path,
 		TailCompactions: tail,
 		BeforeEntryID:   before,
 	})

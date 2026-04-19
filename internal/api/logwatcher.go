@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -26,20 +27,7 @@ type logFileWatcher struct {
 // unavailable or the file cannot be watched, it falls back to polling.
 func newLogFileWatcher(logPath string) *logFileWatcher {
 	lw := &logFileWatcher{logPath: logPath}
-
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		lw.fallbackPoll = time.NewTicker(outputStreamPollInterval)
-		log.Printf("session stream: fsnotify unavailable for %s, falling back to polling", logPath)
-		return lw
-	}
-	if addErr := watcher.Add(logPath); addErr != nil {
-		_ = watcher.Close()
-		lw.fallbackPoll = time.NewTicker(outputStreamPollInterval)
-		log.Printf("session stream: fsnotify watch failed for %s, falling back to polling", logPath)
-		return lw
-	}
-	lw.watcher = watcher
+	lw.watchPath(logPath, false)
 	return lw
 }
 
@@ -67,6 +55,57 @@ func (lw *logFileWatcher) switchToPolling(reason string) {
 	if lw.onReset != nil {
 		lw.onReset()
 	}
+}
+
+func (lw *logFileWatcher) watchPath(path string, reset bool) {
+	path = strings.TrimSpace(path)
+	lw.logPath = path
+	if lw.watcher != nil {
+		lw.watcher.Close() //nolint:errcheck
+		lw.watcher = nil
+	}
+	if lw.fallbackPoll != nil {
+		lw.fallbackPoll.Stop()
+		lw.fallbackPoll = nil
+	}
+	if path == "" {
+		if reset && lw.onReset != nil {
+			lw.onReset()
+		}
+		return
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		lw.fallbackPoll = time.NewTicker(outputStreamPollInterval)
+		log.Printf("session stream: fsnotify unavailable for %s, falling back to polling", path)
+		if reset && lw.onReset != nil {
+			lw.onReset()
+		}
+		return
+	}
+	if addErr := watcher.Add(path); addErr != nil {
+		_ = watcher.Close()
+		lw.fallbackPoll = time.NewTicker(outputStreamPollInterval)
+		log.Printf("session stream: fsnotify watch failed for %s, falling back to polling", path)
+		if reset && lw.onReset != nil {
+			lw.onReset()
+		}
+		return
+	}
+	lw.watcher = watcher
+	if reset && lw.onReset != nil {
+		lw.onReset()
+	}
+}
+
+// UpdatePath retargets the watcher to a new transcript path when providers
+// rotate logs across restarts but keep the old file on disk.
+func (lw *logFileWatcher) UpdatePath(path string) {
+	path = strings.TrimSpace(path)
+	if path == "" || path == lw.logPath {
+		return
+	}
+	lw.watchPath(path, true)
 }
 
 // RunOpts configures optional callbacks for the Run loop.

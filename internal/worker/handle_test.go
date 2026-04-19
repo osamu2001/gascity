@@ -1004,6 +1004,79 @@ func TestSessionHandleHistoryPersistsCodexResumeKeyForLaterRestart(t *testing.T)
 	}
 }
 
+func TestSessionHandleStatePersistsCodexResumeKeyWithoutPrimingHistoryCache(t *testing.T) {
+	base := t.TempDir()
+	dayDir := filepath.Join(base, "2026", "04", "14")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatalf("mkdir dayDir: %v", err)
+	}
+
+	workDir := "/tmp/codex-project"
+	resumeID := "019d8afb-efe8-7280-abf9-5901fd92e0cd"
+	transcriptPath := filepath.Join(dayDir, "rollout-2026-04-14T09-54-20-"+resumeID+".jsonl")
+	transcript := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":"2026-04-14T09:54:20Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2026-04-14T09:54:21Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"remember alpha"}]}}`,
+		`{"timestamp":"2026-04-14T09:54:22Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"remembered"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	handle, store, sp, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileCodexTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "codex --dangerously-bypass-approvals-and-sandbox",
+		WorkDir:  workDir,
+		Provider: "codex",
+		Resume: sessionpkg.ProviderResume{
+			ResumeFlag:  "resume",
+			ResumeStyle: "subcommand",
+		},
+	})
+	handle.adapter.SearchPaths = []string{base}
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start(first): %v", err)
+	}
+
+	state, err := handle.State(context.Background())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if state.Phase != PhaseReady {
+		t.Fatalf("State().Phase = %s, want %s", state.Phase, PhaseReady)
+	}
+	if handle.history != nil {
+		t.Fatal("State() primed history cache, want tail-only resume-key probe")
+	}
+
+	bead, err := store.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("store.Get(%q): %v", handle.sessionID, err)
+	}
+	if bead.Metadata["session_key"] != resumeID {
+		t.Fatalf("session_key = %q, want %q", bead.Metadata["session_key"], resumeID)
+	}
+
+	if err := handle.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start(second): %v", err)
+	}
+
+	secondStart := lastCall(sp.Calls, "Start")
+	if secondStart == nil {
+		t.Fatalf("runtime calls = %#v, want second Start", sp.Calls)
+	}
+	wantResume := "codex resume " + resumeID
+	if !strings.Contains(secondStart.Config.Command, wantResume) {
+		t.Fatalf("second start command = %q, want %q", secondStart.Config.Command, wantResume)
+	}
+}
+
 func TestSessionHandleAgentMappingsAndTranscriptUseWorkerBoundary(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "claude-project")

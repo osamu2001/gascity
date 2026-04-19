@@ -2673,6 +2673,101 @@ func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *t
 	}
 }
 
+func TestCityScopedSessionStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	base := t.TempDir()
+	workDir := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+
+	searchRoot := filepath.Join(base, ".gemini", "tmp")
+	srv.sessionLogSearchPaths = []string{searchRoot}
+	projectDir := filepath.Join(searchRoot, "project-a")
+	chatsDir := filepath.Join(projectDir, "chats")
+	for _, dir := range []string{searchRoot, projectDir, chatsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatalf("write .project_root: %v", err)
+	}
+
+	firstTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-12-before.json")
+	writeGeminiHistoryFixtureForAPI(t, firstTranscript, "before-session",
+		`{"id":"u1","timestamp":"2026-04-17T03:12:00Z","type":"user","content":"first-input"}`,
+		`{"id":"a1","timestamp":"2026-04-17T03:12:01Z","type":"gemini","content":"first-output"}`,
+	)
+	firstTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(firstTranscript, firstTime, firstTime); err != nil {
+		t.Fatalf("chtimes(first transcript): %v", err)
+	}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "gemini", workDir, "gemini", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "first-output", time.Second); !strings.Contains(body, "first-output") {
+		t.Fatalf("stream body missing initial transcript turn: %s", body)
+	}
+
+	secondTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-15-after.json")
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-input"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-output"}`,
+	)
+	secondTime := time.Now().Add(-1 * time.Minute)
+	if err := os.Chtimes(secondTranscript, secondTime, secondTime); err != nil {
+		t.Fatalf("chtimes(second transcript): %v", err)
+	}
+
+	fs.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: info.ID,
+	})
+
+	if body := waitForRecorderSubstring(t, rec, "second-output", 1500*time.Millisecond); !strings.Contains(body, "second-output") {
+		t.Fatalf("stream body missing rotated transcript after wake: %s", body)
+	}
+
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-input"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-output"}`,
+		`{"id":"u3","timestamp":"2026-04-17T03:15:02Z","type":"user","content":"third-input"}`,
+		`{"id":"a3","timestamp":"2026-04-17T03:15:03Z","type":"gemini","content":"third-output"}`,
+	)
+	currentTime := time.Now()
+	if err := os.Chtimes(secondTranscript, currentTime, currentTime); err != nil {
+		t.Fatalf("chtimes(updated second transcript): %v", err)
+	}
+
+	body := waitForRecorderSubstring(t, rec, "third-output", 1500*time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "third-input") || !strings.Contains(body, "third-output") {
+		t.Fatalf("city-scoped stream body missing writes to rotated transcript after wake: %s", body)
+	}
+}
+
 func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
@@ -2807,6 +2902,65 @@ func TestHandleSessionStreamRawWorkerOperationEventWakesTranscriptReload(t *test
 
 	if !strings.Contains(body, "raw event wake") {
 		t.Fatalf("raw stream body missing message after worker operation wakeup: %s", body)
+	}
+}
+
+func TestHandleSessionStreamRawStallEmitsPendingWithoutTranscriptGrowth(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	prevStallTimeout := sessionStreamPendingStallTimeout
+	sessionStreamPendingStallTimeout = 50 * time.Millisecond
+	defer func() {
+		sessionStreamPendingStallTimeout = prevStallTimeout
+	}()
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=raw", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "hello", time.Second); !strings.Contains(body, "hello") {
+		t.Fatalf("raw stream body missing initial transcript: %s", body)
+	}
+
+	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1",
+		Kind:      "approval",
+		Prompt:    "Proceed?",
+	})
+
+	body := waitForRecorderSubstring(t, rec, "req-1", time.Second)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "req-1") {
+		t.Fatalf("raw stream body missing pending interaction after idle stall: %s", body)
 	}
 }
 

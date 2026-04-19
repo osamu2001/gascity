@@ -39,13 +39,22 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 		provider = strings.TrimSpace(cfg.Workspace.Provider)
 	}
 	var logPath string
+	resolveLogPath := func() string { return "" }
 	if workDir != "" {
-		factory, err := s.workerFactory(s.state.CityBeadStore())
+		transcriptState, err := s.resolveAgentTranscript(name, agentCfg)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
-		logPath = factory.DiscoverTranscript(provider, workDir, "")
+		provider = transcriptState.provider
+		logPath = transcriptState.path
+		resolveLogPath = func() string {
+			resolved, err := s.resolveAgentTranscript(name, agentCfg)
+			if err != nil {
+				return ""
+			}
+			return resolved.path
+		}
 	}
 
 	handle := s.agentWorkerHandle(name, cfg)
@@ -73,7 +82,7 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 	ctx := r.Context()
 	workerOps := s.watchAgentWorkerOperationSignals(ctx, name, cfg)
 	if logPath != "" {
-		s.streamSessionLog(ctx, w, name, provider, logPath, workerOps)
+		s.streamSessionLog(ctx, w, name, provider, logPath, resolveLogPath, workerOps)
 	} else {
 		s.streamPeekOutput(ctx, w, name, handle, workerOps)
 	}
@@ -82,8 +91,15 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 // streamSessionLog polls a session log file and emits new turns as SSE events.
 // Uses file size tracking to skip re-reads when the file hasn't grown, and
 // UUID-based cursor to correctly identify new turns after DAG resolution.
-func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, name, provider, logPath string, wake <-chan struct{}) {
-	lw := newLogFileWatcher(logPath)
+func (s *Server) streamSessionLog(
+	ctx context.Context,
+	w http.ResponseWriter,
+	name, provider, logPath string,
+	resolvePath func() string,
+	wake <-chan struct{},
+) {
+	currentPath := strings.TrimSpace(logPath)
+	lw := newLogFileWatcher(currentPath)
 	defer lw.Close()
 
 	var lastSize int64
@@ -93,7 +109,17 @@ func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, na
 	sentUUIDs := make(map[string]struct{})
 
 	readAndEmit := func() {
-		info, err := os.Stat(logPath)
+		if resolvePath != nil {
+			if resolvedPath := strings.TrimSpace(resolvePath()); resolvedPath != "" && resolvedPath != currentPath {
+				currentPath = resolvedPath
+				lw.UpdatePath(currentPath)
+			}
+		}
+		if currentPath == "" {
+			return
+		}
+
+		info, err := os.Stat(currentPath)
 		if err != nil {
 			return
 		}
@@ -109,7 +135,7 @@ func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, na
 		}
 		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
 			Provider:        provider,
-			TranscriptPath:  logPath,
+			TranscriptPath:  currentPath,
 			TailCompactions: 1,
 		})
 		if err != nil {
@@ -250,12 +276,19 @@ func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, na
 	}
 }
 
-func (s *Server) streamSessionLogHuma(ctx context.Context, send sse.Sender, name, provider, logPath string, wake <-chan struct{}) {
+func (s *Server) streamSessionLogHuma(
+	ctx context.Context,
+	send sse.Sender,
+	name, provider, logPath string,
+	resolvePath func() string,
+	wake <-chan struct{},
+) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	send = cancelOnSendError(send, cancel)
 
-	lw := newLogFileWatcher(logPath)
+	currentPath := strings.TrimSpace(logPath)
+	lw := newLogFileWatcher(currentPath)
 	defer lw.Close()
 
 	var lastSize int64
@@ -265,7 +298,17 @@ func (s *Server) streamSessionLogHuma(ctx context.Context, send sse.Sender, name
 	sentUUIDs := make(map[string]struct{})
 
 	readAndEmit := func() {
-		info, err := os.Stat(logPath)
+		if resolvePath != nil {
+			if resolvedPath := strings.TrimSpace(resolvePath()); resolvedPath != "" && resolvedPath != currentPath {
+				currentPath = resolvedPath
+				lw.UpdatePath(currentPath)
+			}
+		}
+		if currentPath == "" {
+			return
+		}
+
+		info, err := os.Stat(currentPath)
 		if err != nil {
 			return
 		}
@@ -280,7 +323,7 @@ func (s *Server) streamSessionLogHuma(ctx context.Context, send sse.Sender, name
 		}
 		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
 			Provider:        provider,
-			TranscriptPath:  logPath,
+			TranscriptPath:  currentPath,
 			TailCompactions: 1,
 		})
 		if err != nil {

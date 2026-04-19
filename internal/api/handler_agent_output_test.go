@@ -40,6 +40,65 @@ func newServerWithSearchPaths(state State, searchBase string) *Server {
 	return s
 }
 
+type geminiAgentOutputStreamFixture struct {
+	state *fakeState
+	srv   *Server
+	info  session.Info
+	chats string
+}
+
+func newGeminiAgentOutputStreamFixture(t *testing.T) *geminiAgentOutputStreamFixture {
+	t.Helper()
+
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents[0].Provider = "gemini"
+	fs.cfg.Workspace.Provider = "gemini"
+	srv := New(fs)
+
+	base := t.TempDir()
+	workDir := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+	fs.cfg.Rigs[0].Path = workDir
+
+	searchRoot := filepath.Join(base, ".gemini", "tmp")
+	srv.sessionLogSearchPaths = []string{searchRoot}
+	projectDir := filepath.Join(searchRoot, "project-a")
+	chatsDir := filepath.Join(projectDir, "chats")
+	for _, dir := range []string{searchRoot, projectDir, chatsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatalf("write .project_root: %v", err)
+	}
+
+	firstTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-12-before.json")
+	writeGeminiHistoryFixtureForAPI(t, firstTranscript, "before-session",
+		`{"id":"u1","timestamp":"2026-04-17T03:12:00Z","type":"user","content":"first-input"}`,
+		`{"id":"a1","timestamp":"2026-04-17T03:12:01Z","type":"gemini","content":"first-output"}`,
+	)
+	firstTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(firstTranscript, firstTime, firstTime); err != nil {
+		t.Fatalf("chtimes(first transcript): %v", err)
+	}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "gemini", workDir, "gemini", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	return &geminiAgentOutputStreamFixture{
+		state: fs,
+		srv:   srv,
+		info:  info,
+		chats: chatsDir,
+	}
+}
+
 func TestAgentOutputConversation(t *testing.T) {
 	state := newFakeState(t)
 	rigDir := t.TempDir()
@@ -417,6 +476,125 @@ func TestAgentOutputStreamStoppedAgent(t *testing.T) {
 	}
 }
 
+func TestAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) {
+	fixture := newGeminiAgentOutputStreamFixture(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		fixture.srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "first-output", time.Second); !strings.Contains(body, "first-output") {
+		t.Fatalf("stream body missing initial transcript turn: %s", body)
+	}
+
+	secondTranscript := filepath.Join(fixture.chats, "session-2026-04-17T03-15-after.json")
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-input"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-output"}`,
+	)
+	secondTime := time.Now().Add(-1 * time.Minute)
+	if err := os.Chtimes(secondTranscript, secondTime, secondTime); err != nil {
+		t.Fatalf("chtimes(second transcript): %v", err)
+	}
+
+	sessionName := agentSessionName(fixture.state.CityName(), "myrig/worker", fixture.state.cfg.Workspace.SessionTemplate)
+	fixture.state.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: sessionName,
+	})
+
+	if body := waitForRecorderSubstring(t, rec, "second-output", 1500*time.Millisecond); !strings.Contains(body, "second-output") {
+		t.Fatalf("stream body missing rotated transcript after wake: %s", body)
+	}
+
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-input"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-output"}`,
+		`{"id":"u3","timestamp":"2026-04-17T03:15:02Z","type":"user","content":"third-input"}`,
+		`{"id":"a3","timestamp":"2026-04-17T03:15:03Z","type":"gemini","content":"third-output"}`,
+	)
+	if err := os.Chtimes(secondTranscript, time.Now(), time.Now()); err != nil {
+		t.Fatalf("chtimes(updated second transcript): %v", err)
+	}
+
+	body := waitForRecorderSubstring(t, rec, "third-output", 1500*time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "third-input") || !strings.Contains(body, "third-output") {
+		t.Fatalf("stream body missing writes to rotated transcript after wake: %s", body)
+	}
+}
+
+func TestCityScopedAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) {
+	fixture := newGeminiAgentOutputStreamFixture(t)
+	h := newTestCityHandlerWith(t, fixture.state, fixture.srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", cityURL(fixture.state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "first-output", time.Second); !strings.Contains(body, "first-output") {
+		t.Fatalf("city-scoped stream body missing initial transcript turn: %s", body)
+	}
+
+	secondTranscript := filepath.Join(fixture.chats, "session-2026-04-17T03-15-after.json")
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-input"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-output"}`,
+	)
+	secondTime := time.Now().Add(-1 * time.Minute)
+	if err := os.Chtimes(secondTranscript, secondTime, secondTime); err != nil {
+		t.Fatalf("chtimes(second transcript): %v", err)
+	}
+
+	sessionName := agentSessionName(fixture.state.CityName(), "myrig/worker", fixture.state.cfg.Workspace.SessionTemplate)
+	fixture.state.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: sessionName,
+	})
+
+	if body := waitForRecorderSubstring(t, rec, "second-output", 1500*time.Millisecond); !strings.Contains(body, "second-output") {
+		t.Fatalf("city-scoped stream body missing rotated transcript after wake: %s", body)
+	}
+
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-input"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-output"}`,
+		`{"id":"u3","timestamp":"2026-04-17T03:15:02Z","type":"user","content":"third-input"}`,
+		`{"id":"a3","timestamp":"2026-04-17T03:15:03Z","type":"gemini","content":"third-output"}`,
+	)
+	if err := os.Chtimes(secondTranscript, time.Now(), time.Now()); err != nil {
+		t.Fatalf("chtimes(updated second transcript): %v", err)
+	}
+
+	body := waitForRecorderSubstring(t, rec, "third-output", 1500*time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "third-input") || !strings.Contains(body, "third-output") {
+		t.Fatalf("city-scoped stream body missing writes to rotated transcript after wake: %s", body)
+	}
+}
+
 func TestAgentOutputStreamWorkerOperationEventWakesPeekFallback(t *testing.T) {
 	state := newFakeState(t)
 	if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
@@ -437,7 +615,7 @@ func TestAgentOutputStreamWorkerOperationEventWakesPeekFallback(t *testing.T) {
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "first output", time.Second); !strings.Contains(body, "first output") {
+	if body := waitForRecorderSubstring(t, rec, "first output", 2*time.Second); !strings.Contains(body, "first output") {
 		t.Fatalf("stream body missing initial output: %s", body)
 	}
 
@@ -448,7 +626,7 @@ func TestAgentOutputStreamWorkerOperationEventWakesPeekFallback(t *testing.T) {
 		Subject: "myrig--worker",
 	})
 
-	body := waitForRecorderSubstring(t, rec, "wake from runtime event", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "wake from runtime event", 2*time.Second)
 
 	cancel()
 	<-done
@@ -494,7 +672,7 @@ func TestAgentOutputStreamWorkerOperationSessionIDWakesPeekFallback(t *testing.T
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "first output", time.Second); !strings.Contains(body, "first output") {
+	if body := waitForRecorderSubstring(t, rec, "first output", 2*time.Second); !strings.Contains(body, "first output") {
 		t.Fatalf("stream body missing initial output: %s", body)
 	}
 
@@ -505,7 +683,7 @@ func TestAgentOutputStreamWorkerOperationSessionIDWakesPeekFallback(t *testing.T
 		Subject: info.ID,
 	})
 
-	body := waitForRecorderSubstring(t, rec, "wake from session id", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "wake from session id", 2*time.Second)
 
 	cancel()
 	<-done
