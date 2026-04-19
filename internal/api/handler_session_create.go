@@ -171,26 +171,13 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	// starts the agent process on the next tick. This avoids blocking the
 	// HTTP response for 10-30s while the agent boots in tmux, and lets MC
 	// show the session in the sidebar immediately via optimistic UI.
-	handle, err := s.newResolvedWorkerSessionHandle(store, worker.ResolvedSessionConfig{
-		Alias:     alias,
-		Template:  template,
-		Title:     title,
-		Transport: transport,
-		Metadata:  extraMeta,
-		Runtime: worker.ResolvedRuntime{
-			Command:    command,
-			WorkDir:    workDir,
-			Provider:   resolved.Name,
-			SessionEnv: resolved.Env,
-			Resume: session.ProviderResume{
-				ResumeFlag:    resolved.ResumeFlag,
-				ResumeStyle:   resolved.ResumeStyle,
-				ResumeCommand: resolved.ResumeCommand,
-				SessionIDFlag: resolved.SessionIDFlag,
-			},
-			Hints: sessionCreateHints(resolved),
-		},
-	})
+	resolvedCfg, err := resolvedSessionConfigForProvider(alias, "", template, title, transport, extraMeta, resolved, command, workDir)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeSessionManagerError(w, err)
+		return
+	}
+	handle, err := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)
@@ -321,28 +308,15 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		command = command + " " + shellquote.Join(extraArgs)
 	}
 
-	hints := sessionCreateHints(resolved)
-	handle, err := s.newResolvedWorkerSessionHandle(store, worker.ResolvedSessionConfig{
-		Alias:    alias,
-		Template: template,
-		Title:    title,
-		Metadata: map[string]string{
-			"session_origin": "manual",
-		},
-		Runtime: worker.ResolvedRuntime{
-			Command:    command,
-			WorkDir:    workDir,
-			Provider:   resolved.Name,
-			SessionEnv: resolved.Env,
-			Resume: session.ProviderResume{
-				ResumeFlag:    resolved.ResumeFlag,
-				ResumeStyle:   resolved.ResumeStyle,
-				ResumeCommand: resolved.ResumeCommand,
-				SessionIDFlag: resolved.SessionIDFlag,
-			},
-			Hints: hints,
-		},
-	})
+	resolvedCfg, err := resolvedSessionConfigForProvider(alias, "", template, title, "", map[string]string{
+		"session_origin": "manual",
+	}, resolved, command, workDir)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeSessionManagerError(w, err)
+		return
+	}
+	handle, err := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 	if err != nil {
 		s.idem.unreserve(idemKey)
 		writeSessionManagerError(w, err)

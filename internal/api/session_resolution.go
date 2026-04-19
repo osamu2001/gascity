@@ -252,27 +252,11 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		apiNamedSessionModeKey:     spec.Mode,
 		"session_origin":           "named",
 	}
-	handle, err := s.newResolvedWorkerSessionHandle(store, worker.ResolvedSessionConfig{
-		Alias:        spec.Identity,
-		ExplicitName: spec.SessionName,
-		Template:     qualifiedTemplate,
-		Title:        spec.Identity,
-		Transport:    transport,
-		Metadata:     extraMeta,
-		Runtime: worker.ResolvedRuntime{
-			Command:    firstNonEmptyString(resolved.CommandString(), resolved.Name),
-			WorkDir:    workDir,
-			Provider:   resolved.Name,
-			SessionEnv: resolved.Env,
-			Resume: session.ProviderResume{
-				ResumeFlag:    resolved.ResumeFlag,
-				ResumeStyle:   resolved.ResumeStyle,
-				ResumeCommand: resolved.ResumeCommand,
-				SessionIDFlag: resolved.SessionIDFlag,
-			},
-			Hints: sessionCreateHints(resolved),
-		},
-	})
+	resolvedCfg, err := resolvedSessionConfigForProvider(spec.Identity, spec.SessionName, qualifiedTemplate, spec.Identity, transport, extraMeta, resolved, "", workDir)
+	if err != nil {
+		return "", err
+	}
+	handle, err := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 	if err != nil {
 		return "", err
 	}
