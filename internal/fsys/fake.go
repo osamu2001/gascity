@@ -114,6 +114,7 @@ func (f *Fake) Stat(name string) (os.FileInfo, error) {
 				f.ModTimes[target] = modTime
 			}
 			return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), modTime: modTime}, nil
+			return fakeFileInfo{name: filepath.Base(name), size: int64(len(data))}, nil
 		}
 		return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
 	}

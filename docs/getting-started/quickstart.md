@@ -22,6 +22,13 @@ Oh My Zsh's `git` plugin defines a `gc` alias for `git commit --verbose`. If
 See [Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hides-gc).
 </Tip>
 
+<Tip>
+Oh My Zsh's `git` plugin defines a `gc` alias for `git commit --verbose`. If
+`gc version` or `gc init` opens git commit instead of Gas City, use
+`command gc ...` temporarily and remove the alias after Oh My Zsh loads.
+See [Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hides-gc).
+</Tip>
+
 ## 1. Create a City
 
 ```bash
