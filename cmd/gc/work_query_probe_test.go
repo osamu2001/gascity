@@ -65,6 +65,14 @@ func TestControllerQueryRuntimeEnvExplicitRigUsesRigStorePassword(t *testing.T) 
 		DoltPort:       "4406",
 		DoltUser:       "rig-user",
 	})
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "de",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	writeScopePassword(t, rigDir, "rig-secret")
 
 	env := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[0])
@@ -191,6 +199,14 @@ provider = "file"
 		DoltPort:       "4406",
 		DoltUser:       "rig-user",
 	})
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "de",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	writeScopePassword(t, rigDir, "rig-secret")
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},

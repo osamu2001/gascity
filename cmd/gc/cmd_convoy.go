@@ -268,7 +268,8 @@ func convoyStoreCandidates(cfg *config.City, cityPath, beadID string) []string {
 				if strings.TrimSpace(rig.Path) == "" {
 					continue
 				}
-				if rawBeadsProviderForScope(rig.Path, cityPath) != "file" {
+				scopeRoot := resolveStoreScopeRoot(cityPath, rig.Path)
+				if rawBeadsProviderForScope(scopeRoot, cityPath) != "file" || (!samePath(scopeRoot, cityPath) && scopeUsesFileStoreContract(scopeRoot)) {
 					legacyCityOnly = false
 					break
 				}

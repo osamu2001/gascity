@@ -164,6 +164,129 @@ exit 0
 	}
 }
 
+func TestPublishManagedDoltRuntimeStateIfOwnedPublishesForInheritedBdRigUnderFileCity(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigPath, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "fe",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ln := listenOnRandomPort(t)
+	defer func() { _ = ln.Close() }()
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(cityPath), doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      port,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+		t.Fatalf("publishManagedDoltRuntimeStateIfOwned: %v", err)
+	}
+
+	published, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
+	if err != nil {
+		t.Fatalf("read published dolt runtime state: %v", err)
+	}
+	if published.Port != port {
+		t.Fatalf("published port = %d, want %d", published.Port, port)
+	}
+	portData, err := os.ReadFile(filepath.Join(rigPath, ".beads", "dolt-server.port"))
+	if err != nil {
+		t.Fatalf("ReadFile(rig dolt-server.port): %v", err)
+	}
+	if strings.TrimSpace(string(portData)) != strconv.Itoa(port) {
+		t.Fatalf("rig dolt-server.port = %q, want %d", strings.TrimSpace(string(portData)), port)
+	}
+}
+
+func TestManagedDoltLifecycleOwnedIgnoresExplicitBdRigUnderFileCity(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+dolt_host = "db.example.com"
+dolt_port = "4406"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigPath, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "fe",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil {
+		t.Fatalf("managedDoltLifecycleOwned: %v", err)
+	}
+	if owned {
+		t.Fatal("managed Dolt lifecycle should not be owned for explicit rig endpoint under file-backed city")
+	}
+}
+
+func TestManagedDoltLifecycleOwnedReportsInvalidCityConfigForFileCity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname =\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err == nil {
+		t.Fatalf("managedDoltLifecycleOwned() err = nil, owned = %v; want config load error", owned)
+	}
+	if !strings.Contains(err.Error(), "load city config for managed dolt ownership") {
+		t.Fatalf("managedDoltLifecycleOwned() error = %v, want ownership config context", err)
+	}
+}
+
 // TestEnsureBeadsProvider_bd_skip verifies bd provider is no-op when GC_DOLT=skip.
 func TestEnsureBeadsProvider_bd_skip(t *testing.T) {
 	dir := t.TempDir()

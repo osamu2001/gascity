@@ -248,10 +248,6 @@ func configuredBeadsProviderValue(cityPath string) string {
 	return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
 }
 
-func configuredBeadsProviderValueFromConfig(cityPath string) string {
-	return strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml")))
-}
-
 func scopedBeadsProviderOverride(cityPath, scopeRoot string) (string, bool) {
 	provider := strings.TrimSpace(os.Getenv("GC_BEADS"))
 	if provider == "" {
@@ -296,7 +292,7 @@ func rawBeadsProvider(cityPath string) string {
 }
 
 func rawBeadsProviderFromConfig(cityPath string) string {
-	if provider := configuredBeadsProviderValueFromConfig(cityPath); provider != "" {
+	if provider := strings.TrimSpace(peekBeadsProvider(filepath.Join(cityPath, "city.toml"))); provider != "" {
 		return normalizeRawBeadsProvider(cityPath, provider)
 	}
 	return "bd"
@@ -339,7 +335,8 @@ func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
 	// Mixed-provider workspaces can keep legacy bd-backed rigs under a
 	// file-backed city (and vice versa). Prefer explicit scope-local store
 	// markers over the city default so scoped commands keep talking to the
-	// rig's actual beads backend.
+	// rig's actual beads backend. The bd routing identity is metadata.json;
+	// config.yaml is a compatibility mirror and can survive migrations.
 	if scopeUsesBdStoreContract(resolvedScopeRoot) {
 		return "bd"
 	}
@@ -373,18 +370,14 @@ func workspaceUsesManagedBdStoreContract(cityPath string, rigs []config.Rig) boo
 }
 
 func scopeUsesBdStoreContract(scopeRoot string) bool {
-	for _, marker := range []string{
-		filepath.Join(scopeRoot, ".beads", "metadata.json"),
-		filepath.Join(scopeRoot, ".beads", "config.yaml"),
-	} {
-		if _, err := os.Stat(marker); err == nil {
-			return true
-		}
-	}
-	return false
+	_, err := os.Stat(filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	return err == nil
 }
 
 func scopeUsesFileStoreContract(scopeRoot string) bool {
+	if scopeUsesBdStoreContract(scopeRoot) {
+		return false
+	}
 	_, err := os.Stat(filepath.Join(scopeRoot, ".gc", "beads.json"))
 	return err == nil
 }

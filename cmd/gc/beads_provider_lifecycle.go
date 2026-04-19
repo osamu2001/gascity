@@ -1043,7 +1043,7 @@ func wrapInvalidEndpointStateError(scope string, err error) error {
 }
 
 func validateCanonicalCompatDoltDrift(cityPath string, cfg *config.City) error {
-	if cfg == nil || !cityUsesBdStoreContract(cityPath) {
+	if cfg == nil || !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 		return nil
 	}
 	cityResolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, config.EffectiveHQPrefix(cfg))

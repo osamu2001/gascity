@@ -92,7 +92,7 @@ func (c *doltTopologyCheck) Name() string { return "dolt-topology" }
 
 func (c *doltTopologyCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name()}
-	if !cityUsesBdStoreContract(c.cityPath) {
+	if c.cfg == nil || !workspaceUsesManagedBdStoreContract(c.cityPath, c.cfg.Rigs) {
 		r.Status = doctor.StatusOK
 		r.Message = "not using bd-backed Dolt topology"
 		return r
@@ -134,7 +134,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	cfg, cfgErr := loadCityConfig(cityPath)
 	if cfgErr == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
-		if cityUsesBdStoreContract(cityPath) {
+		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 			d.Register(newDoltTopologyCheck(cityPath, cfg))
 		}
 		d.Register(doctor.NewConfigValidCheck(cfg))

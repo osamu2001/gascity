@@ -975,6 +975,9 @@ dolt.auto-start: false
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"repo"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
 
 	env := slingStoreEnv(cfg, cityDir, rigDir)

@@ -160,12 +160,13 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		scopeProvider := rawBeadsProviderForScope(rig.Path, cs.cityPath)
+		scopeRoot := resolveStoreScopeRoot(cs.cityPath, rig.Path)
+		scopeProvider := rawBeadsProviderForScope(scopeRoot, cs.cityPath)
 		store := beads.Store(nil)
-		if sharedLegacyFileStore != nil && scopeProvider == "file" {
+		if sharedLegacyFileStore != nil && scopeProvider == "file" && !scopeUsesFileStoreContract(scopeRoot) {
 			store = sharedLegacyFileStore
 		} else {
-			store = cs.openRigStore(scopeProvider, rig.Name, rig.Path, rig.EffectivePrefix())
+			store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix())
 		}
 		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv)
 	}

@@ -2300,6 +2300,9 @@ dolt.auto-start: false
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"repo"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	env := map[string]string{"GC_DOLT_HOST": "", "GC_DOLT_PORT": "3307"}
 
 	if !bdTransportRetryableError(cityPath, rigDir, env, fmt.Errorf("server unreachable at 127.0.0.1:3307")) {

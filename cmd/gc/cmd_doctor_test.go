@@ -117,6 +117,66 @@ prefix = "fe"
 	}
 }
 
+func TestDoDoctorRunsDoltTopologyForBdRigUnderFileBackedCity(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+dolt_host = "rig.example.com"
+dolt_port = "3308"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeCanonicalScopeConfig(t, rigDir, contract.ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: contract.EndpointOriginInheritedCity,
+		EndpointStatus: contract.EndpointStatusVerified,
+	})
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(rigDir, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "fe",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	oldCityCheck := newDoctorDoltServerCheck
+	oldRigCheck := newDoctorRigDoltServerCheck
+	newDoctorDoltServerCheck = func(cityPath string, _ bool) *doctor.DoltServerCheck {
+		return doctor.NewDoltServerCheck(cityPath, true)
+	}
+	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, _ bool) *doctor.RigDoltServerCheck {
+		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
+	}
+	t.Cleanup(func() {
+		newDoctorDoltServerCheck = oldCityCheck
+		newDoctorRigDoltServerCheck = oldRigCheck
+	})
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, false, &stdout, &stderr)
+
+	if !strings.Contains(stdout.String(), "canonical/compat Dolt drift") {
+		t.Fatalf("doctor output missing Dolt topology drift:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+}
+
 func TestCollectPackDirsEmpty(t *testing.T) {
 	cfg := &config.City{}
 	dirs := collectPackDirs(cfg)
