@@ -29,7 +29,7 @@ closes the bead once the PR is verified.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 1
+version = 2
 
 [vars]
 [vars.run_tests]
@@ -322,9 +322,13 @@ request and treats PR creation as the terminal handoff for this work bead.
 git checkout temp
 git push origin HEAD:$BRANCH --force-with-lease
 ```
+If `--force-with-lease` fails, the existing PR branch moved after your
+fetch. STOP, fetch the latest branch, rebase your temp branch again, and
+retry with `--force-with-lease`. Do not use plain `--force`.
 
-**2. Create or discover the pull request:**
+**2. Reuse, create, or discover the pull request:**
 ```bash
+EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
 ISSUE_TITLE=$(gc bd show $WORK --json | jq -r '.[0].title')
 PR_BODY=$(cat <<EOF
 ## Summary
@@ -338,27 +342,33 @@ Automated pull request published by Gastown Refinery.
 EOF
 )
 
-PR_URL=$(gh pr create \
-  --base "$TARGET" \
-  --head "$BRANCH" \
-  --title "$ISSUE_TITLE ($WORK)" \
-  --body "$PR_BODY" 2>/dev/null || true)
+if [ -n "$EXISTING_PR" ]; then
+  PR_URL="$EXISTING_PR"
+  PR_REF="$EXISTING_PR"
+else
+  PR_URL=$(gh pr create \
+    --base "$TARGET" \
+    --head "$BRANCH" \
+    --title "$ISSUE_TITLE ($WORK)" \
+    --body "$PR_BODY" 2>/dev/null || true)
 
-if [ -z "$PR_URL" ]; then
-  PR_URL=$(gh pr view "$BRANCH" --json url -q '.url')
+  if [ -z "$PR_URL" ]; then
+    PR_URL=$(gh pr view "$BRANCH" --json url -q '.url')
+  fi
+  PR_REF="$BRANCH"
 fi
 ```
 
 **3. Verify the pull request exists:**
 ```bash
-PR_INFO=$(gh pr view "$BRANCH" --json url,number,state -q '.url + " " + (.number|tostring) + " " + .state')
+PR_INFO=$(gh pr view "$PR_REF" --json url,number,state,headRefName -q '.url + " " + (.number|tostring) + " " + .state + " " + .headRefName')
 echo "$PR_INFO"
 ```
 If this command fails or prints empty output: STOP. Debug and retry. Do NOT continue.
 
 **4. Record PR metadata and close the work bead:**
 ```bash
-PR_NUMBER=$(gh pr view "$BRANCH" --json number -q '.number')
+PR_NUMBER=$(gh pr view "$PR_REF" --json number -q '.number')
 gc bd update $WORK \
   --set-metadata merge_result=pull_request \
   --set-metadata pr_url="$PR_URL" \

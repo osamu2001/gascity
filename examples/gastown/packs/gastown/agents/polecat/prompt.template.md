@@ -47,13 +47,16 @@ Work beads carry structured metadata for lifecycle tracking and handoff:
 | `worktree` | polecat (branch-setup) | Early | Absolute path to git worktree |
 | `branch` | polecat (branch-setup) | Early | Source branch name |
 | `target` | polecat (submit) | Late | Target branch (default: {{ .DefaultBranch }}) |
+| `existing_pr` | caller | Before dispatch | Existing PR URL to reuse instead of creating another PR |
+| `pr_url` | polecat/refinery | Submit/PR handoff | PR URL recorded for visibility and closure |
 | `rejection_reason` | refinery (on failure) | On reject | Why the merge was rejected |
 
 **On branch-setup:** You record `worktree` and `branch` immediately.
 This enables crash recovery — the witness can find and salvage your work.
 
 **On submission:** You update `branch` (may have changed after rebase),
-set `target`, then reassign to refinery.
+set `target`, record `pr_url` when `existing_pr` is present, then reassign
+to refinery.
 
 **On rejection:** The refinery puts the bead back in the pool with
 `rejection_reason` set and the branch intact. A new polecat picks it up,
@@ -192,10 +195,19 @@ Nudges from other agents may arrive via your hook. When working:
 
 ```bash
 git push origin HEAD
-gc bd update <work-bead> \
-  --set-metadata branch=$(git branch --show-current) \
-  --set-metadata target={{ .DefaultBranch }} \
-  --notes "Implemented: <brief summary>"
+EXISTING_PR=$(gc bd show <work-bead> --json | jq -r '.metadata.existing_pr // empty')
+if [ -n "$EXISTING_PR" ]; then
+  gc bd update <work-bead> \
+    --set-metadata branch=$(git branch --show-current) \
+    --set-metadata target={{ .DefaultBranch }} \
+    --set-metadata pr_url="$EXISTING_PR" \
+    --notes "Implemented: <brief summary>"
+else
+  gc bd update <work-bead> \
+    --set-metadata branch=$(git branch --show-current) \
+    --set-metadata target={{ .DefaultBranch }} \
+    --notes "Implemented: <brief summary>"
+fi
 gc bd update <work-bead> --status=open --assignee={{ .RigName }}/refinery --set-metadata gc.routed_to={{ .RigName }}/refinery
 gc runtime drain-ack
 exit

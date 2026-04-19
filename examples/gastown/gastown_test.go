@@ -141,6 +141,70 @@ func TestRefineryFormulaSupportsMergeStrategies(t *testing.T) {
 	}
 }
 
+func TestPolecatFormulaTreatsMetadataBranchAsAuthoritative(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		`git fetch --prune origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"`,
+		`metadata.branch=$BRANCH was set but no local or origin branch exists`,
+		`STOP. Do not create a different branch.`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("polecat formula missing metadata.branch authority guidance %q", want)
+		}
+	}
+}
+
+func TestPolecatFormulaRecordsExistingPRMetadataOnSubmit(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		`EXISTING_PR=$(gc bd show {{issue}} --json | jq -r '.metadata.existing_pr // empty')`,
+		`--set-metadata pr_url="$EXISTING_PR"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("polecat formula missing existing_pr submit handling %q", want)
+		}
+	}
+	if strings.Contains(body, "gh pr create") {
+		t.Fatalf("polecat submit flow must not create pull requests directly")
+	}
+}
+
+func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		`EXISTING_PR=$(gc bd show $WORK --json | jq -r '.metadata.existing_pr // empty')`,
+		`PR_URL="$EXISTING_PR"`,
+		`PR_REF="$EXISTING_PR"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refinery formula missing existing_pr handling %q", want)
+		}
+	}
+	existingIdx := strings.Index(body, `EXISTING_PR=$(gc bd show $WORK --json | jq -r '.metadata.existing_pr // empty')`)
+	createIdx := strings.Index(body, "gh pr create")
+	if existingIdx == -1 || createIdx == -1 || existingIdx > createIdx {
+		t.Fatalf("refinery formula must inspect existing_pr before gh pr create")
+	}
+}
+
 func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")

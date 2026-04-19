@@ -33,7 +33,7 @@ refinery. Resume the existing branch — don't redo all the work.
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
 extends = ["mol-polecat-base"]
-version = 7
+version = 8
 
 [[steps]]
 id = "workspace-setup"
@@ -93,9 +93,22 @@ Check if `metadata.branch` already records a branch:
 BRANCH=$(gc bd show {{issue}} --json | jq -r '.[0].metadata.branch // empty')
 ```
 
-**If branch exists in metadata** — check it out:
+**If branch exists in metadata** — treat it as authoritative. This
+metadata may come from rejection recovery or from a caller that wants
+work applied to an existing branch. Fetch the named remote branch first,
+then check out the local branch if present or create a local tracking
+branch from `origin/$BRANCH`:
 ```bash
-git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" origin/"$BRANCH"
+git fetch --prune origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" 2>/dev/null || true
+if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    git checkout "$BRANCH" || exit 1
+elif git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+    git checkout --track -b "$BRANCH" "origin/$BRANCH" || exit 1
+else
+    echo "metadata.branch=$BRANCH was set but no local or origin branch exists."
+    echo "STOP. Do not create a different branch."
+    exit 1
+fi
 ```
 If resuming a rejected branch, rebase onto latest base:
 ```bash
@@ -167,12 +180,23 @@ git branch -D "$BRANCH"              # Branch is pushed; refinery owns it now
 
 **4. Update metadata on the work bead:**
 ```bash
-gc bd update {{issue}} \
-  --set-metadata target={{base_branch}} \
-  --notes "Implemented: <brief summary>"
+EXISTING_PR=$(gc bd show {{issue}} --json | jq -r '.metadata.existing_pr // empty')
+if [ -n "$EXISTING_PR" ]; then
+  gc bd update {{issue}} \
+    --set-metadata target={{base_branch}} \
+    --set-metadata pr_url="$EXISTING_PR" \
+    --notes "Implemented: <brief summary>"
+else
+  gc bd update {{issue}} \
+    --set-metadata target={{base_branch}} \
+    --notes "Implemented: <brief summary>"
+fi
 ```
 Branch was recorded in workspace-setup and is already in metadata.
-This adds the target for the refinery.
+This adds the target for the refinery. If an existing pull request was
+provided by the caller, this records the URL on the bead. The refinery's
+PR mode also reads `metadata.existing_pr` and must reuse it instead of
+creating a duplicate pull request.
 
 **5. Reassign to refinery:**
 ```bash
