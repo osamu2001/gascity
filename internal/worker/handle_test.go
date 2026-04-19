@@ -1300,7 +1300,9 @@ func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
 	}
 	sp.WaitForIdleErrors["legacy-worker"] = nil
 	gate := make(chan struct{})
+	started := make(chan struct{})
 	sp.WaitForIdleGates["legacy-worker"] = gate
+	sp.WaitForIdleStarted["legacy-worker"] = started
 
 	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
 		Provider:     sp,
@@ -1312,8 +1314,11 @@ func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(10*time.Millisecond, cancel)
-	time.AfterFunc(40*time.Millisecond, func() { close(gate) })
+	go func() {
+		<-started
+		cancel()
+		close(gate)
+	}()
 
 	result, err := handle.Nudge(ctx, NudgeRequest{
 		Text:     "check deploy status",
