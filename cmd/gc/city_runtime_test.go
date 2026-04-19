@@ -880,7 +880,7 @@ func TestCityRuntimeBeadReconcileTick_KeepsAssignedPoolWorkerAwake(t *testing.T)
 	}
 }
 
-func TestCityRuntimeBeadReconcileTick_SweepUsesOwnershipWorkSnapshot(t *testing.T) {
+func TestCityRuntimeBeadReconcileTick_SweepRespectsLiveAssignedWork(t *testing.T) {
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{
 		Title:  "worker",
@@ -902,6 +902,21 @@ func TestCityRuntimeBeadReconcileTick_SweepUsesOwnershipWorkSnapshot(t *testing.
 		t.Fatalf("Create session bead: %v", err)
 	}
 
+	// Persist an open work bead assigned to the session. GCSweepSessionBeads
+	// now runs a live store query via sessionHasOpenAssignedWork, so the
+	// bead must live in the store itself — a pre-computed snapshot is no
+	// longer consulted.
+	if _, err := store.Create(beads.Bead{
+		ID:       "ga-future",
+		Title:    "future work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "worker-mc-live",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	}); err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+
 	cr := &CityRuntime{
 		cityPath:            t.TempDir(),
 		cityName:            "maintainer-city",
@@ -915,10 +930,9 @@ func TestCityRuntimeBeadReconcileTick_SweepUsesOwnershipWorkSnapshot(t *testing.
 	}
 
 	result := DesiredStateResult{
-		State:              map[string]TemplateParams{},
-		ScaleCheckCounts:   map[string]int{"worker": 0},
-		AssignedWorkBeads:  []beads.Bead{},
-		OwnershipWorkBeads: []beads.Bead{workBead("ga-future", "worker", "worker-mc-live", "open", 1)},
+		State:             map[string]TemplateParams{},
+		ScaleCheckCounts:  map[string]int{"worker": 0},
+		AssignedWorkBeads: []beads.Bead{},
 	}
 
 	sessionBeads := newSessionBeadSnapshot([]beads.Bead{session})
@@ -929,7 +943,7 @@ func TestCityRuntimeBeadReconcileTick_SweepUsesOwnershipWorkSnapshot(t *testing.
 		t.Fatalf("Get session bead: %v", err)
 	}
 	if got.Status == "closed" {
-		t.Fatalf("session bead was swept closed despite future assigned work: %+v", got)
+		t.Fatalf("session bead was swept closed despite live assigned work: %+v", got)
 	}
 }
 

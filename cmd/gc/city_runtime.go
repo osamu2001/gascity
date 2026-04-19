@@ -1009,7 +1009,7 @@ func sweepUndesiredPoolSessionBeads(
 		}
 		candidates = append(candidates, bead)
 	}
-	return len(GCSweepSessionBeads(store, candidates, assignedWorkBeads))
+	return len(GCSweepSessionBeads(store, candidates))
 }
 
 // isStaleCreating mirrors staleCreatingState in session_reconcile.go without

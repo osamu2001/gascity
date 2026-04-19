@@ -19,17 +19,18 @@ func PoolSessionName(template, beadID string) string {
 }
 
 // GCSweepSessionBeads closes open session beads that have no remaining
-// assigned work beads (all assigned beads are closed). Returns the IDs
-// of session beads that were closed.
-func GCSweepSessionBeads(store beads.Store, sessionBeads []beads.Bead, allWorkBeads []beads.Bead) []string {
-	assigneeHasWork := buildAssignedWorkIndex(allWorkBeads)
-
+// open/in-progress work beads. Work-bead assignment is verified by a
+// live store query inside closeSessionBeadIfUnassigned, so the caller
+// does not pass a work snapshot — that pattern was retired to prevent
+// pre-close tick snapshots from poisoning close decisions. Returns the
+// IDs of session beads that were closed.
+func GCSweepSessionBeads(store beads.Store, sessionBeads []beads.Bead) []string {
 	var closed []string
 	for _, sb := range sessionBeads {
 		if sb.Status == "closed" {
 			continue
 		}
-		if !closeSessionBeadIfUnassigned(store, sb, assigneeHasWork, "gc_swept", time.Now().UTC(), nil) {
+		if !closeSessionBeadIfUnassigned(store, sb, "gc_swept", time.Now().UTC(), nil) {
 			continue
 		}
 		closed = append(closed, sb.ID)

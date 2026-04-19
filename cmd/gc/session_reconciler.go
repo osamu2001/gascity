@@ -201,7 +201,11 @@ func reconcileSessionBeadsTraced(
 	if cityName == "" {
 		cityName = config.EffectiveCityName(cfg, "")
 	}
-	ownershipWorkIndex := buildAssignedWorkIndex(ownershipWorkBeads)
+	// ownershipWorkBeads is retained for backward-compatible signatures but
+	// is no longer consulted: both the drain-ack decision and the pool-slot
+	// close gate now query the live store via sessionHasOpenAssignedWork so
+	// a pre-close tick snapshot cannot poison terminal state decisions.
+	_ = ownershipWorkBeads
 
 	// Phase 0: Heal expired timers on all sessions.
 	for i := range sessions {
@@ -330,7 +334,7 @@ func reconcileSessionBeadsTraced(
 					if storeQueryPartial {
 						continue
 					}
-					closeSessionBeadIfUnassigned(store, *session, ownershipWorkIndex, reason, clk.Now().UTC(), stderr)
+					closeSessionBeadIfUnassigned(store, *session, reason, clk.Now().UTC(), stderr)
 				}
 				continue
 			}
