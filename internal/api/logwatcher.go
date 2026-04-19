@@ -153,6 +153,7 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeep
 					continue
 				}
 				readAndEmit()
+				dataArrived()
 			case <-keepalive.C:
 				writeKeepalive()
 			case <-stallC:
@@ -171,6 +172,7 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeep
 					continue
 				}
 				readAndEmit()
+				dataArrived()
 			case <-keepalive.C:
 				writeKeepalive()
 			case <-stallC:
