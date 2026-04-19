@@ -443,16 +443,54 @@ var debounceDelay = 200 * time.Millisecond
 // of individual files to handle vim/emacs rename-swap atomic saves.
 // Returns a cleanup function. If the watcher cannot be created, returns a
 // no-op cleanup (degraded to tick-only, no file watching).
+// addWatchRecursive walks root and adds every directory it finds to the
+// watcher, skipping subtrees that shouldIgnoreConfigWatchEvent flags
+// (.gc/, .beads/, and their descendants). Non-existent roots and permission
+// errors are logged and skipped — a missing subdir is not fatal because
+// fsnotify only needs the parent to observe the create event.
+func addWatchRecursive(watcher *fsnotify.Watcher, root string, stderr io.Writer) {
+	info, err := os.Stat(root)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc start: config watcher: cannot stat %s: %v\n", root, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if !info.IsDir() {
+		return
+	}
+	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			fmt.Fprintf(stderr, "gc start: config watcher: walk %s: %v\n", path, walkErr) //nolint:errcheck // best-effort stderr
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if path != root && shouldIgnoreConfigWatchEvent(path) {
+			return filepath.SkipDir
+		}
+		if err := watcher.Add(path); err != nil {
+			fmt.Fprintf(stderr, "gc start: config watcher: cannot watch %s: %v\n", path, err) //nolint:errcheck // best-effort stderr
+		}
+		return nil
+	})
+	if walkErr != nil {
+		fmt.Fprintf(stderr, "gc start: config watcher: walk %s: %v\n", root, walkErr) //nolint:errcheck // best-effort stderr
+	}
+}
+
 func watchConfigDirs(dirs []string, dirty *atomic.Bool, pokeCh chan struct{}, stderr io.Writer) func() {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: config watcher: %v (reload on tick only)\n", err) //nolint:errcheck // best-effort stderr
 		return func() {}
 	}
+	// fsnotify is non-recursive — watcher.Add(dir) covers only the immediate
+	// directory. Pack v2's convention layout pushes agent prompts, commands,
+	// and formulas into subdirectories that exist at startup, and v1 pack
+	// dirs usually do the same. Walk each seed recursively so nested edits
+	// trigger reloads. Regression guard: gastownhall/gascity#780.
 	for _, dir := range dirs {
-		if err := watcher.Add(dir); err != nil {
-			fmt.Fprintf(stderr, "gc start: config watcher: cannot watch %s: %v\n", dir, err) //nolint:errcheck // best-effort stderr
-		}
+		addWatchRecursive(watcher, dir, stderr)
 	}
 	go func() {
 		var debounce *time.Timer
@@ -467,9 +505,9 @@ func watchConfigDirs(dirs []string, dirty *atomic.Bool, pokeCh chan struct{}, st
 				}
 				if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
 					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-						if err := watcher.Add(event.Name); err != nil {
-							fmt.Fprintf(stderr, "gc start: config watcher: cannot watch %s: %v\n", event.Name, err) //nolint:errcheck // best-effort stderr
-						}
+						// Walk the newly created subtree so anything pre-populated
+						// inside it is watched too (gastownhall/gascity#780).
+						addWatchRecursive(watcher, event.Name, stderr)
 						dirty.Store(true)
 						if pokeCh != nil {
 							select {

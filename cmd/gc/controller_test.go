@@ -617,6 +617,78 @@ func TestWatchConfigDirs_DetectsFileChangeAndSetsDirty(t *testing.T) {
 	}
 }
 
+// Regression for gastownhall/gascity#780:
+// fsnotify watches are non-recursive — watcher.Add(dir) covers only the
+// immediate directory. Pack v2's convention layout pushes agent prompts,
+// commands, and formulas into subdirectories that exist at startup. Edits
+// to those nested files used to fire no event, silently breaking hot
+// reload. This test proves nested edits to pre-existing subtrees now fire.
+func TestWatchConfigDirs_Regression780_DetectsEditInPreExistingNestedSubdir(t *testing.T) {
+	old := debounceDelay
+	debounceDelay = 5 * time.Millisecond
+	t.Cleanup(func() { debounceDelay = old })
+
+	dir := t.TempDir()
+	// Pre-existing nested layout (mirrors pack v2 convention discovery):
+	// agents/<name>/prompt.template.md and agents/<name>/overlay/settings.json.
+	nestedAgentDir := filepath.Join(dir, "agents", "mayor")
+	if err := os.MkdirAll(filepath.Join(nestedAgentDir, "overlay"), 0o755); err != nil {
+		t.Fatalf("MkdirAll nested: %v", err)
+	}
+	promptPath := filepath.Join(nestedAgentDir, "prompt.template.md")
+	if err := os.WriteFile(promptPath, []byte("original prompt\n"), 0o644); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+	overlayPath := filepath.Join(nestedAgentDir, "overlay", "settings.json")
+	if err := os.WriteFile(overlayPath, []byte(`{"a":1}`), 0o644); err != nil {
+		t.Fatalf("seed overlay: %v", err)
+	}
+
+	var dirty atomic.Bool
+	pokeCh := make(chan struct{}, 1)
+	var stderr bytes.Buffer
+	cleanup := watchConfigDirs([]string{dir}, &dirty, pokeCh, &stderr)
+	defer cleanup()
+
+	// Drain any startup poke.
+	select {
+	case <-pokeCh:
+	default:
+	}
+	dirty.Store(false)
+
+	// Edit a two-levels-deep file. Without recursive watching, no event fires.
+	if err := os.WriteFile(promptPath, []byte("edited prompt\n"), 0o644); err != nil {
+		t.Fatalf("edit prompt: %v", err)
+	}
+	select {
+	case <-pokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for poke after edit to %s; pre-existing nested subdir was not watched; stderr=%q", promptPath, stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after edit to nested file %s; stderr=%q", promptPath, stderr.String())
+	}
+
+	// And a three-levels-deep edit, for overlay/ subtrees.
+	dirty.Store(false)
+	select {
+	case <-pokeCh:
+	default:
+	}
+	if err := os.WriteFile(overlayPath, []byte(`{"a":2}`), 0o644); err != nil {
+		t.Fatalf("edit overlay: %v", err)
+	}
+	select {
+	case <-pokeCh:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for poke after edit to %s; overlay subtree was not watched; stderr=%q", overlayPath, stderr.String())
+	}
+	if !dirty.Load() {
+		t.Fatalf("dirty flag not set after edit to %s; stderr=%q", overlayPath, stderr.String())
+	}
+}
+
 func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	old := debounceDelay
 	debounceDelay = 5 * time.Millisecond
