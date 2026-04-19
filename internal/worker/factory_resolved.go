@@ -31,32 +31,59 @@ type ResolvedSessionConfig struct {
 	Runtime      ResolvedRuntime
 }
 
+func normalizeResolvedRuntimeInput(input ResolvedRuntime) ResolvedRuntime {
+	input.Command = strings.TrimSpace(input.Command)
+	input.WorkDir = strings.TrimSpace(input.WorkDir)
+	input.Provider = strings.TrimSpace(input.Provider)
+	input.SessionEnv = cloneStringMap(input.SessionEnv)
+	input.Hints = cloneRuntimeConfig(input.Hints)
+	if input.WorkDir == "" {
+		input.WorkDir = strings.TrimSpace(input.Hints.WorkDir)
+	}
+	if strings.TrimSpace(input.Hints.WorkDir) == "" {
+		input.Hints.WorkDir = input.WorkDir
+	}
+	if input.Provider == "" && input.Command != "" {
+		input.Provider = input.Command
+		if idx := strings.IndexAny(input.Provider, " \t"); idx >= 0 {
+			input.Provider = input.Provider[:idx]
+		}
+	}
+	return input
+}
+
+// NormalizeResolvedRuntime trims, clones, and fills derived runtime fields
+// used by session-backed worker construction.
+func NormalizeResolvedRuntime(input ResolvedRuntime) (ResolvedRuntime, error) {
+	input = normalizeResolvedRuntimeInput(input)
+	if input.Command == "" {
+		return ResolvedRuntime{}, fmt.Errorf("%w: command is required", ErrHandleConfig)
+	}
+	if input.Provider == "" {
+		return ResolvedRuntime{}, fmt.Errorf("%w: provider is required", ErrHandleConfig)
+	}
+	return input, nil
+}
+
+// NormalizeResolvedSessionConfig trims, clones, and validates caller-resolved
+// session creation inputs before they are translated into a worker SessionSpec.
+func NormalizeResolvedSessionConfig(cfg ResolvedSessionConfig) (ResolvedSessionConfig, error) {
+	runtime, err := NormalizeResolvedRuntime(cfg.Runtime)
+	if err != nil {
+		return ResolvedSessionConfig{}, err
+	}
+	cfg.Transport = strings.TrimSpace(cfg.Transport)
+	cfg.Metadata = cloneStringMap(cfg.Metadata)
+	cfg.Runtime = runtime
+	return cfg, nil
+}
+
 // SessionSpecForResolvedRuntime translates resolved runtime inputs into the
 // canonical worker session spec used by session-backed handles.
 func SessionSpecForResolvedRuntime(cfg ResolvedSessionConfig) (SessionSpec, error) {
-	command := strings.TrimSpace(cfg.Runtime.Command)
-	if command == "" {
-		return SessionSpec{}, fmt.Errorf("%w: command is required", ErrHandleConfig)
-	}
-
-	provider := strings.TrimSpace(cfg.Runtime.Provider)
-	if provider == "" {
-		provider = command
-		if idx := strings.IndexAny(provider, " \t"); idx >= 0 {
-			provider = provider[:idx]
-		}
-	}
-	if provider == "" {
-		return SessionSpec{}, fmt.Errorf("%w: provider is required", ErrHandleConfig)
-	}
-
-	workDir := strings.TrimSpace(cfg.Runtime.WorkDir)
-	hints := cloneRuntimeConfig(cfg.Runtime.Hints)
-	if workDir == "" {
-		workDir = strings.TrimSpace(hints.WorkDir)
-	}
-	if strings.TrimSpace(hints.WorkDir) == "" {
-		hints.WorkDir = workDir
+	cfg, err := NormalizeResolvedSessionConfig(cfg)
+	if err != nil {
+		return SessionSpec{}, err
 	}
 
 	return SessionSpec{
@@ -64,14 +91,14 @@ func SessionSpecForResolvedRuntime(cfg ResolvedSessionConfig) (SessionSpec, erro
 		ExplicitName: cfg.ExplicitName,
 		Template:     cfg.Template,
 		Title:        cfg.Title,
-		Command:      command,
-		WorkDir:      workDir,
-		Provider:     provider,
-		Transport:    strings.TrimSpace(cfg.Transport),
-		Env:          cloneStringMap(cfg.Runtime.SessionEnv),
+		Command:      cfg.Runtime.Command,
+		WorkDir:      cfg.Runtime.WorkDir,
+		Provider:     cfg.Runtime.Provider,
+		Transport:    cfg.Transport,
+		Env:          cfg.Runtime.SessionEnv,
 		Resume:       cfg.Runtime.Resume,
-		Hints:        hints,
-		Metadata:     cloneStringMap(cfg.Metadata),
+		Hints:        cfg.Runtime.Hints,
+		Metadata:     cfg.Metadata,
 	}, nil
 }
 
@@ -79,20 +106,21 @@ func applyResolvedRuntimeToSessionSpec(spec *SessionSpec, runtime *ResolvedRunti
 	if spec == nil || runtime == nil {
 		return
 	}
+	normalized := normalizeResolvedRuntimeInput(*runtime)
 
-	if command := strings.TrimSpace(runtime.Command); command != "" {
+	if command := normalized.Command; command != "" {
 		spec.Command = command
 	}
-	if provider := strings.TrimSpace(runtime.Provider); provider != "" {
+	if provider := normalized.Provider; provider != "" {
 		spec.Provider = provider
 	}
-	if workDir := strings.TrimSpace(runtime.WorkDir); workDir != "" {
+	if workDir := normalized.WorkDir; workDir != "" {
 		spec.WorkDir = workDir
 	}
 
-	spec.Env = cloneStringMap(runtime.SessionEnv)
-	spec.Resume = runtime.Resume
-	spec.Hints = cloneRuntimeConfig(runtime.Hints)
+	spec.Env = normalized.SessionEnv
+	spec.Resume = normalized.Resume
+	spec.Hints = normalized.Hints
 	if strings.TrimSpace(spec.Hints.WorkDir) == "" {
 		spec.Hints.WorkDir = strings.TrimSpace(spec.WorkDir)
 	}

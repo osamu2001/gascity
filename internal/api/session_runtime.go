@@ -130,7 +130,7 @@ func (s *Server) resolveWorkerSessionRuntime(info session.Info, _ string) (*work
 	if resolved == nil {
 		return nil, nil
 	}
-	return &worker.ResolvedRuntime{
+	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
 		Command:    firstNonEmptyString(resolved.CommandString(), info.Command),
 		WorkDir:    firstNonEmptyString(workDir, info.WorkDir),
 		Provider:   firstNonEmptyString(resolved.Name, info.Provider),
@@ -142,7 +142,11 @@ func (s *Server) resolveWorkerSessionRuntime(info session.Info, _ string) (*work
 			ResumeCommand: resolved.ResumeCommand,
 			SessionIDFlag: resolved.SessionIDFlag,
 		},
-	}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &runtimeCfg, nil
 }
 
 func (s *Server) resolveSessionRuntime(info session.Info) (*config.ResolvedProvider, string) {

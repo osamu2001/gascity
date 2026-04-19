@@ -102,6 +102,89 @@ func TestSessionSpecForResolvedRuntimeUsesHintsWorkDirFallback(t *testing.T) {
 	}
 }
 
+func TestNormalizeResolvedSessionConfigCopiesAndTrimsFields(t *testing.T) {
+	input := ResolvedSessionConfig{
+		Alias:        "worker",
+		ExplicitName: "worker-1",
+		Template:     "probe",
+		Title:        "Probe",
+		Transport:    "  acp  ",
+		Metadata:     map[string]string{"kind": "named"},
+		Runtime: ResolvedRuntime{
+			Command:    "  /bin/echo --verbose  ",
+			WorkDir:    "  /tmp/workdir  ",
+			SessionEnv: map[string]string{"STUB_ENV": "present"},
+			Hints: runtime.Config{
+				Env: map[string]string{"HINT_ENV": "present"},
+			},
+		},
+	}
+
+	normalized, err := NormalizeResolvedSessionConfig(input)
+	if err != nil {
+		t.Fatalf("NormalizeResolvedSessionConfig: %v", err)
+	}
+	if normalized.Transport != "acp" {
+		t.Fatalf("Transport = %q, want acp", normalized.Transport)
+	}
+	if normalized.Runtime.Command != "/bin/echo --verbose" {
+		t.Fatalf("Runtime.Command = %q, want /bin/echo --verbose", normalized.Runtime.Command)
+	}
+	if normalized.Runtime.WorkDir != "/tmp/workdir" {
+		t.Fatalf("Runtime.WorkDir = %q, want /tmp/workdir", normalized.Runtime.WorkDir)
+	}
+	if normalized.Runtime.Provider != "/bin/echo" {
+		t.Fatalf("Runtime.Provider = %q, want /bin/echo", normalized.Runtime.Provider)
+	}
+	if normalized.Runtime.Hints.WorkDir != "/tmp/workdir" {
+		t.Fatalf("Hints.WorkDir = %q, want /tmp/workdir", normalized.Runtime.Hints.WorkDir)
+	}
+
+	input.Metadata["kind"] = "changed"
+	input.Runtime.SessionEnv["STUB_ENV"] = "changed"
+	input.Runtime.Hints.Env["HINT_ENV"] = "changed"
+	if normalized.Metadata["kind"] != "named" {
+		t.Fatalf("Metadata copy mutated to %q, want named", normalized.Metadata["kind"])
+	}
+	if normalized.Runtime.SessionEnv["STUB_ENV"] != "present" {
+		t.Fatalf("SessionEnv copy mutated to %q, want present", normalized.Runtime.SessionEnv["STUB_ENV"])
+	}
+	if normalized.Runtime.Hints.Env["HINT_ENV"] != "present" {
+		t.Fatalf("Hints.Env copy mutated to %q, want present", normalized.Runtime.Hints.Env["HINT_ENV"])
+	}
+}
+
+func TestApplyResolvedRuntimeToSessionSpecDerivesProviderAndSyncsHintsWorkDir(t *testing.T) {
+	spec := SessionSpec{
+		Provider: "legacy-provider",
+		WorkDir:  "/tmp/legacy-workdir",
+		Hints: runtime.Config{
+			WorkDir: "/tmp/legacy-workdir",
+		},
+	}
+
+	applyResolvedRuntimeToSessionSpec(&spec, &ResolvedRuntime{
+		Command: "/bin/echo --verbose",
+		WorkDir: "  /tmp/resolved-workdir  ",
+		Hints: runtime.Config{
+			Env: map[string]string{"HINT_ENV": "present"},
+		},
+	})
+
+	if spec.Provider != "/bin/echo" {
+		t.Fatalf("Provider = %q, want /bin/echo", spec.Provider)
+	}
+	if spec.WorkDir != "/tmp/resolved-workdir" {
+		t.Fatalf("WorkDir = %q, want /tmp/resolved-workdir", spec.WorkDir)
+	}
+	if spec.Hints.WorkDir != "/tmp/resolved-workdir" {
+		t.Fatalf("Hints.WorkDir = %q, want /tmp/resolved-workdir", spec.Hints.WorkDir)
+	}
+	if spec.Hints.Env["HINT_ENV"] != "present" {
+		t.Fatalf("Hints.Env[HINT_ENV] = %q, want present", spec.Hints.Env["HINT_ENV"])
+	}
+}
+
 func TestFactorySessionForResolvedRuntimeStartsResolvedSession(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

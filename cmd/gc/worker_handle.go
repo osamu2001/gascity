@@ -127,7 +127,7 @@ func resolvedWorkerSessionConfigWithConfig(
 	if command == "" {
 		command = providerName
 	}
-	return worker.ResolvedSessionConfig{
+	return worker.NormalizeResolvedSessionConfig(worker.ResolvedSessionConfig{
 		Alias:        alias,
 		ExplicitName: explicitName,
 		Template:     template,
@@ -147,7 +147,7 @@ func resolvedWorkerSessionConfigWithConfig(
 			},
 			Hints: workerSessionCreateHints(resolved),
 		},
-	}, nil
+	})
 }
 
 func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
