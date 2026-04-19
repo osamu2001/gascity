@@ -170,13 +170,14 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	alias, err = session.ValidateAlias(alias)
+	requestedAlias, err := session.ValidateAlias(alias)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	alias = requestedAlias
 	if alias != "" && found.SupportsMultipleSessions() {
-		alias = workdirutil.SessionQualifiedName(cityPath, found, cfg.Rigs, alias, "")
+		alias = workdirutil.SessionQualifiedName(cityPath, found, cfg.Rigs, requestedAlias, "")
 	}
 	explicitName, err := sessionExplicitNameForNewSession(&found, alias)
 	if err != nil {
@@ -194,7 +195,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach bool,
 	mgr := newSessionManager(store, sp)
 
 	// Build the work directory.
-	sessionQualifiedName := workdirutil.SessionQualifiedName(cityPath, found, cfg.Rigs, alias, explicitName)
+	sessionQualifiedName := workdirutil.SessionQualifiedName(cityPath, found, cfg.Rigs, requestedAlias, explicitName)
 	workDir, err := resolveWorkDirForQualifiedName(
 		cityPath,
 		cfg,

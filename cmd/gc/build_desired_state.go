@@ -1018,6 +1018,10 @@ func sessionBeadQualifiedName(cityPath string, cfgAgent *config.Agent, rigs []co
 	if strings.TrimSpace(sessionBead.Metadata["session_name_explicit"]) == boolMetadata(true) {
 		explicitName = strings.TrimSpace(sessionBead.Metadata["session_name"])
 	}
+	// Legacy aliasless pooled beads predate agent_name/session_name_explicit
+	// backfills. Their persisted session_name is the only stable concrete
+	// identity we can recover during rediscovery, even when it used the
+	// historical s-<id> form.
 	if explicitName == "" && strings.TrimSpace(sessionBead.Metadata["alias"]) == "" && persistedAgentName == cfgAgent.QualifiedName() && cfgAgent.SupportsMultipleSessions() {
 		explicitName = strings.TrimSpace(sessionBead.Metadata["session_name"])
 	}
