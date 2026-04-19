@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -243,6 +244,7 @@ type SessionHandleConfig struct {
 	Manager     *sessionpkg.Manager
 	SearchPaths []string
 	Adapter     SessionLogAdapter
+	Recorder    events.Recorder
 	Session     SessionSpec
 }
 
@@ -251,6 +253,7 @@ type SessionHandle struct {
 	mu          sync.Mutex
 	manager     *sessionpkg.Manager
 	adapter     SessionLogAdapter
+	recorder    events.Recorder
 	searchPaths []string
 	session     SessionSpec
 	sessionID   string

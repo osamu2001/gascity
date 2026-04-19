@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -2401,6 +2402,11 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 
 	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") || !strings.Contains(rec.Body.String(), "world") {
 		t.Errorf("stream body missing closed-session snapshot: %s", rec.Body.String())
+	}
+	for _, event := range fs.eventProv.(*events.Fake).Events {
+		if event.Type == events.WorkerOperation {
+			t.Fatalf("closed session stream emitted worker operation event: %#v", event)
+		}
 	}
 }
 

@@ -10,7 +10,10 @@ import (
 )
 
 // Start ensures the worker exists and its runtime is live.
-func (h *SessionHandle) Start(ctx context.Context) error {
+func (h *SessionHandle) Start(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStart)
+	defer func() { event.finish(err) }()
+
 	id, err := h.ensureSessionID()
 	if err != nil {
 		return err
@@ -19,14 +22,18 @@ func (h *SessionHandle) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return h.manager.Start(ctx, id, startCommand, h.runtimeHints())
+	err = h.manager.Start(ctx, id, startCommand, h.runtimeHints())
+	return err
 }
 
 // StartResolved starts or resumes the worker using a caller-supplied runtime
 // command and hints. This is a migration bridge for higher layers that already
 // materialize provider-specific runtime config but should still delegate the
 // provider-specific runtime bring-up through the worker boundary.
-func (h *SessionHandle) StartResolved(ctx context.Context, startCommand string, hints runtime.Config) error {
+func (h *SessionHandle) StartResolved(ctx context.Context, startCommand string, hints runtime.Config) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
+	defer func() { event.finish(err) }()
+
 	id, err := h.ensureSessionID()
 	if err != nil {
 		return err
@@ -42,12 +49,16 @@ func (h *SessionHandle) StartResolved(ctx context.Context, startCommand string, 
 	if strings.TrimSpace(startHints.Command) == "" {
 		startHints = h.runtimeHints()
 	}
-	return h.manager.StartRuntimeOnly(ctx, id, command, startHints)
+	err = h.manager.StartRuntimeOnly(ctx, id, command, startHints)
+	return err
 }
 
 // Attach ensures the worker runtime is live and then attaches the caller's
 // terminal using the underlying session transport.
-func (h *SessionHandle) Attach(ctx context.Context) error {
+func (h *SessionHandle) Attach(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationAttach)
+	defer func() { event.finish(err) }()
+
 	id, err := h.ensureSessionID()
 	if err != nil {
 		return err
@@ -56,72 +67,101 @@ func (h *SessionHandle) Attach(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return h.manager.Attach(ctx, id, resumeCommand, h.runtimeHints())
+	err = h.manager.Attach(ctx, id, resumeCommand, h.runtimeHints())
+	return err
 }
 
 // Create materializes the worker session without requiring API callers to
 // invoke session.Manager lifecycle methods directly.
-func (h *SessionHandle) Create(ctx context.Context, mode CreateMode) (sessionpkg.Info, error) {
+func (h *SessionHandle) Create(ctx context.Context, mode CreateMode) (info sessionpkg.Info, err error) {
+	event := h.beginOperationEvent(ctx, workerOperationCreate)
+	defer func() { event.finish(err) }()
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if h.sessionID != "" {
-		return h.manager.Get(h.sessionID)
+		info, err = h.manager.Get(h.sessionID)
+		return info, err
 	}
 
 	switch mode {
 	case CreateModeDeferred:
-		return h.createDeferredLocked()
+		info, err = h.createDeferredLocked()
+		return info, err
 	case CreateModeStarted:
-		return h.createStartedLocked(ctx)
+		info, err = h.createStartedLocked(ctx)
+		return info, err
 	default:
-		return sessionpkg.Info{}, fmt.Errorf("%w: unknown create mode %q", ErrHandleConfig, mode)
+		err = fmt.Errorf("%w: unknown create mode %q", ErrHandleConfig, mode)
+		return sessionpkg.Info{}, err
 	}
 }
 
 // Reset requests a fresh restart for the worker while preserving the bead.
-func (h *SessionHandle) Reset(context.Context) error {
+func (h *SessionHandle) Reset(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationReset)
+	defer func() { event.finish(err) }()
+
 	id := h.currentSessionID()
 	if id == "" {
-		return fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
+		err = fmt.Errorf("%w: reset requires an existing bead-backed session", ErrOperationUnsupported)
+		return err
 	}
-	return h.manager.RequestFreshRestart(id)
+	err = h.manager.RequestFreshRestart(id)
+	return err
 }
 
 // Stop suspends the worker runtime while preserving conversation state.
-func (h *SessionHandle) Stop(context.Context) error {
+func (h *SessionHandle) Stop(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStop)
+	defer func() { event.finish(err) }()
+
 	id := h.currentSessionID()
 	if id == "" {
 		return nil
 	}
-	return h.manager.Suspend(id)
+	err = h.manager.Suspend(id)
+	return err
 }
 
 // Kill terminates the live runtime without mutating the persisted lifecycle.
-func (h *SessionHandle) Kill(context.Context) error {
+func (h *SessionHandle) Kill(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationKill)
+	defer func() { event.finish(err) }()
+
 	id := h.currentSessionID()
 	if id == "" {
 		return nil
 	}
-	return h.manager.Kill(id)
+	err = h.manager.Kill(id)
+	return err
 }
 
 // Close permanently ends the worker session.
-func (h *SessionHandle) Close(context.Context) error {
+func (h *SessionHandle) Close(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationClose)
+	defer func() { event.finish(err) }()
+
 	id := h.currentSessionID()
 	if id == "" {
 		return nil
 	}
-	return h.manager.Close(id)
+	err = h.manager.Close(id)
+	return err
 }
 
 // Rename updates the user-facing session title.
-func (h *SessionHandle) Rename(_ context.Context, title string) error {
+func (h *SessionHandle) Rename(ctx context.Context, title string) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationRename)
+	defer func() { event.finish(err) }()
+
 	id := h.currentSessionID()
 	if id == "" {
 		return nil
 	}
-	return h.manager.Rename(id, strings.TrimSpace(title))
+	err = h.manager.Rename(id, strings.TrimSpace(title))
+	return err
 }
 
 // Peek captures recent provider output without attaching.
@@ -180,7 +220,7 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 			return state, nil
 		}
 		state.Phase = PhaseReady
-		if history, histErr := h.History(ctx, HistoryRequest{}); histErr == nil && history != nil && history.TailState.Activity == TailActivityInTurn {
+		if history, histErr := h.History(WithoutOperationEvents(ctx), HistoryRequest{}); histErr == nil && history != nil && history.TailState.Activity == TailActivityInTurn {
 			state.Phase = PhaseBusy
 		}
 		return state, nil
@@ -196,9 +236,16 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 }
 
 // Message sends a user turn to the worker.
-func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (MessageResult, error) {
+func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (result MessageResult, err error) {
+	event := h.beginOperationEvent(ctx, workerOperationMessage)
+	defer func() {
+		event.payload.Queued = boolPointer(result.Queued)
+		event.finish(err)
+	}()
+
 	if strings.TrimSpace(req.Text) == "" {
-		return MessageResult{}, fmt.Errorf("message text is required")
+		err = fmt.Errorf("message text is required")
+		return MessageResult{}, err
 	}
 	id, err := h.ensureSessionID()
 	if err != nil {
@@ -212,22 +259,34 @@ func (h *SessionHandle) Message(ctx context.Context, req MessageRequest) (Messag
 	if err != nil {
 		return MessageResult{}, err
 	}
-	return MessageResult{Queued: outcome.Queued}, nil
+	result = MessageResult{Queued: outcome.Queued}
+	return result, nil
 }
 
 // Interrupt soft-stops any in-flight worker turn.
-func (h *SessionHandle) Interrupt(context.Context, InterruptRequest) error {
+func (h *SessionHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
+	defer func() { event.finish(err) }()
+
 	id := h.currentSessionID()
 	if id == "" {
 		return nil
 	}
-	return h.manager.StopTurn(id)
+	err = h.manager.StopTurn(id)
+	return err
 }
 
 // Nudge sends a best-effort redirect message to the worker.
-func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (NudgeResult, error) {
+func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
+	event := h.beginOperationEvent(ctx, workerOperationNudge)
+	defer func() {
+		event.payload.Delivered = boolPointer(result.Delivered)
+		event.finish(err)
+	}()
+
 	if strings.TrimSpace(req.Text) == "" {
-		return NudgeResult{}, fmt.Errorf("nudge text is required")
+		err = fmt.Errorf("nudge text is required")
+		return NudgeResult{}, err
 	}
 	id, err := h.ensureSessionID()
 	if err != nil {
@@ -244,39 +303,46 @@ func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (NudgeResul
 			if err != nil {
 				return NudgeResult{}, err
 			}
-			return NudgeResult{Delivered: delivered}, nil
+			result = NudgeResult{Delivered: delivered}
+			return result, nil
 		}
 		if err := h.manager.Send(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
 			return NudgeResult{}, err
 		}
-		return NudgeResult{Delivered: true}, nil
+		result = NudgeResult{Delivered: true}
+		return result, nil
 	case NudgeDeliveryImmediate:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
 			delivered, err := h.manager.SendImmediateLiveOnly(ctx, id, req.Text)
 			if err != nil {
 				return NudgeResult{}, err
 			}
-			return NudgeResult{Delivered: delivered}, nil
+			result = NudgeResult{Delivered: delivered}
+			return result, nil
 		}
 		if err := h.manager.SendImmediate(ctx, id, req.Text, resumeCommand, h.runtimeHints()); err != nil {
 			return NudgeResult{}, err
 		}
-		return NudgeResult{Delivered: true}, nil
+		result = NudgeResult{Delivered: true}
+		return result, nil
 	case NudgeDeliveryWaitIdle:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
 			delivered, err := h.manager.TryWaitIdleNudgeLiveOnly(ctx, id, req.Source, req.Text)
 			if err != nil {
 				return NudgeResult{}, err
 			}
-			return NudgeResult{Delivered: delivered}, nil
+			result = NudgeResult{Delivered: delivered}
+			return result, nil
 		}
 		delivered, err := h.manager.TryWaitIdleNudge(ctx, id, req.Source, req.Text, resumeCommand, h.runtimeHints())
 		if err != nil {
 			return NudgeResult{}, err
 		}
-		return NudgeResult{Delivered: delivered}, nil
+		result = NudgeResult{Delivered: delivered}
+		return result, nil
 	default:
-		return NudgeResult{}, fmt.Errorf("unknown nudge delivery %q", req.Delivery)
+		err = fmt.Errorf("unknown nudge delivery %q", req.Delivery)
+		return NudgeResult{}, err
 	}
 }
 

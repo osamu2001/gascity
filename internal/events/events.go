@@ -46,6 +46,7 @@ const (
 	OrderCompleted     = "order.completed"
 	OrderFailed        = "order.failed"
 	ProviderSwapped    = "provider.swapped"
+	WorkerOperation    = "worker.operation"
 
 	// External messaging events.
 	ExtMsgBound          = "extmsg.bound"

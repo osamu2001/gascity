@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -1590,14 +1591,19 @@ func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) 
 }
 
 func newTestSessionHandle(t *testing.T, spec SessionSpec) (*SessionHandle, *beads.MemStore, *runtime.Fake, *sessionpkg.Manager) {
+	return newTestSessionHandleWithRecorder(t, spec, nil)
+}
+
+func newTestSessionHandleWithRecorder(t *testing.T, spec SessionSpec, recorder events.Recorder) (*SessionHandle, *beads.MemStore, *runtime.Fake, *sessionpkg.Manager) {
 	t.Helper()
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	manager := sessionpkg.NewManager(store, sp)
 	handle, err := NewSessionHandle(SessionHandleConfig{
-		Manager: manager,
-		Session: spec,
+		Manager:  manager,
+		Recorder: recorder,
+		Session:  spec,
 	})
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)

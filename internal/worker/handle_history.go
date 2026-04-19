@@ -65,8 +65,13 @@ func (h *SessionHandle) AgentTranscript(ctx context.Context, agentID string) (*A
 }
 
 // History returns the normalized worker transcript.
-func (h *SessionHandle) History(_ context.Context, req HistoryRequest) (*HistorySnapshot, error) {
-	return h.historyWithRequest(req)
+func (h *SessionHandle) History(ctx context.Context, req HistoryRequest) (*HistorySnapshot, error) {
+	event := h.beginOperationEvent(ctx, workerOperationHistory)
+	var err error
+	defer func() { event.finish(err) }()
+
+	snapshot, err := h.historyWithRequest(req)
+	return snapshot, err
 }
 
 func (h *SessionHandle) historyWithRequest(req HistoryRequest) (*HistorySnapshot, error) {

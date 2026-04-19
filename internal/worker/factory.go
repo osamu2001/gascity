@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -20,6 +21,7 @@ type FactoryConfig struct {
 	Provider              runtime.Provider
 	CityPath              string
 	SearchPaths           []string
+	Recorder              events.Recorder
 	ResolveTransport      func(template string) string
 	ResolveSessionRuntime SessionRuntimeResolver
 }
@@ -31,6 +33,7 @@ type Factory struct {
 	store                 beads.Store
 	provider              runtime.Provider
 	searchPaths           []string
+	recorder              events.Recorder
 	resolveSessionRuntime SessionRuntimeResolver
 }
 
@@ -46,16 +49,16 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	default:
 		manager = sessionpkg.NewManager(cfg.Store, cfg.Provider)
 	}
-	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.ResolveSessionRuntime)
+	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.Recorder, cfg.ResolveSessionRuntime)
 }
 
 // NewFactoryFromManager wraps an already-constructed session manager behind the
 // worker boundary. Primarily useful in tests.
 func NewFactoryFromManager(manager *sessionpkg.Manager, searchPaths []string) (*Factory, error) {
-	return newFactory(manager, nil, nil, searchPaths, nil)
+	return newFactory(manager, nil, nil, searchPaths, nil, nil)
 }
 
-func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime.Provider, searchPaths []string, resolveRuntime SessionRuntimeResolver) (*Factory, error) {
+func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime.Provider, searchPaths []string, recorder events.Recorder, resolveRuntime SessionRuntimeResolver) (*Factory, error) {
 	if manager == nil {
 		return nil, fmt.Errorf("%w: manager is required", ErrHandleConfig)
 	}
@@ -64,6 +67,7 @@ func newFactory(manager *sessionpkg.Manager, store beads.Store, provider runtime
 		store:                 store,
 		provider:              provider,
 		searchPaths:           append([]string(nil), searchPaths...),
+		recorder:              recorder,
 		resolveSessionRuntime: resolveRuntime,
 	}, nil
 }
@@ -80,6 +84,7 @@ func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 	return NewSessionHandle(SessionHandleConfig{
 		Manager:     f.manager,
 		SearchPaths: append([]string(nil), f.searchPaths...),
+		Recorder:    f.recorder,
 		Session:     spec,
 	})
 }
@@ -94,6 +99,9 @@ func (f *Factory) SessionByID(id string) (Handle, error) {
 
 	spec := SessionSpec{
 		ID:       id,
+		Template: info.Template,
+		Title:    info.Title,
+		Alias:    info.Alias,
 		Command:  info.Command,
 		Provider: info.Provider,
 		WorkDir:  info.WorkDir,

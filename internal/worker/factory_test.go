@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -237,6 +239,56 @@ func TestFactorySessionByIDPropagatesResolvedRuntimeError(t *testing.T) {
 	_, err = factory.SessionByID(info.ID)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("SessionByID(%q) error = %v, want %v", info.ID, err, wantErr)
+	}
+}
+
+func TestFactorySessionByIDPreservesTemplateInWorkerOperationEvents(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	manager := sessionpkg.NewManager(store, sp)
+	recorder := events.NewFake()
+
+	info, err := manager.CreateBeadOnly(
+		"myrig/worker",
+		"Probe",
+		"",
+		t.TempDir(),
+		"stub",
+		"",
+		nil,
+		sessionpkg.ProviderResume{SessionIDFlag: "--session-id"},
+	)
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+
+	factory, err := NewFactory(FactoryConfig{
+		Store:    store,
+		Provider: sp,
+		Recorder: recorder,
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	handle, err := factory.SessionByID(info.ID)
+	if err != nil {
+		t.Fatalf("SessionByID(%q): %v", info.ID, err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	recorded := recorder.Events
+	if len(recorded) == 0 {
+		t.Fatal("no worker events recorded")
+	}
+	var payload operationEventPayload
+	if err := json.Unmarshal(recorded[len(recorded)-1].Payload, &payload); err != nil {
+		t.Fatalf("Unmarshal(payload): %v", err)
+	}
+	if got, want := payload.Template, info.Template; got != want {
+		t.Fatalf("payload.Template = %q, want %q", got, want)
 	}
 }
 

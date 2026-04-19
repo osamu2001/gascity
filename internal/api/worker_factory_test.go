@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -214,5 +215,41 @@ func TestNewResolvedWorkerSessionHandleDerivesProviderFromCommand(t *testing.T) 
 	}
 	if got, want := bead.Metadata["provider"], "/bin/echo"; got != want {
 		t.Fatalf("Metadata[provider] = %q, want %q", got, want)
+	}
+}
+
+func TestWorkerFactoryRoutesWorkerOperationEventsToStateProvider(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	handle, err := srv.newResolvedWorkerSessionHandle(fs.cityBeadStore, worker.ResolvedSessionConfig{
+		Alias:        "worker",
+		ExplicitName: "worker-events",
+		Template:     "myrig/worker",
+		Title:        "Worker Events",
+		Runtime: worker.ResolvedRuntime{
+			Command:  "/bin/echo",
+			WorkDir:  t.TempDir(),
+			Provider: "resolved-worker",
+			Resume: session.ProviderResume{
+				SessionIDFlag: "--session-id",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("newResolvedWorkerSessionHandle: %v", err)
+	}
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	recorded := fs.eventProv.(*events.Fake).Events
+	if len(recorded) == 0 {
+		t.Fatal("worker start recorded no events")
+	}
+	last := recorded[len(recorded)-1]
+	if got, want := last.Type, events.WorkerOperation; got != want {
+		t.Fatalf("last event type = %q, want %q", got, want)
 	}
 }

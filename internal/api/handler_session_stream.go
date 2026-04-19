@@ -67,7 +67,7 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("format") == "raw" && !info.Closed {
 		historyReq.TailCompactions = 1
 	}
-	history, historyErr := handle.History(r.Context(), historyReq)
+	history, historyErr := handle.History(worker.WithoutOperationEvents(r.Context()), historyReq)
 	hasHistory := historyErr == nil && history != nil
 	if historyErr != nil && !errors.Is(historyErr, worker.ErrHistoryUnavailable) {
 		writeError(w, http.StatusInternalServerError, "internal", "reading session history: "+historyErr.Error())
@@ -300,7 +300,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 		case <-ctx.Done():
 			return
 		case <-poll.C:
-			snapshot, err := handle.History(ctx, req)
+			snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), req)
 			switch {
 			case err == nil:
 				emitSnapshot(snapshot)
@@ -386,7 +386,7 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 		case <-ctx.Done():
 			return
 		case <-poll.C:
-			snapshot, err := handle.History(ctx, worker.HistoryRequest{})
+			snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{})
 			switch {
 			case err == nil:
 				emitSnapshot(snapshot)

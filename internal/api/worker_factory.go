@@ -22,6 +22,7 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 		Provider:              s.state.SessionProvider(),
 		CityPath:              s.state.CityPath(),
 		SearchPaths:           s.sessionLogPaths(),
+		Recorder:              s.state.EventProvider(),
 		ResolveTransport:      resolveTransport,
 		ResolveSessionRuntime: s.resolveWorkerSessionRuntime,
 	})

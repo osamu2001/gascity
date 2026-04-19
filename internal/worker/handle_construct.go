@@ -3,6 +3,8 @@ package worker
 import (
 	"fmt"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // NewSessionHandle constructs a session-backed worker handle.
@@ -49,10 +51,15 @@ func NewSessionHandle(cfg SessionHandleConfig) (*SessionHandle, error) {
 	if len(adapter.SearchPaths) == 0 {
 		adapter.SearchPaths = append([]string(nil), searchPaths...)
 	}
+	recorder := cfg.Recorder
+	if recorder == nil {
+		recorder = events.Discard
+	}
 
 	return &SessionHandle{
 		manager:     cfg.Manager,
 		adapter:     adapter,
+		recorder:    recorder,
 		searchPaths: searchPaths,
 		session:     spec,
 		sessionID:   strings.TrimSpace(spec.ID),
