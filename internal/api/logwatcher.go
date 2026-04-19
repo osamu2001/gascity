@@ -124,7 +124,7 @@ type RunOpts struct {
 
 // Run executes the main event loop. It calls readAndEmit on file changes
 // and writeKeepalive on keepalive ticks. Blocks until ctx is canceled.
-func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeepalive func(), opts ...RunOpts) {
+func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func() bool, writeKeepalive func(), opts ...RunOpts) {
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
 
@@ -158,7 +158,7 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeep
 	}
 
 	// Emit initial state immediately.
-	readAndEmit()
+	_ = readAndEmit()
 	if onStall != nil {
 		stallTicker.Reset(stallTimeout)
 		stallC = stallTicker.C
@@ -174,12 +174,15 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeep
 					return
 				}
 				if ev.Has(fsnotify.Write) {
-					readAndEmit()
-					dataArrived()
+					if readAndEmit() {
+						dataArrived()
+					}
 				}
 				if ev.Has(fsnotify.Remove) || ev.Has(fsnotify.Rename) {
 					lw.switchToPolling("file removed/renamed")
-					readAndEmit()
+					if readAndEmit() {
+						dataArrived()
+					}
 				}
 			case err, ok := <-lw.watcher.Errors:
 				if !ok {
@@ -191,8 +194,9 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeep
 					wake = nil
 					continue
 				}
-				readAndEmit()
-				dataArrived()
+				if readAndEmit() {
+					dataArrived()
+				}
 			case <-keepalive.C:
 				writeKeepalive()
 			case <-stallC:
@@ -203,15 +207,17 @@ func (lw *logFileWatcher) Run(ctx context.Context, readAndEmit func(), writeKeep
 			case <-ctx.Done():
 				return
 			case <-lw.fallbackPoll.C:
-				readAndEmit()
-				dataArrived()
+				if readAndEmit() {
+					dataArrived()
+				}
 			case _, ok := <-wake:
 				if !ok {
 					wake = nil
 					continue
 				}
-				readAndEmit()
-				dataArrived()
+				if readAndEmit() {
+					dataArrived()
+				}
 			case <-keepalive.C:
 				writeKeepalive()
 			case <-stallC:

@@ -221,9 +221,10 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 	sentIDs := make(map[string]struct{})
 	currentActivity := historySnapshotActivity(initial)
 
-	emitSnapshot := func(snapshot *worker.HistorySnapshot) {
+	emitSnapshot := func(snapshot *worker.HistorySnapshot) bool {
+		emitted := false
 		if snapshot == nil {
-			return
+			return false
 		}
 		currentActivity = historySnapshotActivity(snapshot)
 		rawMessages, ids := historySnapshotRawMessages(snapshot)
@@ -262,6 +263,7 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 					writeSSE(w, "message", seq, data)
 					lastProgress = time.Now()
 					lastPendingID = ""
+					emitted = true
 				}
 			}
 			lastSentID = ids[len(ids)-1]
@@ -275,12 +277,14 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 			actData, _ := json.Marshal(map[string]string{"activity": currentActivity})
 			writeSSE(w, "activity", seq, actData)
 			lastProgress = time.Now()
+			emitted = true
 		}
+		return emitted
 	}
 
-	emitPending := func() {
+	emitPending := func() bool {
 		if time.Since(lastProgress) < sessionStreamPendingStallTimeout {
-			return
+			return false
 		}
 		pending, err := handle.Pending(ctx)
 		if err != nil || pending == nil {
@@ -293,42 +297,46 @@ func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.R
 				seq++
 				actData, _ := json.Marshal(map[string]string{"activity": activity})
 				writeSSE(w, "activity", seq, actData)
+				return true
 			}
-			return
+			return false
 		}
 		if pending.RequestID == lastPendingID {
-			return
+			return false
 		}
 		lastPendingID = pending.RequestID
 		seq++
 		pendingData, _ := json.Marshal(pending)
 		writeSSE(w, "pending", seq, pendingData)
+		return true
 	}
 
 	var lw *logFileWatcher
-	reloadSnapshot := func() {
+	reloadSnapshot := func() bool {
+		emitted := false
 		snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), req)
 		switch {
 		case err == nil:
-			emitSnapshot(snapshot)
+			emitted = emitSnapshot(snapshot)
 		case errors.Is(err, worker.ErrHistoryUnavailable):
 		default:
 			log.Printf("session stream raw: history reload failed for %s: %v", info.ID, err)
 		}
-		emitPending()
+		emitted = emitPending() || emitted
 		if lw != nil {
 			lw.UpdatePath(sessionStreamTranscriptPath(ctx, handle))
 		}
+		return emitted
 	}
 
-	emitSnapshot(initial)
+	_ = emitSnapshot(initial)
 	if logPath != "" {
 		poll.Stop()
 		keepalive.Stop()
 		lw = newLogFileWatcher(logPath)
 		defer lw.Close()
 		lw.Run(ctx, reloadSnapshot, func() { writeSSEComment(w) }, RunOpts{
-			OnStall:      emitPending,
+			OnStall:      func() { _ = emitPending() },
 			StallTimeout: sessionStreamPendingStallTimeout,
 			Wake:         workerOps,
 		})
@@ -368,9 +376,10 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 	var lastActivity string
 	sentIDs := make(map[string]struct{})
 
-	emitSnapshot := func(snapshot *worker.HistorySnapshot) {
+	emitSnapshot := func(snapshot *worker.HistorySnapshot) bool {
+		emitted := false
 		if snapshot == nil {
-			return
+			return false
 		}
 		turns, ids := historySnapshotTurns(snapshot)
 		if len(turns) > 0 {
@@ -406,6 +415,7 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 				})
 				if err == nil {
 					writeSSE(w, "turn", seq, data)
+					emitted = true
 				}
 			}
 			lastSentID = ids[len(ids)-1]
@@ -419,15 +429,18 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 			seq++
 			actData, _ := json.Marshal(map[string]string{"activity": activity})
 			writeSSE(w, "activity", seq, actData)
+			emitted = true
 		}
+		return emitted
 	}
 
 	var lw *logFileWatcher
-	reloadSnapshot := func() {
+	reloadSnapshot := func() bool {
+		emitted := false
 		snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{})
 		switch {
 		case err == nil:
-			emitSnapshot(snapshot)
+			emitted = emitSnapshot(snapshot)
 		case errors.Is(err, worker.ErrHistoryUnavailable):
 		default:
 			log.Printf("session stream: history reload failed for %s: %v", info.ID, err)
@@ -435,9 +448,10 @@ func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.Resp
 		if lw != nil {
 			lw.UpdatePath(sessionStreamTranscriptPath(ctx, handle))
 		}
+		return emitted
 	}
 
-	emitSnapshot(initial)
+	_ = emitSnapshot(initial)
 	if logPath != "" {
 		poll.Stop()
 		keepalive.Stop()
@@ -632,9 +646,10 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 	sentIDs := make(map[string]struct{})
 	currentActivity := historySnapshotActivity(initial)
 
-	emitSnapshot := func(snapshot *worker.HistorySnapshot) {
+	emitSnapshot := func(snapshot *worker.HistorySnapshot) bool {
+		emitted := false
 		if snapshot == nil {
-			return
+			return false
 		}
 		currentActivity = historySnapshotActivity(snapshot)
 		rawMessages, ids := historySnapshotRawMessages(snapshot)
@@ -671,6 +686,7 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 				}})
 				lastProgress = time.Now()
 				lastPendingID = ""
+				emitted = true
 			}
 			lastSentID = ids[len(ids)-1]
 			for _, id := range ids {
@@ -682,12 +698,14 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 			seq++
 			_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: currentActivity}})
 			lastProgress = time.Now()
+			emitted = true
 		}
+		return emitted
 	}
 
-	emitPending := func() {
+	emitPending := func() bool {
 		if time.Since(lastProgress) < sessionStreamPendingStallTimeout {
-			return
+			return false
 		}
 		pending, err := handle.Pending(ctx)
 		if err != nil || pending == nil {
@@ -699,34 +717,38 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 				}
 				seq++
 				_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: activity}})
+				return true
 			}
-			return
+			return false
 		}
 		if pending.RequestID == lastPendingID {
-			return
+			return false
 		}
 		lastPendingID = pending.RequestID
 		seq++
 		_ = send(sse.Message{ID: seq, Data: *pending})
+		return true
 	}
 
 	var lw *logFileWatcher
-	reloadSnapshot := func() {
+	reloadSnapshot := func() bool {
+		emitted := false
 		snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), req)
 		switch {
 		case err == nil:
-			emitSnapshot(snapshot)
+			emitted = emitSnapshot(snapshot)
 		case errors.Is(err, worker.ErrHistoryUnavailable):
 		default:
 			log.Printf("session stream raw: history reload failed for %s: %v", info.ID, err)
 		}
-		emitPending()
+		emitted = emitPending() || emitted
 		if lw != nil {
 			lw.UpdatePath(sessionStreamTranscriptPath(ctx, handle))
 		}
+		return emitted
 	}
 
-	emitSnapshot(initial)
+	_ = emitSnapshot(initial)
 	if logPath != "" {
 		poll.Stop()
 		keepalive.Stop()
@@ -735,7 +757,7 @@ func (s *Server) streamSessionTranscriptLogRawHuma(ctx context.Context, send sse
 		lw.Run(ctx, reloadSnapshot, func() {
 			_ = send.Data(HeartbeatEvent{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 		}, RunOpts{
-			OnStall:      emitPending,
+			OnStall:      func() { _ = emitPending() },
 			StallTimeout: sessionStreamPendingStallTimeout,
 			Wake:         workerOps,
 		})
@@ -779,9 +801,10 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 	var lastActivity string
 	sentIDs := make(map[string]struct{})
 
-	emitSnapshot := func(snapshot *worker.HistorySnapshot) {
+	emitSnapshot := func(snapshot *worker.HistorySnapshot) bool {
+		emitted := false
 		if snapshot == nil {
-			return
+			return false
 		}
 		turns, ids := historySnapshotTurns(snapshot)
 		if len(turns) > 0 {
@@ -816,6 +839,7 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 					Format:   "conversation",
 					Turns:    toSend,
 				}})
+				emitted = true
 			}
 			lastSentID = ids[len(ids)-1]
 			for _, id := range ids {
@@ -828,15 +852,18 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 			lastActivity = activity
 			seq++
 			_ = send(sse.Message{ID: seq, Data: SessionActivityEvent{Activity: activity}})
+			emitted = true
 		}
+		return emitted
 	}
 
 	var lw *logFileWatcher
-	reloadSnapshot := func() {
+	reloadSnapshot := func() bool {
+		emitted := false
 		snapshot, err := handle.History(worker.WithoutOperationEvents(ctx), worker.HistoryRequest{})
 		switch {
 		case err == nil:
-			emitSnapshot(snapshot)
+			emitted = emitSnapshot(snapshot)
 		case errors.Is(err, worker.ErrHistoryUnavailable):
 		default:
 			log.Printf("session stream: history reload failed for %s: %v", info.ID, err)
@@ -844,9 +871,10 @@ func (s *Server) streamSessionTranscriptLogHuma(ctx context.Context, send sse.Se
 		if lw != nil {
 			lw.UpdatePath(sessionStreamTranscriptPath(ctx, handle))
 		}
+		return emitted
 	}
 
-	emitSnapshot(initial)
+	_ = emitSnapshot(initial)
 	if logPath != "" {
 		poll.Stop()
 		keepalive.Stop()

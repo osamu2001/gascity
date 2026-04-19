@@ -21,11 +21,12 @@ func TestLogFileWatcherWakeResetsStallTimer(t *testing.T) {
 
 	go lw.Run(
 		ctx,
-		func() {
+		func() bool {
 			select {
 			case emits <- struct{}{}:
 			default:
 			}
+			return true
 		},
 		func() {},
 		RunOpts{
@@ -65,5 +66,40 @@ func TestLogFileWatcherWakeResetsStallTimer(t *testing.T) {
 	case <-stalls:
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("stall did not fire after wake-reset timeout elapsed")
+	}
+}
+
+func TestLogFileWatcherPollingWithoutProgressStillFiresStall(t *testing.T) {
+	lw := &logFileWatcher{
+		fallbackPoll: time.NewTicker(50 * time.Millisecond),
+	}
+	defer lw.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stalls := make(chan struct{}, 2)
+
+	go lw.Run(
+		ctx,
+		func() bool {
+			return false
+		},
+		func() {},
+		RunOpts{
+			StallTimeout: 150 * time.Millisecond,
+			OnStall: func() {
+				select {
+				case stalls <- struct{}{}:
+				default:
+				}
+			},
+		},
+	)
+
+	select {
+	case <-stalls:
+	case <-time.After(time.Second):
+		t.Fatal("stall did not fire while fallback polling observed no progress")
 	}
 }

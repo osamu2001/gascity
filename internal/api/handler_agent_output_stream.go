@@ -108,7 +108,7 @@ func (s *Server) streamSessionLog(
 	var seq uint64
 	sentUUIDs := make(map[string]struct{})
 
-	readAndEmit := func() {
+	readAndEmit := func() bool {
 		if resolvePath != nil {
 			if resolvedPath := strings.TrimSpace(resolvePath()); resolvedPath != "" && resolvedPath != currentPath {
 				currentPath = resolvedPath
@@ -116,22 +116,22 @@ func (s *Server) streamSessionLog(
 			}
 		}
 		if currentPath == "" {
-			return
+			return false
 		}
 
 		info, err := os.Stat(currentPath)
 		if err != nil {
-			return
+			return false
 		}
 		currentSize := info.Size()
 		if currentSize == lastSize {
-			return
+			return false
 		}
 
 		// Use tail=1 (last compaction segment) to limit parsing scope.
 		factory, err := s.workerFactory(s.state.CityBeadStore())
 		if err != nil {
-			return
+			return false
 		}
 		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
 			Provider:        provider,
@@ -139,7 +139,7 @@ func (s *Server) streamSessionLog(
 			TailCompactions: 1,
 		})
 		if err != nil {
-			return
+			return false
 		}
 		sess := transcript.Session
 		lastSize = currentSize
@@ -155,7 +155,7 @@ func (s *Server) streamSessionLog(
 			uuids = append(uuids, e.UUID)
 		}
 		if len(turns) == 0 {
-			return
+			return false
 		}
 
 		var toSend []outputTurn
@@ -193,7 +193,7 @@ func (s *Server) streamSessionLog(
 		}
 
 		if len(toSend) == 0 {
-			return
+			return false
 		}
 		seq++
 
@@ -203,12 +203,13 @@ func (s *Server) streamSessionLog(
 			Turns:  toSend,
 		})
 		if err != nil {
-			return
+			return false
 		}
 		fmt.Fprintf(w, "event: turn\nid: %d\ndata: %s\n\n", seq, data) //nolint:errcheck
 		if err := http.NewResponseController(w).Flush(); err != nil {
 			_ = err
 		}
+		return true
 	}
 
 	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) }, RunOpts{Wake: wake})
@@ -297,7 +298,7 @@ func (s *Server) streamSessionLogHuma(
 	var seq int
 	sentUUIDs := make(map[string]struct{})
 
-	readAndEmit := func() {
+	readAndEmit := func() bool {
 		if resolvePath != nil {
 			if resolvedPath := strings.TrimSpace(resolvePath()); resolvedPath != "" && resolvedPath != currentPath {
 				currentPath = resolvedPath
@@ -305,21 +306,21 @@ func (s *Server) streamSessionLogHuma(
 			}
 		}
 		if currentPath == "" {
-			return
+			return false
 		}
 
 		info, err := os.Stat(currentPath)
 		if err != nil {
-			return
+			return false
 		}
 		currentSize := info.Size()
 		if currentSize == lastSize {
-			return
+			return false
 		}
 
 		factory, err := s.workerFactory(s.state.CityBeadStore())
 		if err != nil {
-			return
+			return false
 		}
 		transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
 			Provider:        provider,
@@ -327,7 +328,7 @@ func (s *Server) streamSessionLogHuma(
 			TailCompactions: 1,
 		})
 		if err != nil {
-			return
+			return false
 		}
 		sess := transcript.Session
 		lastSize = currentSize
@@ -343,7 +344,7 @@ func (s *Server) streamSessionLogHuma(
 			uuids = append(uuids, entry.UUID)
 		}
 		if len(turns) == 0 {
-			return
+			return false
 		}
 
 		var toSend []outputTurn
@@ -374,7 +375,7 @@ func (s *Server) streamSessionLogHuma(
 		}
 
 		if len(toSend) == 0 {
-			return
+			return false
 		}
 		seq++
 		_ = send(sse.Message{ID: seq, Data: agentOutputResponse{
@@ -382,6 +383,7 @@ func (s *Server) streamSessionLogHuma(
 			Format: "conversation",
 			Turns:  toSend,
 		}})
+		return true
 	}
 
 	lw.Run(ctx, readAndEmit, func() {

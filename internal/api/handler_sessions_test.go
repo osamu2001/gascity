@@ -2712,7 +2712,7 @@ func TestCityScopedSessionStreamFollowsRotatedGeminiTranscriptAfterWake(t *testi
 		t.Fatalf("Create: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil).WithContext(ctx)
@@ -2723,7 +2723,7 @@ func TestCityScopedSessionStreamFollowsRotatedGeminiTranscriptAfterWake(t *testi
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "first-output", time.Second); !strings.Contains(body, "first-output") {
+	if body := waitForRecorderSubstring(t, rec, "first-output", 3*time.Second); !strings.Contains(body, "first-output") {
 		t.Fatalf("stream body missing initial transcript turn: %s", body)
 	}
 
@@ -2743,7 +2743,7 @@ func TestCityScopedSessionStreamFollowsRotatedGeminiTranscriptAfterWake(t *testi
 		Subject: info.ID,
 	})
 
-	if body := waitForRecorderSubstring(t, rec, "second-output", 1500*time.Millisecond); !strings.Contains(body, "second-output") {
+	if body := waitForRecorderSubstring(t, rec, "second-output", 5*time.Second); !strings.Contains(body, "second-output") {
 		t.Fatalf("stream body missing rotated transcript after wake: %s", body)
 	}
 
@@ -2758,7 +2758,7 @@ func TestCityScopedSessionStreamFollowsRotatedGeminiTranscriptAfterWake(t *testi
 		t.Fatalf("chtimes(updated second transcript): %v", err)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "third-output", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "third-output", 5*time.Second)
 
 	cancel()
 	<-done

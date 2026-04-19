@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -58,10 +59,19 @@ func (s *Server) resolveAgentTranscript(name string, agentCfg config.Agent) (*ag
 	if state.workDir == "" {
 		return state, nil
 	}
+	if abs, err := filepath.Abs(state.workDir); err == nil {
+		state.workDir = abs
+	}
 
-	if sp := s.state.SessionProvider(); sp != nil && state.sessionName != "" {
-		if sessionID, err := sp.GetMeta(state.sessionName, "GC_SESSION_ID"); err == nil {
-			state.sessionID = strings.TrimSpace(sessionID)
+	state.sessionName, state.sessionID = s.resolveAgentSessionSubjects(name, cfg)
+	if state.sessionID == "" {
+		state.sessionName = agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
+	}
+	if state.sessionID == "" {
+		if sp := s.state.SessionProvider(); sp != nil && state.sessionName != "" {
+			if sessionID, err := sp.GetMeta(state.sessionName, "GC_SESSION_ID"); err == nil {
+				state.sessionID = strings.TrimSpace(sessionID)
+			}
 		}
 	}
 	if state.sessionID != "" {

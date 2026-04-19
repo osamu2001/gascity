@@ -13,23 +13,31 @@ func (s *Server) watchSessionWorkerOperationSignals(ctx context.Context, info se
 	return s.watchWorkerOperationSignals(ctx, info.ID, info.SessionName)
 }
 
-func (s *Server) watchAgentWorkerOperationSignals(ctx context.Context, name string, cfg *config.City) <-chan struct{} {
+func (s *Server) resolveAgentSessionSubjects(name string, cfg *config.City) (string, string) {
 	if s == nil || s.state == nil || cfg == nil {
-		return nil
+		return "", ""
 	}
 
 	sessionName := strings.TrimSpace(agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate))
 	if sessionName == "" {
-		return nil
+		return "", ""
 	}
 
 	sessionID := ""
 	if store := s.state.CityBeadStore(); store != nil {
 		if id, err := s.resolveSessionIDWithConfig(store, sessionName); err == nil {
-			sessionID = id
+			sessionID = strings.TrimSpace(id)
 		}
 	}
 
+	return sessionName, sessionID
+}
+
+func (s *Server) watchAgentWorkerOperationSignals(ctx context.Context, name string, cfg *config.City) <-chan struct{} {
+	sessionName, sessionID := s.resolveAgentSessionSubjects(name, cfg)
+	if sessionName == "" {
+		return nil
+	}
 	return s.watchWorkerOperationSignals(ctx, sessionID, sessionName)
 }
 

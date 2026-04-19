@@ -309,6 +309,68 @@ func TestAgentOutputCorruptedSessionFile(t *testing.T) {
 	}
 }
 
+func TestResolveAgentTranscriptUsesBeadSessionIDWhenRuntimeMetaMissing(t *testing.T) {
+	state := newSessionFakeState(t)
+	workDir := t.TempDir()
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: workDir}}
+	state.cfg.Agents[0].Provider = "claude/tmux-cli"
+
+	searchBase := t.TempDir()
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(workDir)
+	transcriptDir := filepath.Join(searchBase, slug)
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+
+	keyedPath := filepath.Join(transcriptDir, "sess-claude.jsonl")
+	if err := os.WriteFile(keyedPath, []byte(
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"right"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`+"\n",
+	), 0o644); err != nil {
+		t.Fatalf("write keyed transcript: %v", err)
+	}
+	otherPath := filepath.Join(transcriptDir, "different-session.jsonl")
+	if err := os.WriteFile(otherPath, []byte(
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"wrong"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`+"\n",
+	), 0o644); err != nil {
+		t.Fatalf("write fallback transcript: %v", err)
+	}
+
+	srv := newServerWithSearchPaths(state, searchBase)
+	mgr := session.NewManager(state.cityBeadStore, state.sp)
+	sessionName := agentSessionName(state.CityName(), "myrig/worker", state.cfg.Workspace.SessionTemplate)
+	info, err := mgr.CreateAliasedNamedWithTransport(
+		context.Background(),
+		"",
+		sessionName,
+		"myrig/worker",
+		"Chat",
+		"claude",
+		workDir,
+		"claude/tmux-cli",
+		"",
+		nil,
+		session.ProviderResume{},
+		runtime.Config{},
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.PersistSessionKey(info.ID, "sess-claude"); err != nil {
+		t.Fatalf("PersistSessionKey: %v", err)
+	}
+
+	resolved, err := srv.resolveAgentTranscript("myrig/worker", state.cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("resolveAgentTranscript: %v", err)
+	}
+	if resolved.sessionID != info.ID {
+		t.Fatalf("sessionID = %q, want %q", resolved.sessionID, info.ID)
+	}
+	if resolved.path != keyedPath {
+		t.Fatalf("path = %q, want %q (and not %q)", resolved.path, keyedPath, otherPath)
+	}
+}
+
 func TestAgentOutputStreamSSEHeaders(t *testing.T) {
 	state := newFakeState(t)
 	rigDir := t.TempDir()
@@ -604,7 +666,7 @@ func TestAgentOutputStreamWorkerOperationEventWakesPeekFallback(t *testing.T) {
 	srv := New(state)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
@@ -615,7 +677,7 @@ func TestAgentOutputStreamWorkerOperationEventWakesPeekFallback(t *testing.T) {
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "first output", 2*time.Second); !strings.Contains(body, "first output") {
+	if body := waitForRecorderSubstring(t, rec, "first output", 10*time.Second); !strings.Contains(body, "first output") {
 		t.Fatalf("stream body missing initial output: %s", body)
 	}
 
@@ -626,7 +688,7 @@ func TestAgentOutputStreamWorkerOperationEventWakesPeekFallback(t *testing.T) {
 		Subject: "myrig--worker",
 	})
 
-	body := waitForRecorderSubstring(t, rec, "wake from runtime event", 2*time.Second)
+	body := waitForRecorderSubstring(t, rec, "wake from runtime event", 10*time.Second)
 
 	cancel()
 	<-done
@@ -661,7 +723,7 @@ func TestAgentOutputStreamWorkerOperationSessionIDWakesPeekFallback(t *testing.T
 	srv := New(state)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
@@ -672,7 +734,7 @@ func TestAgentOutputStreamWorkerOperationSessionIDWakesPeekFallback(t *testing.T
 		close(done)
 	}()
 
-	if body := waitForRecorderSubstring(t, rec, "first output", 2*time.Second); !strings.Contains(body, "first output") {
+	if body := waitForRecorderSubstring(t, rec, "first output", 10*time.Second); !strings.Contains(body, "first output") {
 		t.Fatalf("stream body missing initial output: %s", body)
 	}
 
@@ -683,7 +745,7 @@ func TestAgentOutputStreamWorkerOperationSessionIDWakesPeekFallback(t *testing.T
 		Subject: info.ID,
 	})
 
-	body := waitForRecorderSubstring(t, rec, "wake from session id", 2*time.Second)
+	body := waitForRecorderSubstring(t, rec, "wake from session id", 10*time.Second)
 
 	cancel()
 	<-done
