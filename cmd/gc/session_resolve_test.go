@@ -78,7 +78,7 @@ func TestResolveSessionID_QualifiedAliasBasename(t *testing.T) {
 		},
 	})
 
-	id, err := resolveSessionID(store, "witness")
+	id, err := resolveSessionIDWithConfig(t.TempDir(), nil, store, "witness")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

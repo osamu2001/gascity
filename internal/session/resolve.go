@@ -69,10 +69,8 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 
 	var openSessionNameMatches []beads.Bead
 	var openAliasMatches []beads.Bead
-	var openQualifiedAliasBasenameMatches []beads.Bead
 	var closedSessionNameMatches []beads.Bead
 	var closedAliasMatches []beads.Bead
-	var closedQualifiedAliasBasenameMatches []beads.Bead
 	for _, b := range all {
 		if !IsSessionBeadOrRepairable(b) {
 			continue
@@ -86,8 +84,6 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 				openAliasMatches = append(openAliasMatches, b)
 			case sessionName == identifier:
 				openSessionNameMatches = append(openSessionNameMatches, b)
-			case alias != "" && strings.Contains(alias, "/") && TargetBasename(alias) == identifier:
-				openQualifiedAliasBasenameMatches = append(openQualifiedAliasBasenameMatches, b)
 			}
 			continue
 		}
@@ -99,15 +95,12 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 			closedAliasMatches = append(closedAliasMatches, b)
 		case sessionName == identifier:
 			closedSessionNameMatches = append(closedSessionNameMatches, b)
-		case alias != "" && strings.Contains(alias, "/") && TargetBasename(alias) == identifier:
-			closedQualifiedAliasBasenameMatches = append(closedQualifiedAliasBasenameMatches, b)
 		}
 	}
 
 	for _, matches := range [][]beads.Bead{
 		openSessionNameMatches,
 		openAliasMatches,
-		openQualifiedAliasBasenameMatches,
 	} {
 		if len(matches) > 0 {
 			return chooseSessionMatch(identifier, matches)
@@ -119,7 +112,6 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 	for _, matches := range [][]beads.Bead{
 		closedSessionNameMatches,
 		closedAliasMatches,
-		closedQualifiedAliasBasenameMatches,
 	} {
 		if len(matches) > 0 {
 			return chooseSessionMatch(identifier, matches)

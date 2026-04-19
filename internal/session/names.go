@@ -545,6 +545,9 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionAliasExists, alias, b.ID)
 		}
 		if strings.TrimSpace(b.Metadata["agent_name"]) == alias {
+			if selfOwner != "" && selfOwner == alias {
+				continue
+			}
 			return fmt.Errorf("%w: %q conflicts with concrete session identity on %s", ErrSessionAliasExists, alias, b.ID)
 		}
 		// Historical aliases are compatibility-only input and do not reserve
