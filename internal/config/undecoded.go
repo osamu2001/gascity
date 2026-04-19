@@ -125,6 +125,8 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(PackDoctorEntry{}),
 		reflect.TypeOf(PackCommandEntry{}),
 		reflect.TypeOf(PackGlobal{}),
+		reflect.TypeOf(packDefaults{}),
+		reflect.TypeOf(packRigDefaults{}),
 	}
 	for _, t := range types {
 		collectTOMLTags(t, seen)
