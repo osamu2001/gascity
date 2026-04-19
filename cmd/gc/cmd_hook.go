@@ -29,7 +29,11 @@ With --inject: wraps output in <system-reminder> for hook injection, always exit
 		The agent is determined from $GC_AGENT or a positional argument.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdHookWithFormat(args, inject, hookFormat, stdout, stderr) != 0 {
+			code := cmdHook(args, inject, stdout, stderr)
+			if hookFormat != "" {
+				code = cmdHookWithFormat(args, inject, hookFormat, stdout, stderr)
+			}
+			if code != 0 {
 				return errExit
 			}
 			return nil
