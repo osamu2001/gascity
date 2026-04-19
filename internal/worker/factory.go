@@ -153,10 +153,14 @@ func (f *Factory) HandleForTarget(target string, processNames []string) (Handle,
 	if f.provider == nil {
 		return nil, sessionpkg.ErrSessionNotFound
 	}
+	providerName := strings.TrimSpace(target)
+	if liveProvider, err := f.provider.GetMeta(target, "GC_PROVIDER"); err == nil && strings.TrimSpace(liveProvider) != "" {
+		providerName = strings.TrimSpace(liveProvider)
+	}
 	return NewRuntimeHandle(RuntimeHandleConfig{
 		Provider:     f.provider,
 		SessionName:  target,
-		ProviderName: target,
+		ProviderName: providerName,
 		ProcessNames: append([]string(nil), processNames...),
 		Recorder:     f.recorder,
 	})

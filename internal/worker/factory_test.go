@@ -343,6 +343,9 @@ func TestFactoryHandleForTargetRuntimeFallbackPreservesRecorder(t *testing.T) {
 	if err := sp.Start(context.Background(), "legacy-runtime-name", runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	if err := sp.SetMeta("legacy-runtime-name", "GC_PROVIDER", "claude"); err != nil {
+		t.Fatalf("SetMeta(GC_PROVIDER): %v", err)
+	}
 
 	factory, err := NewFactory(FactoryConfig{
 		Store:    store,
@@ -374,5 +377,8 @@ func TestFactoryHandleForTargetRuntimeFallbackPreservesRecorder(t *testing.T) {
 	}
 	if got, want := payload.SessionName, "legacy-runtime-name"; got != want {
 		t.Fatalf("payload.SessionName = %q, want %q", got, want)
+	}
+	if got, want := payload.Provider, "claude"; got != want {
+		t.Fatalf("payload.Provider = %q, want %q", got, want)
 	}
 }

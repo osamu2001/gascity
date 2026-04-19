@@ -395,8 +395,14 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 		return NudgeResult{Delivered: false}, nil
 	}
 	if err := waiter.WaitForIdle(ctx, h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) {
 			return NudgeResult{Delivered: false}, err
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return NudgeResult{Delivered: false}, ctxErr
+			}
+			return NudgeResult{Delivered: false}, nil
 		}
 		return NudgeResult{Delivered: false}, nil
 	}
