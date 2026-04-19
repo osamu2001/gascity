@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -427,7 +428,7 @@ func TestOrderCheck(t *testing.T) {
 	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
 
 	var stdout bytes.Buffer
-	code := doOrderCheck(aa, now, neverRan, nil, nil, &stdout)
+	code := doOrderCheck(aa, now, neverRan, &stdout)
 	if code != 0 {
 		t.Fatalf("doOrderCheck = %d, want 0 (due)", code)
 	}
@@ -448,7 +449,7 @@ func TestOrderCheckNoneDue(t *testing.T) {
 	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
 
 	var stdout bytes.Buffer
-	code := doOrderCheck(aa, now, neverRan, nil, nil, &stdout)
+	code := doOrderCheck(aa, now, neverRan, &stdout)
 	if code != 1 {
 		t.Fatalf("doOrderCheck = %d, want 1 (none due)", code)
 	}
@@ -459,7 +460,7 @@ func TestOrderCheckEmpty(t *testing.T) {
 	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
 
 	var stdout bytes.Buffer
-	code := doOrderCheck(nil, now, neverRan, nil, nil, &stdout)
+	code := doOrderCheck(nil, now, neverRan, &stdout)
 	if code != 1 {
 		t.Fatalf("doOrderCheck = %d, want 1 (empty)", code)
 	}
@@ -508,7 +509,7 @@ func TestOrderCheckWithLastRun(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	code := doOrderCheck(aa, now, recentRun, nil, nil, &stdout)
+	code := doOrderCheck(aa, now, recentRun, &stdout)
 	if code != 1 {
 		t.Fatalf("doOrderCheck = %d, want 1 (not due)", code)
 	}
@@ -521,7 +522,7 @@ func TestOrderCheckWithLastRun(t *testing.T) {
 	}
 }
 
-func TestOrderCheckWithStoreResolverUsesRigStore(t *testing.T) {
+func TestOrderCheckWithStoresResolverUsesRigStore(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
 	if _, err := rigStore.Create(beads.Bead{
@@ -538,20 +539,118 @@ func TestOrderCheckWithStoreResolverUsesRigStore(t *testing.T) {
 		Interval: "24h",
 		Formula:  "mol-digest",
 	}}
-	resolver := func(a orders.Order) (beads.Store, error) {
+	resolver := func(a orders.Order) ([]beads.Store, error) {
 		if a.Rig == "frontend" {
-			return rigStore, nil
+			return []beads.Store{rigStore}, nil
 		}
-		return cityStore, nil
+		return []beads.Store{cityStore}, nil
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderCheckWithStoreResolver(aa, time.Now().Add(time.Second), nil, resolver, &stdout, &stderr)
+	code := doOrderCheckWithStoresResolver(aa, time.Now().Add(time.Second), nil, resolver, &stdout, &stderr)
 	if code != 1 {
-		t.Fatalf("doOrderCheckWithStoreResolver = %d, want 1 (rig cooldown active); stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+		t.Fatalf("doOrderCheckWithStoresResolver = %d, want 1 (rig cooldown active); stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "no") {
 		t.Fatalf("stdout missing not-due row:\n%s", stdout.String())
+	}
+}
+
+func TestOrderCheckWithStoresResolverUsesLegacyCityStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	if _, err := cityStore.Create(beads.Bead{
+		Title:  "legacy rig run",
+		Labels: []string{"order-run:digest:rig:frontend"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:     "digest",
+		Rig:      "frontend",
+		Gate:     "cooldown",
+		Interval: "24h",
+		Formula:  "mol-digest",
+	}}
+	resolver := func(a orders.Order) ([]beads.Store, error) {
+		if a.Rig == "frontend" {
+			return []beads.Store{rigStore, cityStore}, nil
+		}
+		return []beads.Store{cityStore}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolver(aa, time.Now().Add(time.Second), nil, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolver = %d, want 1 (legacy city cooldown active); stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "no") {
+		t.Fatalf("stdout missing not-due row:\n%s", stdout.String())
+	}
+}
+
+func TestOrderCheckWithStoresResolverFailsWhenLegacyEventCursorReadFails(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	legacyStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order:watch:rig:frontend",
+	}
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+
+	aa := []orders.Order{{
+		Name:    "watch",
+		Rig:     "frontend",
+		Gate:    "event",
+		On:      events.BeadClosed,
+		Formula: "mol-watch",
+	}}
+	resolver := func(a orders.Order) ([]beads.Store, error) {
+		if a.Rig == "frontend" {
+			return []beads.Store{rigStore, legacyStore}, nil
+		}
+		return []beads.Store{rigStore}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolver(aa, time.Now(), eventLog, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolver = %d, want 1 when legacy event cursor cannot be read; stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "event cursor") {
+		t.Fatalf("stderr missing event cursor error:\n%s", stderr.String())
+	}
+}
+
+func TestOrderCheckWithStoresResolverFailsWhenLegacyLastRunReadFails(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	legacyStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order-run:digest:rig:frontend",
+	}
+
+	aa := []orders.Order{{
+		Name:     "digest",
+		Rig:      "frontend",
+		Gate:     "cooldown",
+		Interval: "24h",
+		Formula:  "mol-digest",
+	}}
+	resolver := func(a orders.Order) ([]beads.Store, error) {
+		if a.Rig == "frontend" {
+			return []beads.Store{rigStore, legacyStore}, nil
+		}
+		return []beads.Store{rigStore}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolver(aa, time.Now(), nil, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolver = %d, want 1 when legacy last-run state cannot be read; stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "last run") {
+		t.Fatalf("stderr missing last-run error:\n%s", stderr.String())
 	}
 }
 
@@ -900,6 +999,159 @@ func TestOrderHistoryWithStoreResolverUsesRigStore(t *testing.T) {
 	}
 }
 
+func TestOrderHistoryWithStoresResolverSkipsUnreadableLegacyStore(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	legacyStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order-run:digest:rig:frontend",
+	}
+	run, err := rigStore.Create(beads.Bead{
+		Title:  "rig digest",
+		Labels: []string{"order-run:digest:rig:frontend"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:    "digest",
+		Rig:     "frontend",
+		Formula: "mol-digest",
+	}}
+	resolver := func(a orders.Order) ([]beads.Store, error) {
+		if a.Rig == "frontend" {
+			return []beads.Store{rigStore, legacyStore}, nil
+		}
+		return []beads.Store{rigStore}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderHistoryWithStoresResolver("", "", aa, resolver, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderHistoryWithStoresResolver = %d, want 0 for partial history; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), run.ID) {
+		t.Fatalf("stdout missing primary rig history %q:\n%s", run.ID, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "list failed") {
+		t.Fatalf("stderr missing legacy list warning:\n%s", stderr.String())
+	}
+}
+
+func TestOrderHistoryWithStoresResolverFailsUnreadablePrimaryStore(t *testing.T) {
+	rigStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order-run:digest:rig:frontend",
+	}
+	legacyStore := beads.NewMemStore()
+	if _, err := legacyStore.Create(beads.Bead{
+		Title:  "legacy digest",
+		Labels: []string{"order-run:digest:rig:frontend"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:    "digest",
+		Rig:     "frontend",
+		Formula: "mol-digest",
+	}}
+	resolver := func(a orders.Order) ([]beads.Store, error) {
+		if a.Rig == "frontend" {
+			return []beads.Store{rigStore, legacyStore}, nil
+		}
+		return []beads.Store{legacyStore}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderHistoryWithStoresResolver("", "", aa, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderHistoryWithStoresResolver = %d, want 1 for unreadable primary history; stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "list failed") {
+		t.Fatalf("stderr missing primary list error:\n%s", stderr.String())
+	}
+}
+
+func TestOrderHistoryWithStoresResolverDeduplicatesSameBackingStore(t *testing.T) {
+	store := beads.NewMemStore()
+	run, err := store.Create(beads.Bead{
+		Title:  "rig digest",
+		Labels: []string{"order-run:digest:rig:frontend"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:    "digest",
+		Rig:     "frontend",
+		Formula: "mol-digest",
+	}}
+	resolver := func(orders.Order) ([]beads.Store, error) {
+		return []beads.Store{store, store}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderHistoryWithStoresResolver("", "", aa, resolver, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderHistoryWithStoresResolver = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if count := strings.Count(stdout.String(), run.ID); count != 1 {
+		t.Fatalf("stdout contains history row %q %d times, want 1:\n%s", run.ID, count, stdout.String())
+	}
+}
+
+func TestOrderHistoryWithStoresResolverSortsMergedStoresByRecency(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	legacyStore := beads.NewMemStore()
+	if _, err := legacyStore.Create(beads.Bead{
+		Title:  "unrelated",
+		Labels: []string{"order-run:other:rig:frontend"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldRun, err := rigStore.Create(beads.Bead{
+		Title:  "old rig digest",
+		Labels: []string{"order-run:digest:rig:frontend"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	newRun, err := legacyStore.Create(beads.Bead{
+		Title:  "new legacy digest",
+		Labels: []string{"order-run:digest:rig:frontend"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:    "digest",
+		Rig:     "frontend",
+		Formula: "mol-digest",
+	}}
+	resolver := func(orders.Order) ([]beads.Store, error) {
+		return []beads.Store{rigStore, legacyStore}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderHistoryWithStoresResolver("", "", aa, resolver, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderHistoryWithStoresResolver = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	newIndex := strings.Index(out, newRun.ID)
+	oldIndex := strings.LastIndex(out, oldRun.ID)
+	if newIndex == -1 || oldIndex == -1 {
+		t.Fatalf("stdout missing history rows old=%q new=%q:\n%s", oldRun.ID, newRun.ID, out)
+	}
+	if newIndex > oldIndex {
+		t.Fatalf("newer legacy row appears after older primary row:\n%s", out)
+	}
+}
+
 // --- rig-scoped tests ---
 
 func TestOrderListWithRig(t *testing.T) {
@@ -981,7 +1233,7 @@ func TestOrderCheckWithRig(t *testing.T) {
 	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
 
 	var stdout bytes.Buffer
-	code := doOrderCheck(aa, now, neverRan, nil, nil, &stdout)
+	code := doOrderCheck(aa, now, neverRan, &stdout)
 	if code != 0 {
 		t.Fatalf("doOrderCheck = %d, want 0", code)
 	}

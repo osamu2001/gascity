@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -595,7 +596,7 @@ func cmdOrderCheck(stdout, stderr io.Writer) int {
 		return epCode
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
-	return doOrderCheckWithStoreResolver(aa, time.Now(), ep, cachedOrderStoreResolver(cityPath, cfg), stdout, stderr)
+	return doOrderCheckWithStoresResolver(aa, time.Now(), ep, cachedOrderStoresResolver(cityPath, cfg), stdout, stderr)
 }
 
 // orderLastRunFn returns a LastRunFunc that queries BdStore for the most
@@ -619,9 +620,31 @@ func orderLastRunFn(store beads.Store) orders.LastRunFunc {
 	}
 }
 
+func orderLastRunFnAcrossStores(stores ...beads.Store) orders.LastRunFunc {
+	fns := make([]orders.LastRunFunc, 0, len(stores))
+	for _, store := range stores {
+		if store != nil {
+			fns = append(fns, orderLastRunFn(store))
+		}
+	}
+	return func(name string) (time.Time, error) {
+		var latest time.Time
+		for _, fn := range fns {
+			t, err := fn(name)
+			if err != nil {
+				return time.Time{}, err
+			}
+			if t.After(latest) {
+				latest = t
+			}
+		}
+		return latest, nil
+	}
+}
+
 // doOrderCheck evaluates gates for all orders and prints a table.
 // Returns 0 if any are due, 1 if none are due.
-func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, ep events.Provider, cursorFn orders.CursorFunc, stdout io.Writer) int {
+func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, stdout io.Writer) int {
 	if len(aa) == 0 {
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
 		return 1
@@ -635,7 +658,7 @@ func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc
 	}
 	anyDue := false
 	for _, a := range aa {
-		result := orders.CheckGate(a, now, lastRunFn, ep, cursorFn)
+		result := orders.CheckGate(a, now, lastRunFn, nil, nil)
 		due := "no"
 		if result.Due {
 			due = "yes"
@@ -658,15 +681,14 @@ func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc
 	return 1
 }
 
-type orderStoreResolver func(orders.Order) (beads.Store, error)
+type (
+	orderStoreResolver  func(orders.Order) (beads.Store, error)
+	orderStoresResolver func(orders.Order) ([]beads.Store, error)
+)
 
-func cachedOrderStoreResolver(cityPath string, cfg *config.City) orderStoreResolver {
+func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresResolver {
 	stores := make(map[string]beads.Store)
-	return func(a orders.Order) (beads.Store, error) {
-		target, err := resolveOrderStoreTarget(cityPath, cfg, a)
-		if err != nil {
-			return nil, err
-		}
+	openCached := func(target execStoreTarget) (beads.Store, error) {
 		key := orderStoreTargetKey(target)
 		if store, ok := stores[key]; ok {
 			return store, nil
@@ -678,9 +700,76 @@ func cachedOrderStoreResolver(cityPath string, cfg *config.City) orderStoreResol
 		stores[key] = store
 		return store, nil
 	}
+	return func(a orders.Order) ([]beads.Store, error) {
+		target, err := resolveOrderStoreTarget(cityPath, cfg, a)
+		if err != nil {
+			return nil, err
+		}
+		primary, err := openCached(target)
+		if err != nil {
+			return nil, err
+		}
+		out := []beads.Store{primary}
+		if legacyOrderCityFallbackNeeded(cityPath, target) {
+			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, legacy)
+		}
+		return out, nil
+	}
 }
 
-func doOrderCheckWithStoreResolver(aa []orders.Order, now time.Time, ep events.Provider, resolveStore orderStoreResolver, stdout, stderr io.Writer) int {
+func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr io.Writer) orderStoresResolver {
+	stores := make(map[string]beads.Store)
+	openCached := func(target execStoreTarget) (beads.Store, error) {
+		key := orderStoreTargetKey(target)
+		if store, ok := stores[key]; ok {
+			return store, nil
+		}
+		store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+		if err != nil {
+			return nil, err
+		}
+		stores[key] = store
+		return store, nil
+	}
+	return func(a orders.Order) ([]beads.Store, error) {
+		target, err := resolveOrderStoreTarget(cityPath, cfg, a)
+		if err != nil {
+			return nil, err
+		}
+		primary, err := openCached(target)
+		if err != nil {
+			return nil, err
+		}
+		out := []beads.Store{primary}
+		if legacyOrderCityFallbackNeeded(cityPath, target) {
+			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))
+			if err != nil {
+				fmt.Fprintf(stderr, "gc order history: legacy city fallback unavailable for %s: %v\n", a.ScopedName(), err) //nolint:errcheck
+				return out, nil
+			}
+			out = append(out, legacy)
+		}
+		return out, nil
+	}
+}
+
+func legacyOrderCityFallbackNeeded(cityPath string, target execStoreTarget) bool {
+	return target.ScopeKind == "rig" && filepath.Clean(target.ScopeRoot) != filepath.Clean(cityPath)
+}
+
+func legacyOrderCityTarget(cityPath string, cfg *config.City) execStoreTarget {
+	prefix := ""
+	if cfg != nil {
+		prefix = config.EffectiveHQPrefix(cfg)
+	}
+	return execStoreTarget{ScopeRoot: cityPath, ScopeKind: "city", Prefix: prefix}
+}
+
+func doOrderCheckWithStoresResolver(aa []orders.Order, now time.Time, ep events.Provider, resolveStores orderStoresResolver, stdout, stderr io.Writer) int {
 	if len(aa) == 0 {
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
 		return 1
@@ -694,12 +783,36 @@ func doOrderCheckWithStoreResolver(aa []orders.Order, now time.Time, ep events.P
 	}
 	anyDue := false
 	for _, a := range aa {
-		store, err := resolveStore(a)
+		stores, err := resolveStores(a)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		result := orders.CheckGate(a, now, orderLastRunFn(store), ep, bdCursorFunc(store))
+		baseLastRunFn := orderLastRunFnAcrossStores(stores...)
+		var lastRunErr error
+		lastRunFn := func(orderName string) (time.Time, error) {
+			last, err := baseLastRunFn(orderName)
+			if err != nil {
+				lastRunErr = err
+			}
+			return last, err
+		}
+		cursorFn := bdCursorFuncAcrossStores(stores...)
+		if a.Gate == "event" {
+			cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			cursorFn = func(string) uint64 {
+				return cursor
+			}
+		}
+		result := orders.CheckGate(a, now, lastRunFn, ep, cursorFn)
+		if lastRunErr != nil {
+			fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		due := "no"
 		if result.Due {
 			due = "yes"
@@ -729,7 +842,7 @@ func cmdOrderHistory(name, rig string, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
-	return doOrderHistoryWithStoreResolver(name, rig, aa, cachedOrderStoreResolver(cityPath, cfg), stdout, stderr)
+	return doOrderHistoryWithStoresResolver(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), stdout, stderr)
 }
 
 // doOrderHistory queries bead history for order runs and prints a table.
@@ -742,6 +855,16 @@ func doOrderHistory(name, rig string, aa []orders.Order, store beads.Store, stdo
 }
 
 func doOrderHistoryWithStoreResolver(name, rig string, aa []orders.Order, resolveStore orderStoreResolver, stdout, stderr io.Writer) int {
+	return doOrderHistoryWithStoresResolver(name, rig, aa, func(a orders.Order) ([]beads.Store, error) {
+		store, err := resolveStore(a)
+		if err != nil {
+			return nil, err
+		}
+		return []beads.Store{store}, nil
+	}, stdout, stderr)
+}
+
+func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resolveStores orderStoresResolver, stdout, stderr io.Writer) int {
 	// Filter orders if name or rig specified.
 	targets := aa
 	if name != "" || rig != "" {
@@ -758,36 +881,50 @@ func doOrderHistoryWithStoreResolver(name, rig string, aa []orders.Order, resolv
 	}
 
 	type historyEntry struct {
-		order string
-		rig   string
-		id    string
-		time  string
+		order     string
+		rig       string
+		id        string
+		createdAt time.Time
 	}
 	var entries []historyEntry
+	seenEntries := make(map[string]bool)
 
 	for _, a := range targets {
-		store, err := resolveStore(a)
+		stores, err := resolveStores(a)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		label := "order-run:" + a.ScopedName()
-		results, err := store.List(beads.ListQuery{
-			Label:         label,
-			IncludeClosed: true,
-			Sort:          beads.SortCreatedDesc,
-		})
-		if err != nil {
-			fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		for _, b := range results {
-			entries = append(entries, historyEntry{
-				order: a.Name,
-				rig:   a.Rig,
-				id:    b.ID,
-				time:  b.CreatedAt.Format(time.RFC3339),
+		for i, store := range stores {
+			if store == nil {
+				continue
+			}
+			results, err := store.List(beads.ListQuery{
+				Label:         label,
+				IncludeClosed: true,
+				Sort:          beads.SortCreatedDesc,
 			})
+			if err != nil {
+				fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
+				if i == 0 {
+					return 1
+				}
+				continue
+			}
+			for _, b := range results {
+				key := a.ScopedName() + "\x00" + b.ID + "\x00" + b.CreatedAt.Format(time.RFC3339Nano) + "\x00" + b.Title
+				if seenEntries[key] {
+					continue
+				}
+				seenEntries[key] = true
+				entries = append(entries, historyEntry{
+					order:     a.Name,
+					rig:       a.Rig,
+					id:        b.ID,
+					createdAt: b.CreatedAt,
+				})
+			}
 		}
 	}
 
@@ -799,6 +936,10 @@ func doOrderHistoryWithStoreResolver(name, rig string, aa []orders.Order, resolv
 		}
 		return 0
 	}
+
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].createdAt.After(entries[j].createdAt)
+	})
 
 	hasRig := false
 	for _, e := range entries {
@@ -815,12 +956,12 @@ func doOrderHistoryWithStoreResolver(name, rig string, aa []orders.Order, resolv
 			if rig == "" {
 				rig = "-"
 			}
-			fmt.Fprintf(stdout, "%-20s %-15s %-15s %s\n", e.order, rig, e.id, e.time) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-15s %-15s %s\n", e.order, rig, e.id, e.createdAt.Format(time.RFC3339)) //nolint:errcheck
 		}
 	} else {
 		fmt.Fprintf(stdout, "%-20s %-15s %s\n", "ORDER", "BEAD", "EXECUTED") //nolint:errcheck
 		for _, e := range entries {
-			fmt.Fprintf(stdout, "%-20s %-15s %s\n", e.order, e.id, e.time) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-15s %s\n", e.order, e.id, e.createdAt.Format(time.RFC3339)) //nolint:errcheck
 		}
 	}
 	return 0
@@ -842,18 +983,61 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 // label on wisps labeled order:<name>.
 func bdCursorFunc(store beads.Store) orders.CursorFunc {
 	return func(orderName string) uint64 {
-		beadList, err := store.List(beads.ListQuery{
-			Label:         "order:" + orderName,
-			IncludeClosed: true,
-			Sort:          beads.SortCreatedDesc,
-		})
+		seq, err := bdCursor(store, orderName)
 		if err != nil {
 			return 0
 		}
-		labelSets := make([][]string, len(beadList))
-		for i, b := range beadList {
-			labelSets[i] = b.Labels
-		}
-		return orders.MaxSeqFromLabels(labelSets)
+		return seq
 	}
+}
+
+func bdCursor(store beads.Store, orderName string) (uint64, error) {
+	beadList, err := store.List(beads.ListQuery{
+		Label:         "order:" + orderName,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing event cursor beads for order %q: %w", orderName, err)
+	}
+	labelSets := make([][]string, len(beadList))
+	for i, b := range beadList {
+		labelSets[i] = b.Labels
+	}
+	return orders.MaxSeqFromLabels(labelSets), nil
+}
+
+func bdCursorFuncAcrossStores(stores ...beads.Store) orders.CursorFunc {
+	fns := make([]orders.CursorFunc, 0, len(stores))
+	for _, store := range stores {
+		if store != nil {
+			fns = append(fns, bdCursorFunc(store))
+		}
+	}
+	return func(orderName string) uint64 {
+		var maxSeq uint64
+		for _, fn := range fns {
+			if seq := fn(orderName); seq > maxSeq {
+				maxSeq = seq
+			}
+		}
+		return maxSeq
+	}
+}
+
+func bdCursorAcrossStores(orderName string, stores ...beads.Store) (uint64, error) {
+	var maxSeq uint64
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		seq, err := bdCursor(store, orderName)
+		if err != nil {
+			return 0, fmt.Errorf("store %d: %w", i, err)
+		}
+		if seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+	return maxSeq, nil
 }
