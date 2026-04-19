@@ -18,7 +18,10 @@ This plan is grounded in:
   [`engdocs/design/session-model-unification.md`](../design/session-model-unification.md)
 - the current branch hotspots, especially
   [`internal/worker/handle.go`](../../internal/worker/handle.go),
-  [`internal/api/handler_session_chat.go`](../../internal/api/handler_session_chat.go),
+  [`internal/api/handler_session_create.go`](../../internal/api/handler_session_create.go),
+  [`internal/api/handler_session_interaction.go`](../../internal/api/handler_session_interaction.go),
+  [`internal/api/handler_session_transcript.go`](../../internal/api/handler_session_transcript.go),
+  [`internal/api/handler_session_stream.go`](../../internal/api/handler_session_stream.go),
   [`internal/worker/workertest/phase2_conformance_test.go`](../../internal/worker/workertest/phase2_conformance_test.go),
   and [`cmd/gc/worker_handle.go`](../../cmd/gc/worker_handle.go)
 
@@ -100,7 +103,9 @@ Break oversized Worker, API streaming, and conformance files into smaller files
 organized by responsibility instead of by historical accumulation.
 
 **Acceptance criteria:**
-- [ ] `internal/api/handler_session_chat.go` is split by concern.
+- [x] Session API handlers are split by concern across
+      `handler_session_create.go`, `handler_session_interaction.go`,
+      `handler_session_transcript.go`, and `handler_session_stream.go`.
 - [ ] `internal/worker/workertest/phase2_conformance_test.go` is split into
       scenario-focused files with shared helpers.
 - [ ] `internal/worker/handle.go` runtime/transcript/history/admin concerns are
