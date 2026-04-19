@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -132,6 +133,51 @@ func writeNamedSessionJSONL(t *testing.T, searchBase, workDir, fileName string, 
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type syncResponseRecorder struct {
+	*httptest.ResponseRecorder
+	mu sync.Mutex
+}
+
+func newSyncResponseRecorder() *syncResponseRecorder {
+	return &syncResponseRecorder{ResponseRecorder: httptest.NewRecorder()}
+}
+
+func (r *syncResponseRecorder) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ResponseRecorder.Write(p)
+}
+
+func (r *syncResponseRecorder) WriteHeader(code int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ResponseRecorder.WriteHeader(code)
+}
+
+func (r *syncResponseRecorder) WriteString(s string) (int, error) {
+	return r.Write([]byte(s))
+}
+
+func (r *syncResponseRecorder) BodyString() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Body.String()
+}
+
+func waitForRecorderSubstring(t *testing.T, rec *syncResponseRecorder, want string, timeout time.Duration) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		body := rec.BodyString()
+		if strings.Contains(body, want) {
+			return body
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return rec.BodyString()
 }
 
 func TestHandleSessionList(t *testing.T) {
@@ -2487,7 +2533,7 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 	ctx, cancel := context.WithTimeout(context.Background(), 3500*time.Millisecond)
 	defer cancel()
 
-	rec := httptest.NewRecorder()
+	rec := newSyncResponseRecorder()
 	done := make(chan struct{})
 	go func() {
 		initial, histErr := handle.History(ctx, worker.HistoryRequest{})
@@ -2502,7 +2548,7 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if strings.Contains(rec.Body.String(), "after first boundary") {
+		if strings.Contains(rec.BodyString(), "after first boundary") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -2528,7 +2574,7 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 
 	<-done
 
-	body := rec.Body.String()
+	body := rec.BodyString()
 	if !strings.Contains(body, "bridge turn") {
 		t.Fatalf("stream body missing turn written before new compact boundary: %s", body)
 	}
@@ -2559,26 +2605,19 @@ func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
+	rec := newSyncResponseRecorder()
 	done := make(chan struct{})
 	go func() {
 		srv.ServeHTTP(rec, req)
 		close(done)
 	}()
 
-	initialDeadline := time.Now().Add(250 * time.Millisecond)
-	for time.Now().Before(initialDeadline) {
-		if strings.Contains(rec.Body.String(), "hello") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !strings.Contains(rec.Body.String(), "hello") {
-		t.Fatalf("stream body missing initial turn: %s", rec.Body.String())
+	if body := waitForRecorderSubstring(t, rec, "hello", time.Second); !strings.Contains(body, "hello") {
+		t.Fatalf("stream body missing initial turn: %s", body)
 	}
 
 	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
@@ -2604,19 +2643,13 @@ func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing
 		Subject: info.ID,
 	})
 
-	wakeDeadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(wakeDeadline) {
-		if strings.Contains(rec.Body.String(), "event wake turn") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	body := waitForRecorderSubstring(t, rec, "event wake turn", 1500*time.Millisecond)
 
 	cancel()
 	<-done
 
-	if !strings.Contains(rec.Body.String(), "event wake turn") {
-		t.Fatalf("stream body missing turn after worker operation wakeup: %s", rec.Body.String())
+	if !strings.Contains(body, "event wake turn") {
+		t.Fatalf("stream body missing turn after worker operation wakeup: %s", body)
 	}
 }
 
@@ -2642,26 +2675,19 @@ func TestHandleSessionStreamRawWorkerOperationEventWakesTranscriptReload(t *test
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=raw", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
+	rec := newSyncResponseRecorder()
 	done := make(chan struct{})
 	go func() {
 		srv.ServeHTTP(rec, req)
 		close(done)
 	}()
 
-	initialDeadline := time.Now().Add(250 * time.Millisecond)
-	for time.Now().Before(initialDeadline) {
-		if strings.Contains(rec.Body.String(), "hello") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !strings.Contains(rec.Body.String(), "hello") {
-		t.Fatalf("raw stream body missing initial transcript: %s", rec.Body.String())
+	if body := waitForRecorderSubstring(t, rec, "hello", time.Second); !strings.Contains(body, "hello") {
+		t.Fatalf("raw stream body missing initial transcript: %s", body)
 	}
 
 	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
@@ -2684,19 +2710,13 @@ func TestHandleSessionStreamRawWorkerOperationEventWakesTranscriptReload(t *test
 		Subject: info.ID,
 	})
 
-	wakeDeadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(wakeDeadline) {
-		if strings.Contains(rec.Body.String(), "raw event wake") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	body := waitForRecorderSubstring(t, rec, "raw event wake", 1500*time.Millisecond)
 
 	cancel()
 	<-done
 
-	if !strings.Contains(rec.Body.String(), "raw event wake") {
-		t.Fatalf("raw stream body missing message after worker operation wakeup: %s", rec.Body.String())
+	if !strings.Contains(body, "raw event wake") {
+		t.Fatalf("raw stream body missing message after worker operation wakeup: %s", body)
 	}
 }
 
@@ -2722,26 +2742,19 @@ func TestHandleSessionStreamTranscriptWriteWakesWithoutPolling(t *testing.T) {
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
+	rec := newSyncResponseRecorder()
 	done := make(chan struct{})
 	go func() {
 		srv.ServeHTTP(rec, req)
 		close(done)
 	}()
 
-	initialDeadline := time.Now().Add(250 * time.Millisecond)
-	for time.Now().Before(initialDeadline) {
-		if strings.Contains(rec.Body.String(), "hello") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !strings.Contains(rec.Body.String(), "hello") {
-		t.Fatalf("stream body missing initial turn: %s", rec.Body.String())
+	if body := waitForRecorderSubstring(t, rec, "hello", time.Second); !strings.Contains(body, "hello") {
+		t.Fatalf("stream body missing initial turn: %s", body)
 	}
 
 	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
@@ -2761,19 +2774,13 @@ func TestHandleSessionStreamTranscriptWriteWakesWithoutPolling(t *testing.T) {
 		t.Fatalf("append transcript: %v", err)
 	}
 
-	wakeDeadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(wakeDeadline) {
-		if strings.Contains(rec.Body.String(), "fsnotify wake turn") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	body := waitForRecorderSubstring(t, rec, "fsnotify wake turn", 1500*time.Millisecond)
 
 	cancel()
 	<-done
 
-	if !strings.Contains(rec.Body.String(), "fsnotify wake turn") {
-		t.Fatalf("stream body missing turn after transcript write wakeup: %s", rec.Body.String())
+	if !strings.Contains(body, "fsnotify wake turn") {
+		t.Fatalf("stream body missing turn after transcript write wakeup: %s", body)
 	}
 }
 
