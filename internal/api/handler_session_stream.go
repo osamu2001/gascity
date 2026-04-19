@@ -1,0 +1,525 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/worker"
+)
+
+// SessionStreamMessageEvent carries normalized conversation turns on the
+// session SSE stream.
+type SessionStreamMessageEvent struct {
+	ID         string                     `json:"id"`
+	Template   string                     `json:"template"`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.)."`
+	Format     string                     `json:"format"`
+	Turns      []outputTurn               `json:"turns"`
+	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+}
+
+// SessionStreamRawMessageEvent carries provider-native transcript frames on
+// the session SSE stream.
+type SessionStreamRawMessageEvent struct {
+	ID         string                     `json:"id"`
+	Template   string                     `json:"template"`
+	Provider   string                     `json:"provider" doc:"Producing provider identifier (claude, codex, gemini, open-code, etc.). Consumers use this to dispatch per-provider frame parsing."`
+	Format     string                     `json:"format"`
+	Messages   []SessionRawMessageFrame   `json:"messages" doc:"Provider-native transcript frames, emitted verbatim as the provider wrote them."`
+	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+}
+
+func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+		return
+	}
+
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
+	if err != nil {
+		writeResolveError(w, err)
+		return
+	}
+
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	info, err := catalog.Get(id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	historyReq := worker.HistoryRequest{}
+	if r.URL.Query().Get("format") == "raw" && !info.Closed {
+		historyReq.TailCompactions = 1
+	}
+	history, historyErr := handle.History(r.Context(), historyReq)
+	hasHistory := historyErr == nil && history != nil
+	if historyErr != nil && !errors.Is(historyErr, worker.ErrHistoryUnavailable) {
+		writeError(w, http.StatusInternalServerError, "internal", "reading session history: "+historyErr.Error())
+		return
+	}
+
+	state, stateErr := handle.State(r.Context())
+	if stateErr != nil {
+		writeSessionManagerError(w, stateErr)
+		return
+	}
+	running := workerPhaseHasLiveOutput(state.Phase)
+	if !hasHistory && !running {
+		writeError(w, http.StatusNotFound, "not_found", "session "+id+" has no live output")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	if info.State != "" {
+		w.Header().Set("GC-Session-State", string(info.State))
+	}
+	if !running {
+		w.Header().Set("GC-Session-Status", "stopped")
+	}
+	w.WriteHeader(http.StatusOK)
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		_ = err
+	}
+
+	ctx := r.Context()
+	format := r.URL.Query().Get("format")
+	if info.Closed {
+		if format == "raw" {
+			s.emitClosedSessionSnapshotRaw(w, info, history)
+		} else {
+			s.emitClosedSessionSnapshot(w, info, history)
+		}
+		return
+	}
+	switch {
+	case hasHistory:
+		if format == "raw" {
+			s.streamSessionTranscriptHistoryRaw(ctx, w, info, handle, history, historyReq)
+		} else {
+			s.streamSessionTranscriptHistory(ctx, w, info, handle, history)
+		}
+	case format == "raw":
+		// No log file yet. If the session is running, poll tmux pane content
+		// and wrap it as a fake raw JSONL assistant message so MC's existing
+		// rendering pipeline shows terminal output (e.g. OAuth prompts).
+		if running {
+			s.streamSessionPeekRaw(ctx, w, info, handle)
+		} else {
+			data, _ := json.Marshal(sessionRawTranscriptResponse{
+				ID:       info.ID,
+				Template: info.Template,
+				Format:   "raw",
+				Messages: []json.RawMessage{},
+			})
+			writeSSE(w, "message", 1, data)
+		}
+		return
+	default:
+		s.streamSessionPeek(ctx, w, info, handle)
+	}
+}
+
+func workerPhaseHasLiveOutput(phase worker.Phase) bool {
+	switch phase {
+	case worker.PhaseStarting, worker.PhaseReady, worker.PhaseBusy, worker.PhaseBlocked, worker.PhaseStopping:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.Info, history *worker.HistorySnapshot) {
+	if history == nil {
+		return
+	}
+	turns, _ := historySnapshotTurns(history)
+	if len(turns) == 0 {
+		return
+	}
+
+	data, err := json.Marshal(sessionTranscriptResponse{
+		ID:       info.ID,
+		Template: info.Template,
+		Format:   "conversation",
+		Turns:    turns,
+	})
+	if err != nil {
+		return
+	}
+	writeSSE(w, "turn", 1, data)
+	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
+	writeSSE(w, "activity", 2, actData)
+}
+
+func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info session.Info, history *worker.HistorySnapshot) {
+	if history == nil {
+		return
+	}
+	rawMessages, _ := historySnapshotRawMessages(history)
+	if len(rawMessages) == 0 {
+		return
+	}
+
+	data, err := json.Marshal(sessionRawTranscriptResponse{
+		ID:       info.ID,
+		Template: info.Template,
+		Format:   "raw",
+		Messages: rawMessages,
+	})
+	if err != nil {
+		return
+	}
+	writeSSE(w, "message", 1, data)
+	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
+	writeSSE(w, "activity", 2, actData)
+}
+
+func (s *Server) streamSessionTranscriptHistoryRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle interface {
+	worker.HistoryHandle
+	worker.InteractionHandle
+}, initial *worker.HistorySnapshot, req worker.HistoryRequest,
+) {
+	poll := time.NewTicker(outputStreamPollInterval)
+	defer poll.Stop()
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+
+	var lastSentID string
+	var seq uint64
+	var lastActivity string
+	var lastPendingID string
+	lastProgress := time.Now()
+	sentIDs := make(map[string]struct{})
+	currentActivity := historySnapshotActivity(initial)
+
+	emitSnapshot := func(snapshot *worker.HistorySnapshot) {
+		if snapshot == nil {
+			return
+		}
+		currentActivity = historySnapshotActivity(snapshot)
+		rawMessages, ids := historySnapshotRawMessages(snapshot)
+		if len(rawMessages) > 0 {
+			var toSend []json.RawMessage
+			if lastSentID == "" {
+				toSend = rawMessages
+			} else {
+				found := false
+				for i, id := range ids {
+					if id == lastSentID {
+						toSend = rawMessages[i+1:]
+						found = true
+						break
+					}
+				}
+				if !found {
+					log.Printf("session stream raw: cursor %s lost, emitting only new messages", lastSentID)
+					for i, id := range ids {
+						if _, seen := sentIDs[id]; !seen {
+							toSend = append(toSend, rawMessages[i])
+						}
+					}
+				}
+			}
+			if len(toSend) > 0 {
+				seq++
+				data, err := json.Marshal(sessionRawTranscriptResponse{
+					ID:       info.ID,
+					Template: info.Template,
+					Format:   "raw",
+					Messages: toSend,
+				})
+				if err == nil {
+					writeSSE(w, "message", seq, data)
+					lastProgress = time.Now()
+					lastPendingID = ""
+				}
+			}
+			lastSentID = ids[len(ids)-1]
+			for _, id := range ids {
+				sentIDs[id] = struct{}{}
+			}
+		}
+		if currentActivity != "" && currentActivity != lastActivity {
+			lastActivity = currentActivity
+			seq++
+			actData, _ := json.Marshal(map[string]string{"activity": currentActivity})
+			writeSSE(w, "activity", seq, actData)
+			lastProgress = time.Now()
+		}
+	}
+
+	emitPending := func() {
+		if time.Since(lastProgress) < 5*time.Second {
+			return
+		}
+		pending, err := handle.Pending(ctx)
+		if err != nil || pending == nil {
+			if lastPendingID != "" {
+				lastPendingID = ""
+				activity := currentActivity
+				if activity == "" {
+					activity = "in-turn"
+				}
+				seq++
+				actData, _ := json.Marshal(map[string]string{"activity": activity})
+				writeSSE(w, "activity", seq, actData)
+			}
+			return
+		}
+		if pending.RequestID == lastPendingID {
+			return
+		}
+		lastPendingID = pending.RequestID
+		seq++
+		pendingData, _ := json.Marshal(pending)
+		writeSSE(w, "pending", seq, pendingData)
+	}
+
+	emitSnapshot(initial)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			snapshot, err := handle.History(ctx, req)
+			switch {
+			case err == nil:
+				emitSnapshot(snapshot)
+			case errors.Is(err, worker.ErrHistoryUnavailable):
+			default:
+				log.Printf("session stream raw: history reload failed for %s: %v", info.ID, err)
+			}
+			emitPending()
+		case <-keepalive.C:
+			writeSSEComment(w)
+		}
+	}
+}
+
+func (s *Server) streamSessionTranscriptHistory(ctx context.Context, w http.ResponseWriter, info session.Info, handle worker.HistoryHandle, initial *worker.HistorySnapshot) {
+	poll := time.NewTicker(outputStreamPollInterval)
+	defer poll.Stop()
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+
+	var lastSentID string
+	var seq uint64
+	var lastActivity string
+	sentIDs := make(map[string]struct{})
+
+	emitSnapshot := func(snapshot *worker.HistorySnapshot) {
+		if snapshot == nil {
+			return
+		}
+		turns, ids := historySnapshotTurns(snapshot)
+		if len(turns) > 0 {
+			var toSend []outputTurn
+			if lastSentID == "" {
+				toSend = turns
+			} else {
+				found := false
+				for i, id := range ids {
+					if id == lastSentID {
+						toSend = turns[i+1:]
+						found = true
+						break
+					}
+				}
+				if !found {
+					log.Printf("session stream: cursor %s lost, emitting only new turns", lastSentID)
+					for i, id := range ids {
+						if _, seen := sentIDs[id]; !seen {
+							toSend = append(toSend, turns[i])
+						}
+					}
+				}
+			}
+			if len(toSend) > 0 {
+				seq++
+				data, err := json.Marshal(sessionTranscriptResponse{
+					ID:       info.ID,
+					Template: info.Template,
+					Format:   "conversation",
+					Turns:    toSend,
+				})
+				if err == nil {
+					writeSSE(w, "turn", seq, data)
+				}
+			}
+			lastSentID = ids[len(ids)-1]
+			for _, id := range ids {
+				sentIDs[id] = struct{}{}
+			}
+		}
+		activity := historySnapshotActivity(snapshot)
+		if activity != "" && activity != lastActivity {
+			lastActivity = activity
+			seq++
+			actData, _ := json.Marshal(map[string]string{"activity": activity})
+			writeSSE(w, "activity", seq, actData)
+		}
+	}
+
+	emitSnapshot(initial)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			snapshot, err := handle.History(ctx, worker.HistoryRequest{})
+			switch {
+			case err == nil:
+				emitSnapshot(snapshot)
+			case errors.Is(err, worker.ErrHistoryUnavailable):
+			default:
+				log.Printf("session stream: history reload failed for %s: %v", info.ID, err)
+			}
+		case <-keepalive.C:
+			writeSSEComment(w)
+		}
+	}
+}
+
+// streamSessionPeekRaw polls tmux pane content and wraps it as format=raw
+// messages so MC's JSONL rendering pipeline can display terminal output
+// (e.g. OAuth prompts, startup screens) when no transcript log exists yet.
+func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter, info session.Info, handle interface {
+	worker.PeekHandle
+	worker.InteractionHandle
+},
+) {
+	poll := time.NewTicker(outputStreamPollInterval)
+	defer poll.Stop()
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+
+	var lastOutput string
+	var seq uint64
+	var lastPeekPendingID string
+
+	emitPeek := func() {
+		output, err := handle.Peek(ctx, 100)
+		if errors.Is(err, session.ErrSessionInactive) {
+			return
+		}
+		if err != nil || output == lastOutput {
+			return
+		}
+		lastOutput = output
+		seq++
+
+		if output == "" {
+			return
+		}
+
+		fakeMsg, _ := json.Marshal(map[string]interface{}{
+			"role": "assistant",
+			"content": []map[string]string{
+				{"type": "text", "text": output},
+			},
+		})
+		data, err := json.Marshal(sessionRawTranscriptResponse{
+			ID:       info.ID,
+			Template: info.Template,
+			Format:   "raw",
+			Messages: []json.RawMessage{fakeMsg},
+		})
+		if err != nil {
+			return
+		}
+		writeSSE(w, "message", seq, data)
+
+		pending, pErr := handle.Pending(ctx)
+		if pErr == nil && pending != nil && pending.RequestID != lastPeekPendingID {
+			lastPeekPendingID = pending.RequestID
+			seq++
+			pendingData, _ := json.Marshal(pending)
+			writeSSE(w, "pending", seq, pendingData)
+		} else if pending == nil && lastPeekPendingID != "" {
+			lastPeekPendingID = ""
+		}
+	}
+
+	emitPeek()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			emitPeek()
+		case <-keepalive.C:
+			writeSSEComment(w)
+		}
+	}
+}
+
+func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, info session.Info, handle worker.PeekHandle) {
+	poll := time.NewTicker(outputStreamPollInterval)
+	defer poll.Stop()
+	keepalive := time.NewTicker(sseKeepalive)
+	defer keepalive.Stop()
+
+	var lastOutput string
+	var seq uint64
+
+	emitPeek := func() {
+		output, err := handle.Peek(ctx, 100)
+		if errors.Is(err, session.ErrSessionInactive) {
+			return
+		}
+		if err != nil || output == lastOutput {
+			return
+		}
+		lastOutput = output
+		seq++
+
+		turns := []outputTurn{}
+		if output != "" {
+			turns = append(turns, outputTurn{Role: "output", Text: output})
+		}
+		data, err := json.Marshal(sessionTranscriptResponse{
+			ID:       info.ID,
+			Template: info.Template,
+			Format:   "text",
+			Turns:    turns,
+		})
+		if err != nil {
+			return
+		}
+		writeSSE(w, "turn", seq, data)
+	}
+
+	emitPeek()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			emitPeek()
+		case <-keepalive.C:
+			writeSSEComment(w)
+		}
+	}
+}
