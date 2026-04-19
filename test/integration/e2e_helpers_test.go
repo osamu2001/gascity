@@ -13,6 +13,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -272,6 +273,32 @@ func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
 func writeE2ETomlFile(t *testing.T, tomlPath string, city e2eCity) {
 	t.Helper()
 	writeFileAtomic(t, tomlPath, []byte(renderE2EToml(city)))
+}
+
+func updateE2EAgentInCityToml(t *testing.T, cityDir, agentName string, update func(*config.Agent)) {
+	t.Helper()
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing city.toml: %v", err)
+	}
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name != agentName {
+			continue
+		}
+		update(&cfg.Agents[i])
+		next, err := cfg.Marshal()
+		if err != nil {
+			t.Fatalf("marshaling city.toml: %v", err)
+		}
+		writeFileAtomic(t, tomlPath, next)
+		return
+	}
+	t.Fatalf("agent %q not found in city.toml", agentName)
 }
 
 func writeFileAtomic(t *testing.T, path string, data []byte) {

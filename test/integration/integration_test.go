@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/test/tmuxtest"
@@ -1128,6 +1129,40 @@ func TestRenderE2ETomlPlainAgentUsesNamedSessionWithoutSingletonCap(t *testing.T
 	}
 	if strings.Contains(toml, "max_active_sessions = 1") {
 		t.Fatalf("plain E2E agent should not render singleton cap:\n%s", toml)
+	}
+}
+
+func TestUpdateE2EAgentInCityTomlPreservesNamedSessions(t *testing.T) {
+	cityDir := t.TempDir()
+	writeE2EToml(t, cityDir, e2eCity{
+		Workspace: e2eWorkspace{Name: "test-city"},
+		Agents:    []e2eAgent{{Name: "worker", StartCommand: "VERSION=v1 sleep 3600"}},
+	})
+
+	updateE2EAgentInCityToml(t, cityDir, "worker", func(agent *config.Agent) {
+		agent.StartCommand = "VERSION=v2 sleep 3600"
+		agent.OverlayDir = "overlays/test"
+	})
+
+	data, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing city.toml: %v", err)
+	}
+	if len(cfg.NamedSessions) != 1 {
+		t.Fatalf("len(NamedSessions) = %d, want 1\n%s", len(cfg.NamedSessions), data)
+	}
+	if got := strings.Count(string(data), "[[named_session]]"); got != 1 {
+		t.Fatalf("named_session blocks = %d, want 1\n%s", got, data)
+	}
+	if got := cfg.Agents[0].StartCommand; got != "VERSION=v2 sleep 3600" {
+		t.Fatalf("StartCommand = %q, want updated command", got)
+	}
+	if got := cfg.Agents[0].OverlayDir; got != "overlays/test" {
+		t.Fatalf("OverlayDir = %q, want overlays/test", got)
 	}
 }
 

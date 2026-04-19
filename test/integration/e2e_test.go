@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // TestE2E_EnvVars_CityScoped verifies that agents receive GC_AGENT, GC_CITY,
@@ -149,9 +151,9 @@ func TestE2E_Overlay(t *testing.T) {
 	overlayRel := createOverlayDir(t, cityDir)
 
 	// Update agent config with overlay_dir.
-	city.Workspace.Name = filepath.Base(cityDir)
-	city.Agents[0].OverlayDir = overlayRel
-	writeE2EToml(t, cityDir, city)
+	updateE2EAgentInCityToml(t, cityDir, "overlay", func(agent *config.Agent) {
+		agent.OverlayDir = overlayRel
+	})
 
 	// Start the city.
 	out, err := gc("", "start", cityDir)

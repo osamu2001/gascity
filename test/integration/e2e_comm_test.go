@@ -5,10 +5,11 @@ package integration
 import (
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // TestE2E_Drain_SetAndCheck verifies that gc runtime drain sets the GC_DRAIN
@@ -207,10 +208,9 @@ func TestE2E_ConfigDrift(t *testing.T) {
 	// Change config by mutating the fingerprinted start_command. Custom env
 	// keys are intentionally ignored by the runtime fingerprint, so changing
 	// Env alone should not imply restart.
-	city.Workspace.Name = "" // Will be filled from cityDir base.
-	city.Agents[0].StartCommand = "CUSTOM_VERSION=v2 " + e2eReportScript()
-	city.Workspace.Name = findCityName(t, cityDir)
-	writeE2EToml(t, cityDir, city)
+	updateE2EAgentInCityToml(t, cityDir, "drifter", func(agent *config.Agent) {
+		agent.StartCommand = "CUSTOM_VERSION=v2 " + e2eReportScript()
+	})
 
 	// Remove old report so we can detect a new one.
 	reportPath := strings.ReplaceAll("drifter", "/", "__")
@@ -244,26 +244,6 @@ func gcCommand(args ...string) *exec.Cmd {
 	cmd := exec.Command(gcBinary, args...)
 	cmd.Env = integrationEnv()
 	return cmd
-}
-
-// findCityName reads city.toml to extract the workspace name.
-func findCityName(t *testing.T, cityDir string) string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("reading city.toml: %v", err)
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "name") {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				return strings.Trim(strings.TrimSpace(parts[1]), "\"")
-			}
-		}
-	}
-	t.Fatal("city name not found in city.toml")
-	return ""
 }
 
 // removeFile removes a file, ignoring errors.
