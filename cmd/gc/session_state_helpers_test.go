@@ -12,9 +12,9 @@ import (
 // must be caught by an explicit table rather than by accident.
 func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 	cases := []struct {
-		name  string
-		meta  map[string]string
-		want  bool
+		name string
+		meta map[string]string
+		want bool
 	}{
 		{"drained-state", map[string]string{"state": "drained"}, true},
 		{"asleep+drained-reason", map[string]string{"state": "asleep", "sleep_reason": "drained"}, true},

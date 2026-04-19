@@ -22,7 +22,7 @@ func isDrainedSessionBead(session beads.Bead) bool {
 // state where the pool slot it occupies can be freed — either explicitly
 // drained, or asleep from a normal idle transition. Sessions parked via
 // `gc session wait` (sleep_reason=wait-hold), held by context-churn
-// quarantine, or otherwise signalling "don't touch me" keep their slot.
+// quarantine, or otherwise signaling "don't touch me" keep their slot.
 //
 // Distinct from `isDrainedSessionBead` because drain-ack can land pool
 // workers in state=asleep+sleep_reason=idle when the pre-close ownership

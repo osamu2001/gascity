@@ -438,8 +438,8 @@ func TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot(t *testing.T) {
 	// Simulate the post-drain-ack-ghost state: asleep + sleep_reason=idle
 	// + pool-managed, but the runtime has exited and no work is assigned.
 	env.setSessionMetadata(&session, map[string]string{
-		"state":              "asleep",
-		"sleep_reason":       "idle",
+		"state":                "asleep",
+		"sleep_reason":         "idle",
 		poolManagedMetadataKey: boolMetadata(true),
 	})
 
@@ -574,8 +574,8 @@ func TestReconcileSessionBeads_CloseGateLiveStoreErrorKeepsSlot(t *testing.T) {
 	env.addDesired("worker", "worker", false) // NOT running
 	session := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&session, map[string]string{
-		"state":              "asleep",
-		"sleep_reason":       "idle",
+		"state":                "asleep",
+		"sleep_reason":         "idle",
 		poolManagedMetadataKey: boolMetadata(true),
 	})
 
@@ -630,8 +630,8 @@ func TestReconcileSessionBeads_CloseGateRespectsCrossStoreAssignedWork(t *testin
 	env.addDesired("worker", "worker", false)
 	session := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&session, map[string]string{
-		"state":              "asleep",
-		"sleep_reason":       "idle",
+		"state":                "asleep",
+		"sleep_reason":         "idle",
 		poolManagedMetadataKey: boolMetadata(true),
 	})
 
@@ -709,7 +709,7 @@ func TestReconcileSessionBeads_CloseGatePreservesSleepReason(t *testing.T) {
 			env.addDesired("worker", "worker", false)
 			session := env.createSessionBead("worker", "worker")
 			meta := map[string]string{
-				"state":              "asleep",
+				"state":                "asleep",
 				poolManagedMetadataKey: boolMetadata(true),
 			}
 			if tc.sleepReason != "" {

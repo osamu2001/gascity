@@ -23,10 +23,10 @@ import (
 // can pass ScaleCheckCounts to ComputePoolDesiredStates without re-running
 // scale_check commands.
 type DesiredStateResult struct {
-	State              map[string]TemplateParams
-	BaseState          map[string]TemplateParams
-	ScaleCheckCounts   map[string]int // nil when store is nil or scale_check not run
-	AssignedWorkBeads []beads.Bead // actionable assigned work: in_progress or ready+assigned
+	State             map[string]TemplateParams
+	BaseState         map[string]TemplateParams
+	ScaleCheckCounts  map[string]int // nil when store is nil or scale_check not run
+	AssignedWorkBeads []beads.Bead   // actionable assigned work: in_progress or ready+assigned
 	// NamedSessionDemand records which named-session identities have active
 	// demand — either direct assignee demand (Assignee == identity) or
 	// work_query-detected ready work. The reconciler merges this into
