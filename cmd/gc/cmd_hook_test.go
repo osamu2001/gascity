@@ -108,6 +108,12 @@ func TestHookInjectFormatsOutput(t *testing.T) {
 	if !strings.Contains(out, "gc hook") {
 		t.Errorf("stdout missing 'gc hook' hint: %q", out)
 	}
+	if !strings.Contains(out, "bd update <id> --claim") {
+		t.Errorf("stdout missing claim command: %q", out)
+	}
+	if !strings.Contains(out, "bd close <id>") {
+		t.Errorf("stdout missing close command: %q", out)
+	}
 }
 
 func TestHookInjectAlwaysExitsZero(t *testing.T) {
@@ -187,7 +193,7 @@ max = 5
 	}
 
 	fakeBD := filepath.Join(fakeBin, "bd")
-	script := "#!/bin/sh\nprintf 'pwd=%s\\nargs=%s\\n' \"$PWD\" \"$*\"\n"
+	script := "#!/bin/sh\nprintf 'pwd=%s\nstore_root=%s\nstore_scope=%s\nprefix=%s\nrig=%s\nrig_root=%s\nargs=%s\n' \"$PWD\" \"${GC_STORE_ROOT:-}\" \"${GC_STORE_SCOPE:-}\" \"${GC_BEADS_PREFIX:-}\" \"${GC_RIG:-}\" \"${GC_RIG_ROOT:-}\" \"$*\"\n"
 	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -214,6 +220,21 @@ max = 5
 	out := stdout.String()
 	if !strings.Contains(out, "pwd="+rigDir) {
 		t.Fatalf("stdout = %q, want command to run from rig root %q", out, rigDir)
+	}
+	if !strings.Contains(out, "store_root="+rigDir) {
+		t.Fatalf("stdout = %q, want GC_STORE_ROOT=%q", out, rigDir)
+	}
+	if !strings.Contains(out, "store_scope=rig") {
+		t.Fatalf("stdout = %q, want GC_STORE_SCOPE=rig", out)
+	}
+	if !strings.Contains(out, "prefix=my") {
+		t.Fatalf("stdout = %q, want GC_BEADS_PREFIX=my", out)
+	}
+	if !strings.Contains(out, "rig=myrig") {
+		t.Fatalf("stdout = %q, want GC_RIG=myrig", out)
+	}
+	if !strings.Contains(out, "rig_root="+rigDir) {
+		t.Fatalf("stdout = %q, want GC_RIG_ROOT=%q", out, rigDir)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
 	if !strings.Contains(out, "args=list --status in_progress --assignee=myrig--polecat --json --limit=1") {
@@ -358,6 +379,52 @@ dir = "myrig"
 	}
 }
 
+func TestCmdHookExpandsTemplateCommandsWithCityFallback(t *testing.T) {
+	t.Setenv("GC_TMUX_SESSION", "host-session")
+	clearGCEnv(t)
+	cityDir := filepath.Join(t.TempDir(), "demo-city")
+	rigDir := filepath.Join(cityDir, "frontend")
+	fakeBin := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[[rigs]]
+name = "frontend"
+path = %q
+
+[[agent]]
+name = "worker"
+dir = "frontend"
+work_query = "bd {{.CityName}} {{.Rig}} {{.AgentBase}}"
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := "#!/bin/sh\nprintf 'args=%s\\n' \"$*\"\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", rigDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "args=demo-city frontend worker") {
+		t.Fatalf("stdout = %q, want expanded city/rig/agent-base template", stdout.String())
+	}
+}
+
 // TestCmdHookNonRigDirAgentUsesCityStore guards the rig-detection heuristic
 // in hookQueryEnv: agents whose `dir` is a plain path (not a configured
 // rig) must fall back to the city-scoped bead store, not mistakenly be
@@ -482,6 +549,26 @@ max = 5
 	// Tiered query: first tier checks in_progress assigned to session name.
 	if !strings.Contains(out, "args=list --status in_progress --assignee=myrig--polecat-1 --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool template work_query args", out)
+	}
+}
+
+func TestWorkQueryEnvForDirOverridesInheritedPWD(t *testing.T) {
+	env := []string{
+		"PATH=/tmp/bin",
+		"PWD=/tmp/stale",
+		"GC_CITY=/tmp/city",
+	}
+
+	got := workQueryEnvForDir(env, "/tmp/rig")
+
+	if strings.Contains(strings.Join(got, "\n"), "PWD=/tmp/stale") {
+		t.Fatalf("workQueryEnvForDir preserved stale PWD: %v", got)
+	}
+	if !strings.Contains(strings.Join(got, "\n"), "PWD=/tmp/rig") {
+		t.Fatalf("workQueryEnvForDir missing updated PWD: %v", got)
+	}
+	if !strings.Contains(strings.Join(got, "\n"), "PATH=/tmp/bin") {
+		t.Fatalf("workQueryEnvForDir dropped unrelated env: %v", got)
 	}
 }
 

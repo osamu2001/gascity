@@ -102,8 +102,9 @@ func TestInstantiateSimple(t *testing.T) {
 
 func TestInstantiateUsesGraphApplyStoreWhenAvailable(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
-	GraphApplyEnabled = true
-	t.Cleanup(func() { GraphApplyEnabled = false })
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -201,8 +202,9 @@ func TestBuildRecipeApplyPlan_GraphWorkflowOwnershipUsesTracks(t *testing.T) {
 
 func TestInstantiateGraphApplyPreservesStepMetadata(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
-	GraphApplyEnabled = true
-	t.Cleanup(func() { GraphApplyEnabled = false })
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -239,8 +241,9 @@ func TestInstantiateGraphApplyPreservesStepMetadata(t *testing.T) {
 func TestInstantiateSequentialPathPreservesStepMetadata(t *testing.T) {
 	// Verify the NON-graph-apply (sequential) path also preserves step metadata.
 	store := beads.NewMemStore() // MemStore does NOT implement GraphApplyStore
-	GraphApplyEnabled = false
-	t.Cleanup(func() { GraphApplyEnabled = false })
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(false)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -279,8 +282,9 @@ func TestInstantiateSequentialPathPreservesStepMetadata(t *testing.T) {
 
 func TestInstantiateUsesGraphApplyStoreForRetryLogicalRefs(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
-	GraphApplyEnabled = true
-	t.Cleanup(func() { GraphApplyEnabled = false })
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -355,8 +359,9 @@ func TestInstantiatePriorityOverrideCopiesToAllBeads(t *testing.T) {
 
 func TestInstantiateUsesGraphApplyPriorityOverride(t *testing.T) {
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
-	GraphApplyEnabled = true
-	t.Cleanup(func() { GraphApplyEnabled = false })
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
 	recipe := &formula.Recipe{
 		Name: "wf",
@@ -459,8 +464,9 @@ func TestInstantiateRejectsPartialGraphApplyResult(t *testing.T) {
 			},
 		},
 	}
-	GraphApplyEnabled = true
-	t.Cleanup(func() { GraphApplyEnabled = false })
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 	recipe := &formula.Recipe{
 		Name: "wf",
 		Steps: []formula.RecipeStep{
@@ -504,6 +510,29 @@ func TestInstantiateWithParentID(t *testing.T) {
 	root, _ := store.Get(result.RootID)
 	if root.ParentID != parent.ID {
 		t.Errorf("root.ParentID = %q, want %q", root.ParentID, parent.ID)
+	}
+}
+
+func TestInstantiatePreserveRootTypeKeepsTaskRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "attempt",
+		Steps: []formula.RecipeStep{
+			{ID: "attempt", Title: "Attempt", Type: "task", IsRoot: true},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{PreserveRootType: true})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if root.Type != "task" {
+		t.Fatalf("root.Type = %q, want task", root.Type)
 	}
 }
 
@@ -1008,7 +1037,7 @@ id = "verify"
 title = "Verify {{title}}"
 depends_on = ["implement"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "e2e-test.formula.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "e2e-test.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 
@@ -1061,13 +1090,14 @@ depends_on = ["implement"]
 	}
 }
 
-func TestCookEndToEndRalph(t *testing.T) {
-	formula.FormulaV2Enabled = true
-	t.Cleanup(func() { formula.FormulaV2Enabled = false })
+func TestCookEndToEndCheckSyntax(t *testing.T) {
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 	dir := t.TempDir()
 	toml := `
 formula = "ralph-demo"
-description = "Ralph cook test"
+description = "Check cook test"
 
 [[steps]]
 id = "design"
@@ -1081,15 +1111,15 @@ needs = ["design"]
 [steps.metadata]
 custom = "value"
 
-[steps.ralph]
+[steps.check]
 max_attempts = 3
 
-[steps.ralph.check]
+[steps.check.check]
 mode = "exec"
 path = ".gascity/checks/widget.sh"
 timeout = "2m"
 `
-	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.formula.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ralph-demo.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 
@@ -1212,8 +1242,9 @@ timeout = "2m"
 }
 
 func TestCookEndToEndScopedWorkflowStampsRootAndScopeMetadata(t *testing.T) {
-	formula.FormulaV2Enabled = true
-	t.Cleanup(func() { formula.FormulaV2Enabled = false })
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 	dir := t.TempDir()
 	toml := `
 formula = "scoped-demo"
@@ -1236,7 +1267,7 @@ title = "Cleanup"
 needs = ["body"]
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "teardown", "gc.kind" = "cleanup" }
 `
-	if err := os.WriteFile(filepath.Join(dir, "scoped-demo.formula.toml"), []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "scoped-demo.toml"), []byte(toml), 0o644); err != nil {
 		t.Fatalf("writing formula: %v", err)
 	}
 
@@ -1380,8 +1411,9 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 
 	t.Run("graph-apply path rejects unresolved vars", func(t *testing.T) {
 		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
-		GraphApplyEnabled = true
-		t.Cleanup(func() { GraphApplyEnabled = false })
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(true)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
 		_, err := Instantiate(context.Background(), gaStore, recipe, Options{
 			Title: "My Feature",
@@ -1418,8 +1450,9 @@ func TestInstantiateFragmentRejectsResidualTitleVars(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		GraphApplyEnabled = false
-		t.Cleanup(func() { GraphApplyEnabled = false })
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(false)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
 		_, err = InstantiateFragment(context.Background(), store, fragment, FragmentOptions{
 			RootID: root.ID,
@@ -1440,8 +1473,9 @@ func TestInstantiateFragmentRejectsResidualTitleVars(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		GraphApplyEnabled = true
-		t.Cleanup(func() { GraphApplyEnabled = false })
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(true)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
 
 		_, err = InstantiateFragment(context.Background(), gaStore, fragment, FragmentOptions{
 			RootID: root.ID,
@@ -1454,4 +1488,27 @@ func TestInstantiateFragmentRejectsResidualTitleVars(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
+}
+
+func TestBuildRecipeApplyPlan_PreserveRootTypeKeepsTaskRoot(t *testing.T) {
+	recipe := &formula.Recipe{
+		Name: "attempt",
+		Steps: []formula.RecipeStep{
+			{ID: "attempt", Title: "Attempt", Type: "task", IsRoot: true},
+		},
+	}
+
+	plan, _, rootKey, err := buildRecipeApplyPlan(recipe, Options{PreserveRootType: true})
+	if err != nil {
+		t.Fatalf("buildRecipeApplyPlan: %v", err)
+	}
+	if rootKey != "attempt" {
+		t.Fatalf("rootKey = %q, want attempt", rootKey)
+	}
+	if len(plan.Nodes) != 1 {
+		t.Fatalf("len(plan.Nodes) = %d, want 1", len(plan.Nodes))
+	}
+	if plan.Nodes[0].Type != "task" {
+		t.Fatalf("plan root type = %q, want task", plan.Nodes[0].Type)
+	}
 }

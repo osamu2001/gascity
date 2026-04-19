@@ -42,11 +42,11 @@ const (
 	ControllerStopped  = "controller.stopped"
 	CitySuspended      = "city.suspended"
 	CityResumed        = "city.resumed"
-	CityHalted         = "city.halted"
 	OrderFired         = "order.fired"
 	OrderCompleted     = "order.completed"
 	OrderFailed        = "order.failed"
 	ProviderSwapped    = "provider.swapped"
+	WorkerOperation    = "worker.operation"
 
 	// External messaging events.
 	ExtMsgBound          = "extmsg.bound"
@@ -54,7 +54,30 @@ const (
 	ExtMsgGroupCreated   = "extmsg.group_created"
 	ExtMsgAdapterAdded   = "extmsg.adapter_added"
 	ExtMsgAdapterRemoved = "extmsg.adapter_removed"
+	ExtMsgInbound        = "extmsg.inbound"
+	ExtMsgOutbound       = "extmsg.outbound"
 )
+
+// KnownEventTypes lists every event-type constant this package defines.
+// The SSE projection uses this set (via a test) to verify that every
+// event type has a registered payload — a missing registration is a
+// programming error that fails CI, not a runtime condition.
+var KnownEventTypes = []string{
+	SessionWoke, SessionStopped, SessionCrashed,
+	SessionDraining, SessionUndrained, SessionQuarantined,
+	SessionIdleKilled, SessionSuspended, SessionUpdated,
+	BeadCreated, BeadClosed, BeadUpdated,
+	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
+	MailReplied, MailDeleted,
+	ConvoyCreated, ConvoyClosed,
+	ControllerStarted, ControllerStopped,
+	CitySuspended, CityResumed,
+	OrderFired, OrderCompleted, OrderFailed,
+	ProviderSwapped, WorkerOperation,
+	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
+	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
+	ExtMsgInbound, ExtMsgOutbound,
+}
 
 // Event is a single recorded occurrence in the system.
 type Event struct {

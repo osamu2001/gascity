@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -425,8 +426,102 @@ func TestProcessScopeCheckReturnsPendingWhenScopeBodyMissing(t *testing.T) {
 	}
 }
 
+func TestProcessScopeCheckUsesSingleWorkflowSnapshotAndEmitsTrace(t *testing.T) {
+	t.Parallel()
+
+	store := &countingListStore{MemStore: beads.NewMemStore()}
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	step := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "submit",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "pass",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for submit",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+
+	mustDepAdd(t, store, control.ID, step.ID, "blocks")
+	mustDepAdd(t, store, body.ID, control.ID, "blocks")
+
+	var trace bytes.Buffer
+	result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+		},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check): %v", err)
+	}
+	if result.Action != "scope-pass" {
+		t.Fatalf("action = %q, want scope-pass", result.Action)
+	}
+	if store.listCalls != 1 {
+		t.Fatalf("List calls = %d, want 1 workflow snapshot", store.listCalls)
+	}
+	if len(store.queries) != 1 {
+		t.Fatalf("queries = %d, want 1", len(store.queries))
+	}
+	if got := store.queries[0].Metadata["gc.root_bead_id"]; got != workflow.ID {
+		t.Fatalf("root metadata query = %q, want %q", got, workflow.ID)
+	}
+	traceText := trace.String()
+	for _, want := range []string{
+		"scope-check bead=" + control.ID + " phase=load-snapshot start",
+		"scope-check bead=" + control.ID + " phase=load-snapshot ok",
+		"scope-check bead=" + control.ID + " snapshot root=" + workflow.ID,
+		"scope-check bead=" + control.ID + " phase=propagate-metadata",
+		"scope-check bead=" + control.ID + " phase=close-body",
+	} {
+		if !strings.Contains(traceText, want) {
+			t.Fatalf("trace missing %q:\n%s", want, traceText)
+		}
+	}
+}
+
 type strictCloseStore struct {
 	*beads.MemStore
+}
+
+type countingListStore struct {
+	*beads.MemStore
+	listCalls int
+	queries   []beads.ListQuery
+}
+
+func (s *countingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	s.queries = append(s.queries, query)
+	return s.MemStore.List(query)
 }
 
 func newStrictCloseStore() *strictCloseStore {
@@ -1506,7 +1601,9 @@ func TestProcessRalphCheckRecoversRetryAttemptMissingFinalAssigneePass(t *testin
 }
 
 func TestProcessFanoutSpawnsFragmentsAndClosesOnSecondPass(t *testing.T) {
-	t.Parallel()
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	expansion := `
@@ -1523,7 +1620,7 @@ id = "{target}.synth"
 title = "Synthesize {reviewer}"
 needs = ["{target}.review"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-review.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -1634,7 +1731,9 @@ needs = ["{target}.review"]
 }
 
 func TestProcessFanoutResumesExistingFragmentsWithoutDuplicates(t *testing.T) {
-	t.Parallel()
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	expansion := `
@@ -1651,7 +1750,7 @@ id = "{target}.synth"
 title = "Synthesize {reviewer}"
 needs = ["{target}.review"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-review.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -1737,7 +1836,9 @@ needs = ["{target}.review"]
 }
 
 func TestProcessFanoutSequentialChainsFragments(t *testing.T) {
-	t.Parallel()
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	expansion := `
@@ -1749,7 +1850,7 @@ version = 2
 id = "{target}.review"
 title = "Review {reviewer}"
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-seq.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-seq.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -1840,7 +1941,9 @@ title = "Review {reviewer}"
 }
 
 func TestProcessFanoutSequentialResumeRestoresExternalDeps(t *testing.T) {
-	t.Parallel()
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	expansion := `
@@ -1852,7 +1955,7 @@ version = 2
 id = "{target}.review"
 title = "Review {reviewer}"
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-seq.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-seq.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -1957,7 +2060,9 @@ title = "Review {reviewer}"
 }
 
 func TestProcessFanoutSequentialChainSurvivesEmptyMiddleFragment(t *testing.T) {
-	t.Parallel()
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	expansion := `
@@ -1969,7 +2074,7 @@ version = 2
 id = "{target}.review"
 title = "Review {reviewer}"
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-seq-conditional.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-seq-conditional.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -2077,7 +2182,9 @@ title = "Review {reviewer}"
 }
 
 func TestProcessFanoutRecoversPartialFragmentInstance(t *testing.T) {
-	t.Parallel()
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	expansion := `
@@ -2094,7 +2201,7 @@ id = "{target}.synth"
 title = "Synthesize {reviewer}"
 needs = ["{target}.review"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-review.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -2176,7 +2283,9 @@ needs = ["{target}.review"]
 }
 
 func TestProcessFanoutRecoversIncompletelyWiredFragmentInstance(t *testing.T) {
-	t.Parallel()
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	expansion := `
@@ -2193,7 +2302,7 @@ id = "{target}.synth"
 title = "Synthesize {reviewer}"
 needs = ["{target}.review"]
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-review.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -2473,7 +2582,9 @@ func TestCanDiscardPartialFragmentBeadWaitsForDependents(t *testing.T) {
 }
 
 func TestProcessFanoutClosesScopeWhenLastMember(t *testing.T) {
-	t.Parallel()
+	prev := formula.IsFormulaV2Enabled()
+	formula.SetFormulaV2Enabled(true)
+	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
 
 	dir := t.TempDir()
 	expansion := `
@@ -2485,7 +2596,7 @@ version = 2
 id = "{target}.review"
 title = "Review {reviewer}"
 `
-	if err := os.WriteFile(filepath.Join(dir, "expansion-review.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion formula: %v", err)
 	}
 
@@ -2786,8 +2897,6 @@ func TestResolveInheritedMetadataPrefersParentBeforeWorkflowRoot(t *testing.T) {
 }
 
 func TestRunRalphCheckResolvesRelativeWorkDirAgainstCityPath(t *testing.T) {
-	t.Parallel()
-
 	cityPath := t.TempDir()
 	workDir := filepath.Join(cityPath, "frontend")
 	checkDir := filepath.Join(workDir, "checks")
@@ -2805,8 +2914,11 @@ func TestRunRalphCheckResolvesRelativeWorkDirAgainstCityPath(t *testing.T) {
 		ID:   "check-1",
 		Type: "task",
 		Metadata: map[string]string{
-			"gc.check_path":    "checks/pass.sh",
-			"gc.check_timeout": "5s",
+			"gc.check_path": "checks/pass.sh",
+			// This test is about relative path resolution, not timeout behavior.
+			// Use a generous deadline so repo-wide test load does not turn it into
+			// a spurious timeout flake.
+			"gc.check_timeout": "30s",
 			"gc.work_dir":      "frontend",
 		},
 	}
@@ -3235,5 +3347,66 @@ func TestFullMetadataPropagationChain(t *testing.T) {
 	}
 	if iterBodyAfter.Metadata["review.verdict"] != "done" {
 		t.Fatalf("iteration body review.verdict = %q, want done (propagated from retry member)", iterBodyAfter.Metadata["review.verdict"])
+	}
+}
+
+// TestProcessControlEmitsSkipReasonWhenNotOpen is the regression guard for
+// the 20-minute silent stall on ga-ttn5z. When a rogue worker had flipped
+// a retry-control bead (ga-fw2fm) to status=in_progress, ProcessControl
+// returned {Processed: false} at the very first guard without any trace
+// output. The serve loop upstream traced "serve processed" either way, so
+// nothing in the dispatcher log revealed why the workflow wasn't moving.
+// The fix emits a specific "process-control ... skip reason=bead_not_open"
+// line before the early return.
+func TestProcessControlEmitsSkipReasonWhenNotOpen(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	control, err := store.Create(beads.Bead{
+		Title:  "rogue in_progress control",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.max_attempts": "3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(control.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("set in_progress: %v", err)
+	}
+	control, err = store.Get(control.ID)
+	if err != nil {
+		t.Fatalf("reload control: %v", err)
+	}
+
+	var traceBuf bytes.Buffer
+	opts := ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&traceBuf, format, args...)
+			traceBuf.WriteByte('\n')
+		},
+	}
+
+	result, err := ProcessControl(store, control, opts)
+	if err != nil {
+		t.Fatalf("ProcessControl: %v", err)
+	}
+	if result.Processed {
+		t.Fatalf("result.Processed = true, want false when bead is not open")
+	}
+
+	traced := traceBuf.String()
+	if !strings.Contains(traced, "skip reason=bead_not_open") {
+		t.Fatalf("trace missing skip reason; got:\n%s", traced)
+	}
+	if !strings.Contains(traced, control.ID) {
+		t.Fatalf("trace missing control ID %q; got:\n%s", control.ID, traced)
+	}
+	if !strings.Contains(traced, "status=in_progress") {
+		t.Fatalf("trace missing the actual status; got:\n%s", traced)
 	}
 }

@@ -3,6 +3,8 @@ package main
 import (
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // WakeReason describes why a session should be awake.
@@ -29,6 +31,8 @@ const (
 	WakeWork WakeReason = "work"
 	// WakePending means the session is blocked on a structured interaction.
 	WakePending WakeReason = "pending"
+	// WakePin means pin_awake is set as a durable explicit wake reason.
+	WakePin WakeReason = "pin"
 	// WakeDependency means another awake session depends on this template.
 	WakeDependency WakeReason = "dependency"
 )
@@ -183,9 +187,11 @@ const (
 	// before it's considered stable (not a rapid exit / crash).
 	stabilityThreshold = 30 * time.Second
 
-	// maxWakesPerTick limits how many sessions can be woken per reconciler
-	// tick to prevent thundering herd after controller restart.
-	defaultMaxWakesPerTick = 5
+	// defaultMaxWakesPerTick mirrors config.DefaultMaxWakesPerTick (kept
+	// here so tests and non-config call sites don't need to take a
+	// dependency on internal/config just for the default). Configurable
+	// per city via [daemon].max_wakes_per_tick; see issue #772.
+	defaultMaxWakesPerTick = config.DefaultMaxWakesPerTick
 
 	// defaultTickBudget is the wall-clock budget per reconciler tick.
 	// Remaining work is deferred to the next tick.

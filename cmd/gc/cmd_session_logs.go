@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,7 +11,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/sessionlog"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -59,11 +62,16 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 		return 1
 	}
 
-	var logCtx sessionLogContext
-	var ok bool
+	searchPaths := worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
+
 	store, err := tryOpenCityStore()
+	var (
+		path     string
+		provider string
+		ok       bool
+	)
 	if err == nil && store != nil {
-		logCtx, ok = resolveSessionLogContext(cityPath, cfg, store, identifier)
+		path, provider, ok = resolveStoredSessionLogSource(cityPath, cfg, store, identifier, searchPaths)
 	}
 	if !ok {
 		workDir, found := resolveConfiguredSessionLogContext(cityPath, cfg, identifier)
@@ -71,27 +79,49 @@ func cmdSessionLogs(args []string, follow bool, tail int, stdout, stderr io.Writ
 			fmt.Fprintf(stderr, "gc session logs: session %q not found\n", identifier) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logCtx.workDir = workDir
+		path = resolveSessionLogPath(searchPaths, sessionLogContext{workDir: workDir})
 	}
-
-	searchPaths := sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
-	path := resolveSessionLogPath(searchPaths, logCtx)
 	if path == "" {
 		fmt.Fprintf(stderr, "gc session logs: no session file found for %q\n", identifier) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	return doSessionLogs(path, logCtx.provider, follow, tail, stdout, stderr)
+	return doSessionLogs(path, provider, follow, tail, stdout, stderr)
 }
 
 func resolveSessionLogPath(searchPaths []string, logCtx sessionLogContext) string {
-	if logCtx.sessionKey != "" {
-		return sessionlog.FindSessionFileByID(searchPaths, logCtx.workDir, logCtx.sessionKey)
+	factory, err := worker.NewFactory(worker.FactoryConfig{SearchPaths: searchPaths})
+	if err != nil {
+		return ""
 	}
-	return sessionlog.FindSessionFileForProvider(searchPaths, logCtx.provider, logCtx.workDir)
+	return factory.DiscoverTranscript(logCtx.provider, logCtx.workDir, logCtx.sessionKey)
+}
+
+func resolveStoredSessionLogSource(cityPath string, cfg *config.City, store beads.Store, identifier string, searchPaths []string) (string, string, bool) {
+	logCtx, ok := resolveSessionLogContext(cityPath, cfg, store, identifier)
+	if !ok {
+		return "", "", false
+	}
+	if logCtx.sessionID != "" {
+		handle, err := workerHandleForSessionWithConfig(cityPath, store, newSessionProvider(), cfg, logCtx.sessionID)
+		if err == nil {
+			if path, pathErr := handle.TranscriptPath(context.Background()); pathErr == nil && strings.TrimSpace(path) != "" {
+				return path, logCtx.provider, true
+			}
+		}
+	}
+	path := resolveSessionLogPath(searchPaths, logCtx)
+	if path == "" && canFallbackStoredSessionLogByWorkDir(store, logCtx) {
+		factory, err := worker.NewFactory(worker.FactoryConfig{SearchPaths: searchPaths})
+		if err == nil {
+			path = factory.DiscoverWorkDirTranscript(logCtx.provider, logCtx.workDir)
+		}
+	}
+	return path, logCtx.provider, true
 }
 
 type sessionLogContext struct {
+	sessionID  string
 	workDir    string
 	sessionKey string
 	provider   string
@@ -118,10 +148,39 @@ func resolveSessionLogContext(cityPath string, cfg *config.City, store beads.Sto
 		provider = strings.TrimSpace(b.Metadata["provider"])
 	}
 	return sessionLogContext{
+		sessionID:  sessionID,
 		workDir:    workDir,
 		sessionKey: strings.TrimSpace(b.Metadata["session_key"]),
 		provider:   provider,
 	}, true
+}
+
+func canFallbackStoredSessionLogByWorkDir(store beads.Store, logCtx sessionLogContext) bool {
+	if store == nil || strings.TrimSpace(logCtx.sessionID) == "" || strings.TrimSpace(logCtx.workDir) == "" {
+		return false
+	}
+	all, err := store.ListByLabel(sessionpkg.LabelSession, 0)
+	if err != nil {
+		return false
+	}
+	matches := 0
+	for _, b := range all {
+		if strings.TrimSpace(b.Metadata["work_dir"]) != logCtx.workDir {
+			continue
+		}
+		provider := strings.TrimSpace(b.Metadata["provider_kind"])
+		if provider == "" {
+			provider = strings.TrimSpace(b.Metadata["provider"])
+		}
+		if logCtx.provider != "" && provider != "" && provider != logCtx.provider {
+			continue
+		}
+		matches++
+		if matches > 1 {
+			return false
+		}
+	}
+	return matches == 1
 }
 
 func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, identifier string) (string, bool) {
@@ -136,8 +195,9 @@ func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, ident
 	if cityName == "" {
 		cityName = filepath.Base(cityPath)
 	}
-	if spec, ok, _ := findNamedSessionSpecForTarget(cfg, cityName, nil, identifier); ok && spec.Agent != nil {
-		workDir, err := resolveWorkDir(cityPath, cfg, spec.Agent)
+	if spec, ok, _ := findNamedSessionSpecForTarget(cfg, cityName, identifier); ok && spec.Agent != nil {
+		workDirQualifiedName := workdirutil.SessionQualifiedName(cityPath, *spec.Agent, cfg.Rigs, spec.Identity, "")
+		workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, spec.Agent, workDirQualifiedName)
 		if err != nil || strings.TrimSpace(workDir) == "" {
 			return "", false
 		}
@@ -145,7 +205,7 @@ func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, ident
 	}
 	for i := range cfg.Agents {
 		agentCfg := cfg.Agents[i]
-		if isMultiSessionCfgAgent(&agentCfg) || strings.TrimSpace(agentCfg.QualifiedName()) != identifier {
+		if agentCfg.SupportsInstanceExpansion() || strings.TrimSpace(agentCfg.QualifiedName()) != identifier {
 			continue
 		}
 		workDir, err := resolveWorkDir(cityPath, cfg, &agentCfg)
@@ -164,8 +224,13 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 		fmt.Fprintln(stderr, "gc session logs: --tail must be >= 0") //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	factory, err := worker.NewFactory(worker.FactoryConfig{})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session logs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
-	sess, readErr := sessionlog.ReadProviderFile(provider, path, tail)
+	sess, readErr := readSessionFile(factory, provider, path, tail)
 	if readErr != nil {
 		fmt.Fprintf(stderr, "gc session logs: %v\n", readErr) //nolint:errcheck // best-effort stderr
 		return 1
@@ -185,7 +250,7 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 	// follow loop don't replay messages that were intentionally excluded by
 	// the initial tail window.
 	if tail > 0 {
-		full, err := readSessionFile(provider, path, 0)
+		full, err := readSessionFile(factory, provider, path, 0)
 		if err == nil {
 			for _, msg := range full.Messages {
 				seen[msg.UUID] = true
@@ -201,7 +266,7 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 	for {
 		time.Sleep(2 * time.Second)
 
-		sess, readErr = readSessionFile(provider, path, 0)
+		sess, readErr = readSessionFile(factory, provider, path, 0)
 		if readErr != nil {
 			consecErrors++
 			if consecErrors >= maxConsecErrors {
@@ -222,20 +287,28 @@ func doSessionLogs(path, provider string, follow bool, tail int, stdout, stderr 
 	}
 }
 
-func readSessionFile(provider, path string, tail int) (*sessionlog.Session, error) {
-	return sessionlog.ReadProviderFile(provider, path, tail)
+func readSessionFile(factory *worker.Factory, provider, path string, tail int) (*worker.TranscriptSession, error) {
+	result, err := factory.ReadTranscript(worker.TranscriptRequest{
+		Provider:        provider,
+		TranscriptPath:  path,
+		TailCompactions: tail,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.Session, nil
 }
 
 // resolveMessage handles both message formats found in Claude JSONL files:
 // object format: {"role":"user","content":"hello"}
 // string format: "{\"role\":\"user\",\"content\":\"hello\"}" (escaped JSON string)
 // Returns the message content struct if parseable.
-func resolveMessage(raw json.RawMessage) *sessionlog.MessageContent {
+func resolveMessage(raw json.RawMessage) *worker.TranscriptMessageContent {
 	if len(raw) == 0 {
 		return nil
 	}
 	// Try object format first.
-	var mc sessionlog.MessageContent
+	var mc worker.TranscriptMessageContent
 	if err := json.Unmarshal(raw, &mc); err == nil && mc.Role != "" {
 		return &mc
 	}
@@ -250,7 +323,7 @@ func resolveMessage(raw json.RawMessage) *sessionlog.MessageContent {
 }
 
 // printLogEntry prints a single session log entry to stdout.
-func printLogEntry(w io.Writer, e *sessionlog.Entry) {
+func printLogEntry(w io.Writer, e *worker.TranscriptEntry) {
 	if e.IsCompactBoundary() {
 		fmt.Fprintln(w, "── context compacted ──") //nolint:errcheck
 		return
@@ -286,7 +359,7 @@ func printLogEntry(w io.Writer, e *sessionlog.Entry) {
 	}
 
 	// Try content as array of blocks.
-	var blocks []sessionlog.ContentBlock
+	var blocks []worker.TranscriptContentBlock
 	if json.Unmarshal(mc.Content, &blocks) == nil && len(blocks) > 0 {
 		for _, b := range blocks {
 			switch b.Type {

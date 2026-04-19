@@ -6,15 +6,25 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/spf13/cobra"
+)
+
+const rigDeferredStoreInitWait = 30 * time.Second
+
+var (
+	rigReloadControllerConfig = reloadControllerConfig
+	rigWaitForStoreAccessible = waitForRigStoreAccessible
 )
 
 func newRigCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -29,7 +39,7 @@ are scoped to rigs via their "dir" field.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc rig: missing subcommand (add, default, list, restart, resume, status, suspend)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc rig: missing subcommand (add, default, list, remove, restart, resume, set-endpoint, status, suspend)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc rig: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -43,6 +53,7 @@ are scoped to rigs via their "dir" field.`,
 		newRigRemoveCmd(stdout, stderr),
 		newRigRestartCmd(stdout, stderr),
 		newRigResumeCmd(stdout, stderr),
+		newRigSetEndpointCmd(stdout, stderr),
 		newRigStatusCmd(stdout, stderr),
 		newRigSuspendCmd(stdout, stderr),
 	)
@@ -50,7 +61,7 @@ are scoped to rigs via their "dir" field.`,
 }
 
 func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
-	var include string
+	var includes []string
 	var startSuspended bool
 	var nameFlag string
 	var prefixFlag string
@@ -63,7 +74,8 @@ func newRigAddCmd(stdout, stderr io.Writer) *cobra.Command {
 Initializes beads database, installs agent hooks if configured,
 generates cross-rig routes, and appends the rig to city.toml.
 If the target directory doesn't exist, it is created. Use --include
-to apply a pack directory that defines the rig's agent configuration.
+to apply a pack directory that defines the rig's agent configuration;
+repeat the flag to compose multiple packs for one rig.
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
@@ -77,17 +89,18 @@ Skips beads init; the git repo check remains informational.`,
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
   gc rig add ./my-project --include packs/gastown
+  gc rig add ./my-project --include packs/planner --include packs/architect
   gc rig add ./my-project --include packs/gastown --start-suspended
   gc rig add /path/to/existing --adopt`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdRigAdd(args, include, nameFlag, prefixFlag, startSuspended, adoptFlag, stdout, stderr) != 0 {
+			if cmdRigAdd(args, includes, nameFlag, prefixFlag, startSuspended, adoptFlag, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&include, "include", "", "pack directory for rig agents")
+	cmd.Flags().StringArrayVar(&includes, "include", nil, "pack directory for rig agents (repeatable)")
 	cmd.Flags().StringVar(&nameFlag, "name", "", "rig name (default: directory basename)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix (default: derived from name)")
 	cmd.Flags().BoolVar(&startSuspended, "start-suspended", false, "add rig in suspended state (dormant-by-default)")
@@ -117,7 +130,7 @@ displays its bead ID prefix and whether its beads database is initialized.`,
 }
 
 // cmdRigAdd registers an external project directory as a rig in the city.
-func cmdRigAdd(args []string, include, nameOverride, prefixOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
+func cmdRigAdd(args []string, includes []string, nameOverride, prefixOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc rig add: missing path") //nolint:errcheck // best-effort stderr
 		return 1
@@ -129,19 +142,37 @@ func cmdRigAdd(args []string, include, nameOverride, prefixOverride string, star
 		return 1
 	}
 
-	rigPath, err := filepath.Abs(args[0])
+	rigPath, err := resolveRigAddPath(cityPath, args[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, include, nameOverride, prefixOverride, startSuspended, adopt, stdout, stderr)
+	return doRigAdd(fsys.OSFS{}, cityPath, rigPath, includes, nameOverride, prefixOverride, startSuspended, adopt, stdout, stderr)
+}
+
+func resolveRigAddPath(cityPath, rigArg string) (string, error) {
+	rigArg = strings.TrimSpace(rigArg)
+	if rigArg == "" {
+		return "", fmt.Errorf("missing path")
+	}
+	if filepath.IsAbs(rigArg) {
+		return filepath.Clean(rigArg), nil
+	}
+	if strings.HasPrefix(rigArg, ".") {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Clean(filepath.Join(wd, rigArg)), nil
+	}
+	return filepath.Clean(filepath.Join(cityPath, rigArg)), nil
 }
 
 // doRigAdd is the pure logic for "gc rig add". Operations are ordered so that
 // city.toml is written last — if any earlier step fails, config is unchanged.
 // This prevents partial-state bugs where city.toml lists a rig but the rig's
 // infrastructure (beads, routes) was never created.
-func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
+func doRigAdd(fs fsys.FS, cityPath, rigPath string, includes []string, nameOverride, prefixOverride string, startSuspended, adopt bool, stdout, stderr io.Writer) int {
 	// Validate prefix format: hyphens break beadPrefix() which splits on
 	// the first '-' to extract the rig prefix from a bead ID.
 	if prefixOverride != "" && strings.Contains(prefixOverride, "-") {
@@ -149,13 +180,23 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		return 1
 	}
 
+	// Trim and drop empty --include entries so `--include=` or `--include " "`
+	// doesn't persist a blank pack path that downstream resolution reads
+	// as the city root.
+	cleaned := includes[:0:0]
+	for _, inc := range includes {
+		if trimmed := strings.TrimSpace(inc); trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	includes = cleaned
+
 	fi, err := fs.Stat(rigPath)
 	if err != nil {
 		if adopt {
 			fmt.Fprintf(stderr, "gc rig add: --adopt requires an existing directory: %s\n", rigPath) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		// Directory doesn't exist — create it.
 		if err := fs.MkdirAll(rigPath, 0o755); err != nil {
 			fmt.Fprintf(stderr, "gc rig add: creating %s: %v\n", rigPath, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -165,9 +206,6 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		return 1
 	}
 
-	// When adopting, validate that .beads/metadata.json and .beads/config.yaml
-	// both exist. config.yaml is required so the prefix guard can verify the
-	// effective prefix matches — without it, the guard is silently bypassed.
 	if adopt {
 		metaPath := filepath.Join(rigPath, ".beads", "metadata.json")
 		if _, err := fs.Stat(metaPath); err != nil {
@@ -185,43 +223,51 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		name = filepath.Base(rigPath)
 	}
 
-	// Check for git repo.
 	_, gitErr := fs.Stat(filepath.Join(rigPath, ".git"))
 	hasGit := gitErr == nil
 
-	// Load existing config to check for duplicates.
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, err := loadCityConfigForEditFS(fs, tomlPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig add: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if cityUsesBdStoreContract(cityPath) && (cfg.Dolt.Host != "" || cfg.Dolt.Port != 0) {
+		cityDoltConfigs.Store(cityPath, cfg.Dolt)
+		defer cityDoltConfigs.Delete(cityPath)
+	}
+	rootDefaultRigIncludes, err := config.LoadRootPackDefaultRigIncludes(fs, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig add: loading root pack defaults: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defaultRigIncludes := append(append([]string{}, rootDefaultRigIncludes...), cfg.Workspace.DefaultRigIncludes...)
 
-	// Check for existing rig with same name.
 	var reAdd bool
+	existingRigIdx := -1
 	var existingRig *config.Rig
 	for i, r := range cfg.Rigs {
-		if r.Name == name {
-			existPath := r.Path
-			if !filepath.IsAbs(existPath) {
-				existPath = filepath.Join(cityPath, existPath)
-			}
-			if filepath.Clean(existPath) != filepath.Clean(rigPath) {
-				fmt.Fprintf(stderr, "gc rig add: rig %q already registered at %s (not %s)\n", //nolint:errcheck // best-effort stderr
-					name, r.Path, rigPath)
-				return 1
-			}
+		if r.Name != name {
+			continue
+		}
+		existingRigIdx = i
+		existingRig = &cfg.Rigs[i]
+		existPath := r.Path
+		if strings.TrimSpace(existPath) == "" {
 			reAdd = true
-			existingRig = &cfg.Rigs[i]
 			break
 		}
+		if !filepath.IsAbs(existPath) {
+			existPath = filepath.Join(cityPath, existPath)
+		}
+		if filepath.Clean(existPath) != filepath.Clean(rigPath) {
+			fmt.Fprintf(stderr, "gc rig add: rig %q already registered at %s (not %s)\n", name, r.Path, rigPath) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		reAdd = true
+		break
 	}
 
-	// Derive prefix. On re-add, use the existing rig's effective prefix
-	// to avoid splitting bead state when an explicit prefix is configured.
-	// An explicit --prefix flag takes precedence for new rigs.
-	// Canonicalize to lowercase: runtime lookup (findRigByPrefix) is
-	// case-insensitive, so validation must match.
 	var prefix string
 	switch {
 	case reAdd:
@@ -232,43 +278,28 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		prefix = config.DeriveBeadsPrefix(name)
 	}
 
-	// Guard: if the rig already has a .beads/config.yaml with a different
-	// prefix, refuse to proceed. Silently overwriting would mix bead IDs
-	// when the same rig is registered in multiple cities.
 	if existingPrefix, ok := readBeadsPrefix(fs, rigPath); ok && existingPrefix != prefix {
 		if reAdd {
-			// On re-add, --prefix is ignored (we use the existing rig's
-			// configured prefix). Direct the user to edit city.toml.
-			fmt.Fprintf(stderr, "gc rig add: rig %q has bead prefix %q but city.toml has %q; "+ //nolint:errcheck // best-effort stderr
-				"edit city.toml to set prefix = %q, or remove %s/.beads to reinitialize\n",
+			_, _ = fmt.Fprintf(stderr, "gc rig add: rig %q has bead prefix %q but city.toml has %q; edit city.toml to set prefix = %q, or remove %s/.beads to reinitialize\n",
 				name, existingPrefix, prefix, existingPrefix, rigPath)
 		} else {
-			fmt.Fprintf(stderr, "gc rig add: rig %q already has bead prefix %q (requested %q); "+ //nolint:errcheck // best-effort stderr
-				"use --prefix %s to match, or remove %s/.beads to reinitialize\n",
+			_, _ = fmt.Fprintf(stderr, "gc rig add: rig %q already has bead prefix %q (requested %q); use --prefix %s to match, or remove %s/.beads to reinitialize\n",
 				name, existingPrefix, prefix, existingPrefix, rigPath)
 		}
 		return 1
 	}
 
-	// --- Phase 1: Infrastructure (all fallible, before touching city.toml) ---
-
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
 	if reAdd {
 		w(fmt.Sprintf("Re-initializing rig '%s'...", name))
-		// Warn when explicitly-provided flags differ from existing config.
-		// Only warn for non-default values to avoid spurious warnings when
-		// re-running without flags (e.g., plain "gc rig add /path").
 		if startSuspended && startSuspended != existingRig.Suspended {
-			fmt.Fprintf(stderr, "gc rig add: warning: --start-suspended ignored (existing: suspended=%v); edit city.toml to change\n", //nolint:errcheck // best-effort stderr
-				existingRig.Suspended)
+			fmt.Fprintf(stderr, "gc rig add: warning: --start-suspended ignored (existing: suspended=%v); edit city.toml to change\n", existingRig.Suspended) //nolint:errcheck // best-effort stderr
 		}
-		if include != "" && (len(existingRig.Includes) == 0 || existingRig.Includes[0] != include) {
-			fmt.Fprintf(stderr, "gc rig add: warning: --include=%s ignored (existing: %v); edit city.toml to change\n", //nolint:errcheck // best-effort stderr
-				include, existingRig.Includes)
+		if len(includes) > 0 && !slices.Equal(existingRig.Includes, includes) {
+			fmt.Fprintf(stderr, "gc rig add: warning: --include flags %v ignored (existing: %v); edit city.toml to change\n", includes, existingRig.Includes) //nolint:errcheck // best-effort stderr
 		}
 		if prefixOverride != "" && strings.ToLower(prefixOverride) != existingRig.EffectivePrefix() {
-			fmt.Fprintf(stderr, "gc rig add: warning: --prefix=%s ignored (existing: %s); edit city.toml to change\n", //nolint:errcheck // best-effort stderr
-				prefixOverride, existingRig.EffectivePrefix())
+			fmt.Fprintf(stderr, "gc rig add: warning: --prefix=%s ignored (existing: %s); edit city.toml to change\n", prefixOverride, existingRig.EffectivePrefix()) //nolint:errcheck // best-effort stderr
 		}
 	} else {
 		w(fmt.Sprintf("Adding rig '%s'...", name))
@@ -279,37 +310,32 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 	w(fmt.Sprintf("  Prefix: %s", prefix))
 	if !reAdd {
 		switch {
-		case include != "":
-			w(fmt.Sprintf("  Include: %s", include))
-		case len(cfg.Workspace.DefaultRigIncludes) > 0:
-			w(fmt.Sprintf("  Include: %s (default)", strings.Join(cfg.Workspace.DefaultRigIncludes, ", ")))
+		case len(includes) > 0:
+			w(fmt.Sprintf("  Include: %s", strings.Join(includes, ", ")))
+		case len(defaultRigIncludes) > 0:
+			w(fmt.Sprintf("  Include: %s (default)", strings.Join(defaultRigIncludes, ", ")))
 		}
 	}
 
-	// Initialize beads for the rig. When --adopt is set, skip init
-	// entirely — the existing .beads/ directory is already valid.
 	if adopt {
-		w("  Adopted existing beads database")
-		// Even when adopting, ensure bead event hooks are current. The adopted
-		// directory may come from an external tool or older city that lacks the
-		// hooks needed for event forwarding. installBeadHooks is idempotent.
-		if err := installBeadHooks(rigPath); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: installing bead hooks: %v\n", err) //nolint:errcheck // best-effort stderr
-			// Non-fatal: hooks are convenience (event forwarding), not critical.
+		if err := prepareRigAdoptProviderState(cityPath, rigPath); err != nil {
+			fmt.Fprintf(stderr, "gc rig add: prepare adopted rig store: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
-	} else {
-		// Probes the backing service first; if the probe fails (e.g.
-		// Dolt not yet ready), falls back to direct init — the city is
-		// likely already running and the probe script may just be
-		// checking the wrong state.
-		deferred, err := initDirIfReady(cityPath, rigPath, prefix)
+		w("  Adopted existing beads database")
+	}
+
+	deferred := false
+	if !adopt {
+		deferred, err = initDirIfReady(cityPath, rigPath, prefix)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if deferred {
-			// City is probably running — try direct init.
-			if err := initAndHookDir(cityPath, rigPath, prefix); err != nil {
+			if cityUsesBdStoreContract(cityPath) && os.Getenv("GC_DOLT") == "skip" {
+				w("  Beads init deferred to controller")
+			} else if err := initAndHookDir(cityPath, rigPath, prefix); err != nil {
 				w("  Beads init deferred to controller")
 			} else {
 				w("  Initialized beads database")
@@ -319,29 +345,13 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		}
 	}
 
-	// Ensure .beads/ is in the rig's .gitignore (needed for both adopt and init).
-	if err := ensureGitignoreEntries(fs, rigPath, rigGitignoreEntries); err != nil {
-		fmt.Fprintf(stderr, "gc rig add: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
-		// Non-fatal — rig is still usable without .gitignore.
-	}
-
-	// Install provider agent hooks (Claude, Gemini, etc.) if configured.
-	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
-		if err := hooks.Install(fs, cityPath, rigPath, ih); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: installing agent hooks: %v\n", err) //nolint:errcheck // best-effort stderr
-			// Non-fatal.
-		}
-	}
-
-	// --- Phase 2: Commit config (only after infrastructure succeeds) ---
-	// Skipped for re-adds (config already has this rig).
-
-	if !reAdd {
-		// Add rig to config and validate before writing.
-		// Store the canonicalized (lowercased) prefix, not the raw flag
-		// value. EffectivePrefix() returns the stored value as-is, and
-		// downstream consumers (findRigByPrefix, ValidateRigs) must agree
-		// on casing with .beads/config.yaml (always lowercase).
+	var nextCfg *config.City
+	if reAdd {
+		next := *cfg
+		next.Rigs = append([]config.Rig{}, cfg.Rigs...)
+		next.Rigs[existingRigIdx].Path = rigPath
+		nextCfg = &next
+	} else {
 		storedPrefix := ""
 		if prefixOverride != "" {
 			storedPrefix = strings.ToLower(prefixOverride)
@@ -353,47 +363,57 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 			Suspended: startSuspended,
 		}
 		switch {
-		case include != "":
-			rig.Includes = []string{include}
-		case len(cfg.Workspace.DefaultRigIncludes) > 0:
-			rig.Includes = append([]string{}, cfg.Workspace.DefaultRigIncludes...)
+		case len(includes) > 0:
+			rig.Includes = slices.Clone(includes)
+		case len(defaultRigIncludes) > 0:
+			rig.Includes = slices.Clone(defaultRigIncludes)
 		}
-		cfg.Rigs = append(cfg.Rigs, rig)
-		if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
+		next := *cfg
+		next.Rigs = append(append([]config.Rig{}, cfg.Rigs...), rig)
+		if err := config.ValidateRigs(next.Rigs, config.EffectiveHQPrefix(&next)); err != nil {
 			fmt.Fprintf(stderr, "gc rig add: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-
-		data, err := cfg.Marshal()
-		if err != nil {
-			fmt.Fprintf(stderr, "gc rig add: marshaling config: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-
-		if err := fs.WriteFile(tomlPath, data, 0o644); err != nil {
-			fmt.Fprintf(stderr, "gc rig add: writing config: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+		nextCfg = &next
 	}
 
-	// --- Phase 3: Routes (uses config, best-effort) ---
+	snapshots, err := snapshotRigAddTopologyFiles(fs, cityPath, nextCfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig add: snapshot canonical files: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := normalizeCanonicalBdScopeFiles(cityPath, nextCfg); err != nil {
+		writeRigAddRollbackError(fs, stderr, snapshots, "canonicalizing rig topology", err)
+		return 1
+	}
 
-	// Ensure rig paths are absolute before route generation.
-	resolveRigPaths(cityPath, cfg.Rigs)
-	// Keep newly added or re-added rigs on the city-managed Dolt endpoint,
-	// including rigs that live outside the city directory.
-	syncConfiguredDoltPortFiles(cityPath, cfg.Rigs)
+	if err := writeCityConfigForEditFS(fs, tomlPath, nextCfg); err != nil {
+		writeRigAddRollbackError(fs, stderr, snapshots, "writing config", err)
+		return 1
+	}
+	cfg = nextCfg
 
-	// Generate routes for all rigs (HQ + all configured rigs).
 	allRigs := collectRigRoutes(cityPath, cfg)
-	if err := writeAllRoutes(allRigs); err != nil {
-		fmt.Fprintf(stderr, "gc rig add: writing routes: %v\n", err) //nolint:errcheck // best-effort stderr
+	if err := writeAllRigRoutes(allRigs); err != nil {
+		writeRigAddRollbackError(fs, stderr, snapshots, "writing routes", err)
 		return 1
 	}
 	w("  Generated routes.jsonl for cross-rig routing")
 
-	// Resolve formulas for the new rig. Rigs inherit city formulas
-	// so pool agents can use default sling formulas (mol-do-work).
+	if adopt {
+		if err := installBeadHooks(rigPath); err != nil {
+			fmt.Fprintf(stderr, "gc rig add: installing bead hooks: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}
+	if err := ensureGitignoreEntries(fs, rigPath, rigGitignoreEntries); err != nil {
+		fmt.Fprintf(stderr, "gc rig add: writing .gitignore: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
+	if ih := cfg.Workspace.InstallAgentHooks; len(ih) > 0 {
+		if err := hooks.Install(fs, cityPath, rigPath, ih); err != nil {
+			fmt.Fprintf(stderr, "gc rig add: installing agent hooks: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+	}
+
 	reloadedCfg, _, _ := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
 	if reloadedCfg != nil {
 		layers, ok := reloadedCfg.FormulaLayers.Rigs[name]
@@ -402,30 +422,27 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 		}
 		if len(layers) > 0 {
 			if rfErr := ResolveFormulas(rigPath, layers); rfErr != nil {
-				fmt.Fprintf(stderr, "gc rig add: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort
+				fmt.Fprintf(stderr, "gc rig add: resolving formulas: %v\n", rfErr) //nolint:errcheck // best-effort stderr
 			}
 		}
 	}
 
-	// --- Phase 4: Global registry (cities.toml) ---
-
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	if err := reg.RegisterRig(rigPath, name, cityPath); err != nil {
-		// Non-fatal: global registry is a convenience index.
 		fmt.Fprintf(stderr, "gc rig add: warning: updating global registry: %v\n", err) //nolint:errcheck // best-effort stderr
 	} else {
 		w("  Registered in global rig index")
 	}
 
-	// --- Phase 5: Write GT_ROOT to .beads/.env ---
-
 	if err := writeBeadsEnvGTRoot(fs, rigPath, cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc rig add: warning: writing .beads/.env: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 
-	// Poke controller after config is committed so it picks up
-	// deferred beads init and implicit agents for the new rig.
-	_ = pokeController(cityPath)
+	if err := rigReloadControllerConfig(cityPath); err == nil && deferred && cityUsesBdStoreContract(cityPath) {
+		if waitErr := rigWaitForStoreAccessible(cityPath, rigPath, rigDeferredStoreInitWait); waitErr != nil {
+			fmt.Fprintf(stderr, "gc rig add: warning: controller init still pending for rig %q: %v\n", name, waitErr) //nolint:errcheck // best-effort stderr
+		}
+	}
 
 	switch {
 	case reAdd:
@@ -438,20 +455,111 @@ func doRigAdd(fs fsys.FS, cityPath, rigPath, include, nameOverride, prefixOverri
 	return 0
 }
 
+func snapshotRigAddTopologyFiles(fs fsys.FS, cityPath string, cfg *config.City) ([]fileSnapshot, error) {
+	snapshots := make([]fileSnapshot, 0, len(cfg.Rigs)*3+5)
+	cityToml, err := snapshotOptionalFile(fs, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return nil, err
+	}
+	snapshots = append(snapshots, cityToml)
+	siteToml, err := snapshotOptionalFile(fs, config.SiteBindingPath(cityPath))
+	if err != nil {
+		return nil, err
+	}
+	snapshots = append(snapshots, siteToml)
+	citySnapshots, err := snapshotRigCanonicalFiles(fs, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	snapshots = append(snapshots, citySnapshots...)
+	cityPort, err := snapshotOptionalFile(fs, filepath.Join(cityPath, ".beads", "dolt-server.port"))
+	if err != nil {
+		return nil, err
+	}
+	snapshots = append(snapshots, cityPort)
+	seen := map[string]struct{}{}
+	for _, rig := range cfg.Rigs {
+		rigPath := rig.Path
+		if !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		rigPath = filepath.Clean(rigPath)
+		if _, ok := seen[rigPath]; ok {
+			continue
+		}
+		seen[rigPath] = struct{}{}
+		rigSnapshots, err := snapshotRigCanonicalFiles(fs, rigPath)
+		if err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, rigSnapshots...)
+		rigPort, err := snapshotOptionalFile(fs, filepath.Join(rigPath, ".beads", "dolt-server.port"))
+		if err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, rigPort)
+	}
+	return snapshots, nil
+}
+
+func writeRigAddRollbackError(fs fsys.FS, stderr io.Writer, snapshots []fileSnapshot, action string, cause error) {
+	if restoreErr := restoreSnapshots(fs, snapshots); restoreErr != nil {
+		fmt.Fprintf(stderr, "gc rig add: %s: %v (rollback failed: %v)\n", action, cause, restoreErr) //nolint:errcheck // best-effort stderr
+		return
+	}
+	fmt.Fprintf(stderr, "gc rig add: %s: %v\n", action, cause) //nolint:errcheck // best-effort stderr
+}
+
+var writeAllRigRoutes = writeAllRoutes
+
+func waitForRigStoreAccessible(cityPath, rigPath string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		store, err := openStoreAtForCity(rigPath, cityPath)
+		if err == nil {
+			pingErr := store.Ping()
+			if pingErr == nil {
+				return nil
+			}
+			lastErr = pingErr
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			if lastErr == nil {
+				lastErr = fmt.Errorf("timed out waiting for rig store to become accessible")
+			}
+			return lastErr
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func prepareRigAdoptProviderState(cityPath, rigPath string) error {
+	if rawBeadsProvider(cityPath) != "file" {
+		return nil
+	}
+	if !fileStoreUsesScopedRoots(cityPath) {
+		return nil
+	}
+	return ensurePersistedScopeLocalFileStore(rigPath)
+}
+
 // findEnclosingRig returns the rig whose path is a prefix of dir. It does
 // prefix matching so that subdirectories of a rig are recognized.
 func findEnclosingRig(dir string, rigs []config.Rig) (name, rigPath string, found bool) {
 	cleanDir := normalizePathForCompare(dir)
 	bestName, bestPath := "", ""
-	bestMatchLen := -1
 	for _, r := range rigs {
+		if strings.TrimSpace(r.Path) == "" {
+			continue
+		}
 		cleanRig := normalizePathForCompare(r.Path)
-		if cleanDir == cleanRig ||
-			strings.HasPrefix(cleanDir, cleanRig+string(filepath.Separator)) {
-			if len(cleanRig) > bestMatchLen {
+		if pathWithinScope(cleanDir, cleanRig) {
+			if len(cleanRig) > len(bestPath) {
 				bestName = r.Name
-				bestPath = filepath.Clean(r.Path)
-				bestMatchLen = len(cleanRig)
+				bestPath = cleanRig
 				found = true
 			}
 		}
@@ -482,7 +590,10 @@ type RigListJSON struct {
 
 // RigListItem is one rig entry in the JSON output.
 type RigListItem struct {
-	Name      string `json:"name"`
+	Name string `json:"name"`
+	// Path is the absolute filesystem path to the rig directory, resolved from
+	// city.toml by resolveRigPaths. Always absolute in output, regardless of
+	// the relative form stored in city.toml.
 	Path      string `json:"path"`
 	Prefix    string `json:"prefix"`
 	HQ        bool   `json:"hq"`
@@ -493,12 +604,18 @@ type RigListItem struct {
 // doRigList is the pure logic for "gc rig list". It reads rigs from city.toml
 // and prints each with its prefix and beads status. Accepts an injected FS for
 // testability.
+//
+// Rig paths are resolved to absolute form via resolveRigPaths before output;
+// both JSON and text output reflect the on-disk absolute path regardless of
+// how the rig path is declared in city.toml. The cityPath parameter must be
+// absolute.
 func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.Writer) int {
 	cfg, err := loadCityConfigFS(fs, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	resolveRigPaths(cityPath, cfg.Rigs)
 
 	hqPrefix := config.EffectiveHQPrefix(cfg)
 	cityName := cfg.EffectiveCityName()
@@ -647,12 +764,7 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		return 1
 	}
 
-	content, err := cfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig suspend: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
+	if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc rig suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -732,12 +844,7 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		return 1
 	}
 
-	content, err := cfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig resume: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := fs.WriteFile(tomlPath, content, 0o644); err != nil {
+	if err := writeCityConfigForEditFS(fs, tomlPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc rig resume: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -805,12 +912,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 	cfg.Rigs = filtered
 
 	// Write updated config.
-	content, err := cfg.Marshal()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := os.WriteFile(tomlPath, content, 0o644); err != nil {
+	if err := writeCityConfigForEditFS(fsys.OSFS{}, tomlPath, cfg); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -833,7 +935,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 			// Update .beads/.env and routes for the rig's new default city.
 			if newDefault != "" {
 				_ = writeBeadsEnvGTRoot(fsys.OSFS{}, removedPath, newDefault)
-				if newCfg, err := loadCityConfig(newDefault); err == nil {
+				if newCfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(newDefault); err == nil {
 					resolveRigPaths(newDefault, newCfg.Rigs)
 					newRigs := collectRigRoutes(newDefault, newCfg)
 					_ = writeAllRoutes(newRigs)
@@ -849,7 +951,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc rig remove: warning: writing routes: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 
-	_ = pokeController(cityPath)
+	_ = reloadControllerConfig(cityPath)
 	fmt.Fprintf(stdout, "Removed rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
 	return 0
 }
@@ -1031,20 +1133,9 @@ func writeBeadsEnvGTRoot(fs fsys.FS, rigPath, cityPath string) error {
 // the underscore form (issue_prefix) and dash form (issue-prefix) since the
 // lifecycle code writes both.
 func readBeadsPrefix(fs fsys.FS, rigPath string) (string, bool) {
-	data, err := fs.ReadFile(filepath.Join(rigPath, ".beads", "config.yaml"))
-	if err != nil {
+	prefix, ok, err := contract.ReadIssuePrefix(fs, filepath.Join(rigPath, ".beads", "config.yaml"))
+	if err != nil || !ok {
 		return "", false
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		for _, key := range []string{"issue_prefix:", "issue-prefix:"} {
-			if strings.HasPrefix(trimmed, key) {
-				val := strings.TrimSpace(strings.TrimPrefix(trimmed, key))
-				if val != "" {
-					return strings.ToLower(val), true
-				}
-			}
-		}
-	}
-	return "", false
+	return strings.ToLower(prefix), true
 }

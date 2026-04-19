@@ -108,8 +108,17 @@ func TestBuiltinProvidersCodex(t *testing.T) {
 	if p.ReadyDelayMs != 3000 {
 		t.Errorf("ReadyDelayMs = %d, want 3000", p.ReadyDelayMs)
 	}
+	if p.ReadyPromptPrefix != "› " {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", p.ReadyPromptPrefix, "› ")
+	}
 	if p.EmitsPermissionWarning {
 		t.Error("EmitsPermissionWarning = true, want false")
+	}
+	if p.ResumeFlag != "resume" {
+		t.Errorf("ResumeFlag = %q, want resume", p.ResumeFlag)
+	}
+	if p.ResumeStyle != "subcommand" {
+		t.Errorf("ResumeStyle = %q, want subcommand", p.ResumeStyle)
 	}
 }
 
@@ -136,6 +145,12 @@ func TestBuiltinProvidersGemini(t *testing.T) {
 	}
 	if len(p.ProcessNames) != 2 || p.ProcessNames[0] != "gemini" || p.ProcessNames[1] != "node" {
 		t.Errorf("ProcessNames = %v, want [gemini node]", p.ProcessNames)
+	}
+	if p.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want --resume", p.ResumeFlag)
+	}
+	if p.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q, want flag", p.ResumeStyle)
 	}
 }
 
@@ -197,45 +212,6 @@ func TestBuiltinProviderOrderReturnsNewSlice(t *testing.T) {
 	a[0] = "mutated"
 	if b[0] == "mutated" {
 		t.Error("BuiltinProviderOrder() should return a new slice each time")
-	}
-}
-
-// TestBuiltinCodexNeedsNudgePoller guards the codex preset's nudge-poller
-// opt-in. Codex has no UserPromptSubmit-equivalent hook, so queued nudges
-// must drain via the background poller. Claude stays hook-driven.
-func TestBuiltinCodexNeedsNudgePoller(t *testing.T) {
-	builtins := BuiltinProviders()
-	if !builtins["codex"].NeedsNudgePoller {
-		t.Error("codex: NeedsNudgePoller = false, want true")
-	}
-	if builtins["claude"].NeedsNudgePoller {
-		t.Error("claude: NeedsNudgePoller = true, want false (drains via UserPromptSubmit hook)")
-	}
-}
-
-func TestMergeProviderOverBuiltinPreservesNeedsNudgePoller(t *testing.T) {
-	base := ProviderSpec{Command: "codex", NeedsNudgePoller: true}
-	city := ProviderSpec{DisplayName: "Custom Codex"}
-	merged := MergeProviderOverBuiltin(base, city)
-	if !merged.NeedsNudgePoller {
-		t.Error("merged.NeedsNudgePoller = false, want true (inherited from base)")
-	}
-}
-
-func TestMergeProviderOverBuiltinEnablesNeedsNudgePoller(t *testing.T) {
-	base := ProviderSpec{Command: "custom"}
-	city := ProviderSpec{NeedsNudgePoller: true}
-	merged := MergeProviderOverBuiltin(base, city)
-	if !merged.NeedsNudgePoller {
-		t.Error("merged.NeedsNudgePoller = false, want true (set by city override)")
-	}
-}
-
-func TestSpecToResolvedCopiesNeedsNudgePoller(t *testing.T) {
-	spec := &ProviderSpec{Command: "codex", NeedsNudgePoller: true}
-	rp := specToResolved("codex", spec)
-	if !rp.NeedsNudgePoller {
-		t.Error("resolved.NeedsNudgePoller = false, want true")
 	}
 }
 

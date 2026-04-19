@@ -14,7 +14,7 @@ import (
 // the agent should be restarted (via drain when drain ops are available).
 //
 // Included: Command, Env, FingerprintExtra (pool config, etc.),
-// Nudge, PreStart, SessionSetup, SessionSetupScript, OverlayDir, CopyFiles,
+// PreStart, SessionSetup, SessionSetupScript, OverlayDir, CopyFiles,
 // SessionLive.
 //
 // Excluded (observation-only hints): WorkDir, ReadyPromptPrefix,
@@ -63,7 +63,6 @@ func LiveFingerprint(cfg Config) string {
 //	  GC_CITY / GC_CITY_PATH — city identity and location
 //	  GC_RIG*         — which rig the agent operates on
 //	  GC_TEMPLATE     — agent template identity
-//	  GC_ALIAS        — agent display identity
 //	  GC_DOLT_PORT    — how to reach dolt (ephemeral port)
 //	  GC_SKILLS_DIR   — skill discovery path
 //	  GC_BLESSED_BIN_DIR — trusted binary path
@@ -72,6 +71,7 @@ func LiveFingerprint(cfg Config) string {
 //	Excluded (runtime/transport, changes don't require restart):
 //	  GC_SESSION_*    — per-session identity
 //	  GC_AGENT        — pool instance name
+//	  GC_ALIAS        — public routing/display alias, synced live where possible
 //	  GC_INSTANCE_TOKEN — restart nonce
 //	  GC_*_EPOCH      — restart counters
 //	  GC_HOME/GC_DIR  — derived paths
@@ -91,7 +91,6 @@ var envFingerprintAllow = map[string]bool{
 
 	// Agent identity
 	"GC_TEMPLATE": true,
-	"GC_ALIAS":    true,
 
 	// Service connectivity — GC_DOLT_PORT intentionally excluded.
 	// The dolt port is ephemeral (changes on every supervisor restart)
@@ -134,10 +133,6 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
 		hashSortedMap(h, cfg.FingerprintExtra)
 	}
-
-	// Nudge
-	h.Write([]byte(cfg.Nudge)) //nolint:errcheck // hash.Write never errors
-	h.Write([]byte{0})         //nolint:errcheck // hash.Write never errors
 
 	// PreStart
 	for _, ps := range cfg.PreStart {
@@ -248,9 +243,6 @@ func CoreFingerprintBreakdown(cfg Config) map[string]string {
 				hashSortedMap(h, cfg.FingerprintExtra)
 			}
 		}),
-		"Nudge": fieldHash(func(h hash.Hash) {
-			h.Write([]byte(cfg.Nudge))
-		}),
 		"PreStart": fieldHash(func(h hash.Hash) {
 			for _, ps := range cfg.PreStart {
 				h.Write([]byte(ps))
@@ -323,8 +315,6 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[strin
 			fmt.Fprintf(w, "    Env: %v\n", filteredEnv(current.Env)) //nolint:errcheck // best-effort diag
 		case "FPExtra":
 			fmt.Fprintf(w, "    FPExtra: %v\n", current.FingerprintExtra) //nolint:errcheck // best-effort diag
-		case "Nudge":
-			fmt.Fprintf(w, "    Nudge len: %d\n", len(current.Nudge)) //nolint:errcheck // best-effort diag
 		case "PreStart":
 			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
 		case "OverlayDir":

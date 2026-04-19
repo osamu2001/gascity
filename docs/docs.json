@@ -94,6 +94,7 @@
         "group": "Guides",
         "pages": [
           "guides/index",
+          "guides/migrating-to-pack-vnext",
           "guides/shareable-packs"
         ]
       },
@@ -104,6 +105,9 @@
           "reference/cli",
           "reference/config",
           "reference/formula",
+          "reference/api",
+          "reference/events",
+          "schema/index",
           "reference/exec-session-provider",
           "reference/exec-beads-provider"
         ]

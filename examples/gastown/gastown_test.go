@@ -15,6 +15,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -39,6 +40,18 @@ func currentBranch(t *testing.T, dir string) string {
 	return runCmd(t, dir, "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
+func assertContainsInOrder(t *testing.T, body string, wants ...string) {
+	t.Helper()
+	offset := 0
+	for _, want := range wants {
+		idx := strings.Index(body[offset:], want)
+		if idx == -1 {
+			t.Fatalf("missing %q after byte offset %d", want, offset)
+		}
+		offset += idx + len(want)
+	}
+}
+
 // loadExpanded loads city.toml with full pack expansion.
 func loadExpanded(t *testing.T) *config.City {
 	t.Helper()
@@ -59,8 +72,15 @@ func TestCityTomlParses(t *testing.T) {
 	if cfg.Workspace.Name != "gastown" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "gastown")
 	}
-	if len(cfg.Workspace.Includes) != 1 || cfg.Workspace.Includes[0] != "packs/gastown" {
-		t.Errorf("Workspace.Includes = %v, want [packs/gastown]", cfg.Workspace.Includes)
+	if len(cfg.Workspace.Includes) != 0 {
+		t.Errorf("Workspace.Includes = %v, want empty (migrated to [imports.gastown])", cfg.Workspace.Includes)
+	}
+	gastownImp, ok := cfg.Imports["gastown"]
+	if !ok {
+		t.Fatalf("cfg.Imports = %v, want entry for \"gastown\"", cfg.Imports)
+	}
+	if gastownImp.Source != "packs/gastown" {
+		t.Errorf("cfg.Imports[\"gastown\"].Source = %q, want %q", gastownImp.Source, "packs/gastown")
 	}
 }
 
@@ -78,7 +98,7 @@ func TestPromptFilesExist(t *testing.T) {
 		if a.PromptTemplate == "" || a.Implicit {
 			continue
 		}
-		path := filepath.Join(dir, a.PromptTemplate)
+		path := resolveExamplePath(dir, a.PromptTemplate)
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("agent %q: prompt_template %q: %v", a.Name, a.PromptTemplate, err)
 		}
@@ -92,7 +112,7 @@ func TestOverlayDirsExist(t *testing.T) {
 		if a.OverlayDir == "" {
 			continue
 		}
-		path := filepath.Join(dir, a.OverlayDir)
+		path := resolveExamplePath(dir, a.OverlayDir)
 		if info, err := os.Stat(path); err != nil {
 			t.Errorf("agent %q: overlay_dir %q: %v", a.Name, a.OverlayDir, err)
 		} else if !info.IsDir() {
@@ -103,7 +123,7 @@ func TestOverlayDirsExist(t *testing.T) {
 
 func TestRefineryPromptSeedsTargetBranchVar(t *testing.T) {
 	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "prompts", "refinery.md.tmpl")
+	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading refinery prompt: %v", err)
@@ -115,7 +135,7 @@ func TestRefineryPromptSeedsTargetBranchVar(t *testing.T) {
 
 func TestRefineryFormulaSupportsMergeStrategies(t *testing.T) {
 	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.formula.toml")
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading refinery formula: %v", err)
@@ -133,11 +153,117 @@ func TestRefineryFormulaSupportsMergeStrategies(t *testing.T) {
 	}
 }
 
+func TestPolecatFormulaTreatsMetadataBranchAsAuthoritative(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		`git fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"`,
+		`Could not fetch metadata.branch=$BRANCH from origin`,
+		`git merge --ff-only "origin/$BRANCH"`,
+		`metadata.branch=$BRANCH was set but no local or origin branch exists`,
+		`STOP. Do not create a different branch.`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("polecat formula missing metadata.branch authority guidance %q", want)
+		}
+	}
+	assertContainsInOrder(t, body,
+		`if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then`,
+		`if git show-ref --verify --quiet "refs/heads/$BRANCH"; then`,
+	)
+}
+
+func TestPolecatFormulaRecordsExistingPRMetadataOnSubmit(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		`metadata.existing_pr` + "`" + ` is preserved for refinery`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("polecat formula missing existing_pr submit handling %q", want)
+		}
+	}
+	if strings.Contains(body, `--set-metadata pr_url="$EXISTING_PR"`) {
+		t.Fatalf("polecat must not record caller-supplied existing_pr as canonical pr_url")
+	}
+	if strings.Contains(body, "gh pr create") {
+		t.Fatalf("polecat submit flow must not create pull requests directly")
+	}
+}
+
+func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		`EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')`,
+		`ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')`,
+		`metadata.existing_pr requires pull-request handoff; using merge_strategy=mr`,
+		`block_existing_pr()`,
+		`--assignee=""`,
+		`--set-metadata gc.routed_to=human`,
+		`--set-metadata blocked_reason="$reason"`,
+		`gc mail send mayor/ -s "ESCALATION: invalid existing_pr for $WORK"`,
+		`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --json | jq -r '.new_epic_id')`,
+		`gc bd update "$NEXT" --assignee=$GC_AGENT`,
+		`CURRENT_WISP=${GC_BEAD_ID:-}`,
+		`gc bd mol burn "$CURRENT_WISP" --force`,
+		`pr_lookup_missing()`,
+		`EXISTING_PR_ERR=$(mktemp)`,
+		`EXISTING_PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$EXISTING_PR" 2>"$EXISTING_PR_ERR")`,
+		`EXISTING_PR_STATUS=$?`,
+		`if pr_lookup_missing "$EXISTING_PR_ERROR"; then`,
+		`Existing PR $EXISTING_PR was not found or is not accessible.`,
+		`Could not resolve existing PR $EXISTING_PR. STOP. Debug and retry without mutating bead state.`,
+		`EXISTING_PR_STATE=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.state')`,
+		`EXISTING_PR_HEAD=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.headRefName')`,
+		`EXISTING_PR_BASE=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.baseRefName')`,
+		`EXISTING_PR_REPO=$(printf '%s\n' "$EXISTING_PR_URL" | sed -E 's#^https://github.com/([^/]+/[^/]+)/pull/[0-9]+$#\\1#')`,
+		`EXISTING_PR_HEAD_REPO=$(printf '%s\n' "$EXISTING_PR_INFO" | jq -r '.headRepositoryOwner.login + "/" + .headRepository.name')`,
+		`metadata.existing_pr is set but metadata.branch is missing`,
+		`Existing PR $EXISTING_PR is $EXISTING_PR_STATE, want OPEN`,
+		`Existing PR $EXISTING_PR targets branch $EXISTING_PR_HEAD, want $BRANCH`,
+		`Existing PR $EXISTING_PR targets base $EXISTING_PR_BASE, want $TARGET`,
+		`Existing PR $EXISTING_PR belongs to repo $EXISTING_PR_REPO, want $ORIGIN_REPO`,
+		`Existing PR $EXISTING_PR head repo $EXISTING_PR_HEAD_REPO, want $ORIGIN_REPO`,
+		`PR_REF="$EXISTING_PR"`,
+		`PR_STATUS=$?`,
+		`if [ -n "$EXISTING_PR" ] && pr_lookup_missing "$PR_ERROR"; then`,
+		`PR_REPO=$(printf '%s\n' "$PR_URL" | sed -E 's#^https://github.com/([^/]+/[^/]+)/pull/[0-9]+$#\\1#')`,
+		`Existing PR $EXISTING_PR belongs to repo $PR_REPO, want $ORIGIN_REPO`,
+		`if [ -n "$EXISTING_PR" ]; then`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refinery formula missing existing_pr handling %q", want)
+		}
+	}
+	assertContainsInOrder(t, body,
+		`EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')`,
+		`EXISTING_PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$EXISTING_PR" 2>"$EXISTING_PR_ERR")`,
+		`git push origin HEAD:$BRANCH --force-with-lease`,
+		`gh pr create`,
+	)
+}
+
 func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -235,7 +361,7 @@ func TestWorktreeSetupBootstrapsPrepopulatedTargetDir(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -269,7 +395,7 @@ func TestWorktreeSetupBootstrapsPrepopulatedNestedRuntimeTree(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -318,7 +444,7 @@ func TestWorktreeSetupPreservesTrackedFilesInPrepopulatedTargetDir(t *testing.T)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -365,7 +491,7 @@ func TestWorktreeSetupSupportsLegacySignature(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -388,7 +514,7 @@ func TestWorktreeSetupReusesExistingAgentBranch(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -415,7 +541,7 @@ func TestWorktreeSetupNamespacesAgentBranchesByWorktreePath(t *testing.T) {
 	repo := filepath.Join(tmp, "repo")
 	cityA := filepath.Join(tmp, "city-a")
 	cityB := filepath.Join(tmp, "city-b")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -449,7 +575,7 @@ func TestWorktreeSetupSyncSkipsMissingOrigin(t *testing.T) {
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
-	script := filepath.Join(exampleDir(), "packs", "gastown", "scripts", "worktree-setup.sh")
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
 
 	runCmd(t, tmp, "git", "init", repo)
 	runCmd(t, repo, "git", "config", "user.email", "test@example.com")
@@ -472,7 +598,7 @@ func TestWorktreeSetupSyncSkipsMissingOrigin(t *testing.T) {
 func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T) {
 	dir := exampleDir()
 
-	mayorPrompt, err := os.ReadFile(filepath.Join(dir, "packs", "gastown", "prompts", "mayor.md.tmpl"))
+	mayorPrompt, err := os.ReadFile(filepath.Join(dir, "packs", "gastown", "agents", "mayor", "prompt.template.md"))
 	if err != nil {
 		t.Fatalf("reading mayor prompt: %v", err)
 	}
@@ -483,7 +609,7 @@ func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T
 		t.Fatalf("mayor prompt missing rig-status guidance:\n%s", mayorPrompt)
 	}
 
-	crewPrompt, err := os.ReadFile(filepath.Join(dir, "packs", "gastown", "prompts", "crew.md.tmpl"))
+	crewPrompt, err := os.ReadFile(filepath.Join(dir, "packs", "gastown", "assets", "prompts", "crew.template.md"))
 	if err != nil {
 		t.Fatalf("reading crew prompt: %v", err)
 	}
@@ -491,7 +617,7 @@ func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T
 		t.Fatalf("crew prompt missing namespaced worktree path:\n%s", crewPrompt)
 	}
 
-	polecatPrompt, err := os.ReadFile(filepath.Join(dir, "packs", "gastown", "prompts", "polecat.md.tmpl"))
+	polecatPrompt, err := os.ReadFile(filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md"))
 	if err != nil {
 		t.Fatalf("reading polecat prompt: %v", err)
 	}
@@ -502,7 +628,7 @@ func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T
 
 func TestIdeaToPlanFormulaUsesSupportedPrimitives(t *testing.T) {
 	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-idea-to-plan.formula.toml")
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-idea-to-plan.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading idea-to-plan formula: %v", err)
@@ -511,9 +637,9 @@ func TestIdeaToPlanFormulaUsesSupportedPrimitives(t *testing.T) {
 	for _, want := range []string{
 		`formula = "mol-idea-to-plan"`,
 		`gc sling "$REVIEW_TARGET" "$LEG_BEAD" --on {{review_formula}}`,
-		`bd create`,
+		`gc bd create`,
 		`gc mail send`,
-		`bd dep add`,
+		`gc bd dep add`,
 		`Do NOT use unsupported upstream shortcuts`,
 		`This is the only required human gate.`,
 	} {
@@ -525,7 +651,7 @@ func TestIdeaToPlanFormulaUsesSupportedPrimitives(t *testing.T) {
 
 func TestReviewLegFormulaPersistsReportAndNotifiesCoordinator(t *testing.T) {
 	dir := exampleDir()
-	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-review-leg.formula.toml")
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-review-leg.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading review-leg formula: %v", err)
@@ -534,9 +660,9 @@ func TestReviewLegFormulaPersistsReportAndNotifiesCoordinator(t *testing.T) {
 	for _, want := range []string{
 		`formula = "mol-review-leg"`,
 		`coordinator`,
-		`bd update {{issue}} --notes`,
+		`gc bd update {{issue}} --notes`,
 		`gc mail send "$COORD"`,
-		`bd update {{issue}} --status=closed`,
+		`gc bd update {{issue}} --status=closed`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("review-leg formula missing %q", want)
@@ -555,7 +681,7 @@ func TestAllFormulasExist(t *testing.T) {
 
 	var count int
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".formula.toml") {
+		if e.IsDir() || !formula.IsTOMLFilename(e.Name()) {
 			continue
 		}
 		count++
@@ -567,33 +693,23 @@ func TestAllFormulasExist(t *testing.T) {
 }
 
 func TestAllPromptTemplatesExist(t *testing.T) {
-	dir := exampleDir()
-	promptDir := filepath.Join(dir, "packs", "gastown", "prompts")
-
-	entries, err := os.ReadDir(promptDir)
-	if err != nil {
-		t.Fatalf("reading prompts dir: %v", err)
-	}
-
 	var count int
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md.tmpl") {
+	for _, a := range discoverPackAgents(t, filepath.Join("packs", "gastown")) {
+		if a.PromptTemplate == "" {
 			continue
 		}
 		count++
-		t.Run(e.Name(), func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join(promptDir, e.Name()))
-			if err != nil {
-				t.Fatalf("reading %s: %v", e.Name(), err)
-			}
-			if len(data) == 0 {
-				t.Errorf("%s is empty", e.Name())
-			}
-		})
+		data, err := os.ReadFile(a.PromptTemplate)
+		if err != nil {
+			t.Fatalf("reading %s prompt: %v", a.Name, err)
+		}
+		if len(data) == 0 {
+			t.Errorf("%s prompt is empty", a.Name)
+		}
 	}
 
-	if count != 7 {
-		t.Errorf("found %d prompt template files, want 7", count)
+	if count != 6 {
+		t.Errorf("found %d prompt templates, want 6", count)
 	}
 }
 
@@ -707,8 +823,25 @@ func TestDaemonConfig(t *testing.T) {
 
 // packFileConfig mirrors the pack.toml structure for test parsing.
 type packFileConfig struct {
-	Pack   config.PackMeta `toml:"pack"`
-	Agents []config.Agent  `toml:"agent"`
+	Pack    config.PackMeta          `toml:"pack"`
+	Imports map[string]config.Import `toml:"imports"`
+}
+
+func discoverPackAgents(t *testing.T, rel string) []config.Agent {
+	t.Helper()
+	packDir := filepath.Join(exampleDir(), rel)
+	agents, err := config.DiscoverPackAgents(fsys.OSFS{}, packDir, filepath.Base(rel), nil)
+	if err != nil {
+		t.Fatalf("DiscoverPackAgents(%s): %v", rel, err)
+	}
+	return agents
+}
+
+func resolveExamplePath(base, candidate string) string {
+	if filepath.IsAbs(candidate) {
+		return candidate
+	}
+	return filepath.Join(base, candidate)
 }
 
 func TestCombinedPackParses(t *testing.T) {
@@ -728,17 +861,28 @@ func TestCombinedPackParses(t *testing.T) {
 	if tc.Pack.Name != "gastown" {
 		t.Errorf("[pack] name = %q, want %q", tc.Pack.Name, "gastown")
 	}
-	if tc.Pack.Schema != 1 {
-		t.Errorf("[pack] schema = %d, want 1", tc.Pack.Schema)
+	if tc.Pack.Schema != 2 {
+		t.Errorf("[pack] schema = %d, want 2", tc.Pack.Schema)
+	}
+	if len(tc.Pack.Includes) != 0 {
+		t.Fatalf("pack includes = %v, want empty (migrated to [imports.maintenance])", tc.Pack.Includes)
+	}
+	maintImp, ok := tc.Imports["maintenance"]
+	if !ok {
+		t.Fatalf("pack imports = %v, want entry for \"maintenance\"", tc.Imports)
+	}
+	if maintImp.Source != "../maintenance" {
+		t.Errorf("pack imports[\"maintenance\"].Source = %q, want %q", maintImp.Source, "../maintenance")
 	}
 
-	// Expect 7 agents: gastown's own 6 + themed dog (overrides maintenance fallback).
+	// Expect 6 locally-discovered agents. Dog comes from the maintenance import
+	// and is themed via a pack patch, not a local agent file.
+	agents := discoverPackAgents(t, filepath.Join("packs", "gastown"))
 	want := map[string]bool{
 		"mayor": false, "deacon": false, "boot": false,
 		"witness": false, "refinery": false, "polecat": false,
-		"dog": false,
 	}
-	for _, a := range tc.Agents {
+	for _, a := range agents {
 		if _, ok := want[a.Name]; ok {
 			want[a.Name] = true
 		} else {
@@ -750,13 +894,13 @@ func TestCombinedPackParses(t *testing.T) {
 			t.Errorf("missing pack agent %q", name)
 		}
 	}
-	if len(tc.Agents) != 7 {
-		t.Errorf("pack has %d agents, want 7", len(tc.Agents))
+	if len(agents) != 6 {
+		t.Errorf("pack has %d locally-discovered agents, want 6", len(agents))
 	}
 
 	// Verify city-scoped agents have scope = "city".
-	wantCity := map[string]bool{"mayor": true, "deacon": true, "boot": true, "dog": true}
-	for _, a := range tc.Agents {
+	wantCity := map[string]bool{"mayor": true, "deacon": true, "boot": true}
+	for _, a := range agents {
 		if wantCity[a.Name] && a.Scope != "city" {
 			t.Errorf("agent %q: scope = %q, want %q", a.Name, a.Scope, "city")
 		}
@@ -764,19 +908,7 @@ func TestCombinedPackParses(t *testing.T) {
 }
 
 func TestPackUsesIsolatedWorkDirs(t *testing.T) {
-	dir := exampleDir()
-	topoPath := filepath.Join(dir, "packs", "gastown", "pack.toml")
-
-	data, err := os.ReadFile(topoPath)
-	if err != nil {
-		t.Fatalf("reading pack.toml: %v", err)
-	}
-
-	var tc packFileConfig
-	if _, err := toml.Decode(string(data), &tc); err != nil {
-		t.Fatalf("parsing pack.toml: %v", err)
-	}
-
+	agents := discoverPackAgents(t, filepath.Join("packs", "gastown"))
 	want := map[string]string{
 		"mayor":    ".gc/agents/mayor",
 		"deacon":   ".gc/agents/deacon",
@@ -784,9 +916,8 @@ func TestPackUsesIsolatedWorkDirs(t *testing.T) {
 		"witness":  ".gc/agents/{{.Rig}}/witness",
 		"refinery": ".gc/worktrees/{{.Rig}}/refinery",
 		"polecat":  ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
-		"dog":      ".gc/agents/dogs/{{.AgentBase}}",
 	}
-	for _, a := range tc.Agents {
+	for _, a := range agents {
 		if expected, ok := want[a.Name]; ok && a.WorkDir != expected {
 			t.Errorf("agent %q: work_dir = %q, want %q", a.Name, a.WorkDir, expected)
 		}
@@ -794,29 +925,12 @@ func TestPackUsesIsolatedWorkDirs(t *testing.T) {
 }
 
 func TestPackPromptFilesExist(t *testing.T) {
-	dir := exampleDir()
-	topoDir := filepath.Join(dir, "packs", "gastown")
-	topoPath := filepath.Join(topoDir, "pack.toml")
-
-	data, err := os.ReadFile(topoPath)
-	if err != nil {
-		t.Fatalf("reading pack.toml: %v", err)
-	}
-
-	var tc packFileConfig
-	if _, err := toml.Decode(string(data), &tc); err != nil {
-		t.Fatalf("parsing pack.toml: %v", err)
-	}
-
-	for _, a := range tc.Agents {
+	for _, a := range discoverPackAgents(t, filepath.Join("packs", "gastown")) {
 		if a.PromptTemplate == "" {
 			continue
 		}
-		// Paths in pack are relative to pack dir.
-		path := filepath.Join(topoDir, a.PromptTemplate)
-		if _, err := os.Stat(path); err != nil {
-			t.Errorf("agent %q: prompt_template %q resolves to %q: %v",
-				a.Name, a.PromptTemplate, path, err)
+		if _, err := os.Stat(a.PromptTemplate); err != nil {
+			t.Errorf("agent %q: prompt_template %q: %v", a.Name, a.PromptTemplate, err)
 		}
 	}
 }
@@ -824,7 +938,7 @@ func TestPackPromptFilesExist(t *testing.T) {
 func TestCityAgentsFilter(t *testing.T) {
 	// Verify config.LoadWithIncludes with both packs produces
 	// only city-scoped agents when no rigs are registered.
-	// Dog from maintenance + mayor/deacon/boot from gastown = 4.
+	// Effective dog from gastown override + mayor/deacon/boot = 4.
 	cfg := loadExpanded(t)
 
 	cityAgents := map[string]bool{"mayor": true, "deacon": true, "boot": true, "dog": true}
@@ -846,6 +960,41 @@ func TestCityAgentsFilter(t *testing.T) {
 	}
 }
 
+func TestExpandedCityUsesGastownDogOverride(t *testing.T) {
+	cfg := loadExpanded(t)
+
+	var dog *config.Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "dog" && !cfg.Agents[i].Implicit {
+			dog = &cfg.Agents[i]
+			break
+		}
+	}
+	if dog == nil {
+		t.Fatal("expected explicit dog agent in expanded gastown config")
+	}
+	if dog.WorkDir != ".gc/agents/dogs/{{.AgentBase}}" {
+		t.Errorf("dog work_dir = %q, want gastown themed work dir", dog.WorkDir)
+	}
+	wantPromptSuffix := filepath.Join("packs", "maintenance", "agents", "dog", "prompt.template.md")
+	if !strings.HasSuffix(dog.PromptTemplate, wantPromptSuffix) {
+		t.Errorf("dog prompt_template = %q, want suffix %q", dog.PromptTemplate, wantPromptSuffix)
+	}
+	wantOverlaySuffix := filepath.Join("packs", "maintenance", "agents", "dog", "overlay")
+	if !strings.HasSuffix(dog.OverlayDir, wantOverlaySuffix) {
+		t.Errorf("dog overlay_dir = %q, want suffix %q", dog.OverlayDir, wantOverlaySuffix)
+	}
+	if len(dog.SessionLive) != 2 {
+		t.Fatalf("dog session_live has %d entries, want 2 gastown theming commands", len(dog.SessionLive))
+	}
+	if !strings.Contains(dog.SessionLive[0], "tmux-theme.sh") {
+		t.Errorf("dog session_live[0] = %q, want tmux-theme.sh", dog.SessionLive[0])
+	}
+	if !strings.Contains(dog.SessionLive[1], "tmux-keybindings.sh") {
+		t.Errorf("dog session_live[1] = %q, want tmux-keybindings.sh", dog.SessionLive[1])
+	}
+}
+
 func TestMaintenancePackParses(t *testing.T) {
 	dir := exampleDir()
 	topoPath := filepath.Join(dir, "packs", "maintenance", "pack.toml")
@@ -863,33 +1012,31 @@ func TestMaintenancePackParses(t *testing.T) {
 	if tc.Pack.Name != "maintenance" {
 		t.Errorf("[pack] name = %q, want %q", tc.Pack.Name, "maintenance")
 	}
-	if tc.Pack.Schema != 1 {
-		t.Errorf("[pack] schema = %d, want 1", tc.Pack.Schema)
+	if tc.Pack.Schema != 2 {
+		t.Errorf("[pack] schema = %d, want 2", tc.Pack.Schema)
 	}
 
+	agents := discoverPackAgents(t, filepath.Join("packs", "maintenance"))
 	// Maintenance has 1 agent: dog.
-	if len(tc.Agents) != 1 {
-		t.Errorf("pack has %d agents, want 1", len(tc.Agents))
+	if len(agents) != 1 {
+		t.Errorf("pack has %d agents, want 1", len(agents))
 	}
-	if len(tc.Agents) > 0 && tc.Agents[0].Name != "dog" {
-		t.Errorf("agent name = %q, want %q", tc.Agents[0].Name, "dog")
+	if len(agents) > 0 && agents[0].Name != "dog" {
+		t.Errorf("agent name = %q, want %q", agents[0].Name, "dog")
 	}
 
 	// Verify dog agent has scope = "city".
-	if len(tc.Agents) > 0 && tc.Agents[0].Scope != "city" {
-		t.Errorf("dog scope = %q, want %q", tc.Agents[0].Scope, "city")
+	if len(agents) > 0 && agents[0].Scope != "city" {
+		t.Errorf("dog scope = %q, want %q", agents[0].Scope, "city")
 	}
 
 	// Verify prompt file exists.
-	for _, a := range tc.Agents {
+	for _, a := range agents {
 		if a.PromptTemplate == "" {
 			continue
 		}
-		topoDir := filepath.Join(dir, "packs", "maintenance")
-		path := filepath.Join(topoDir, a.PromptTemplate)
-		if _, err := os.Stat(path); err != nil {
-			t.Errorf("agent %q: prompt_template %q resolves to %q: %v",
-				a.Name, a.PromptTemplate, path, err)
+		if _, err := os.Stat(a.PromptTemplate); err != nil {
+			t.Errorf("agent %q: prompt_template %q: %v", a.Name, a.PromptTemplate, err)
 		}
 	}
 }
@@ -905,7 +1052,7 @@ func TestMaintenanceFormulasExist(t *testing.T) {
 
 	var count int
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".formula.toml") {
+		if e.IsDir() || !formula.IsTOMLFilename(e.Name()) {
 			continue
 		}
 		count++
@@ -928,7 +1075,7 @@ func TestDoltHealthFormulasExist(t *testing.T) {
 
 	var count int
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".formula.toml") {
+		if e.IsDir() || !formula.IsTOMLFilename(e.Name()) {
 			continue
 		}
 		count++

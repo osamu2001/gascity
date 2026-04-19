@@ -3,20 +3,23 @@ package main
 import (
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
-	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/spf13/cobra"
+)
+
+var (
+	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
+	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -47,6 +50,67 @@ health. Use --fix to attempt automatic repairs.`,
 }
 
 // doDoctor runs all health checks and prints results.
+func doctorSkipsDoltChecks(cityPath string) bool {
+	if os.Getenv("GC_DOLT") == "skip" {
+		return true
+	}
+	cfg, err := loadCityConfig(cityPath)
+	if err != nil {
+		return !cityUsesBdStoreContract(cityPath)
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	return !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
+}
+
+func workspaceNeedsCityDoltCheck(cityPath string, cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, rig := range cfg.Rigs {
+		if !rigUsesManagedBdStoreContract(cityPath, rig) {
+			continue
+		}
+		explicit, err := contract.ScopeUsesExplicitEndpoint(fsys.OSFS{}, cityPath, rig.Path)
+		if err != nil || !explicit {
+			return true
+		}
+	}
+	return false
+}
+
+type doltTopologyCheck struct {
+	cityPath string
+	cfg      *config.City
+}
+
+func newDoltTopologyCheck(cityPath string, cfg *config.City) *doltTopologyCheck {
+	return &doltTopologyCheck{cityPath: cityPath, cfg: cfg}
+}
+
+func (c *doltTopologyCheck) Name() string { return "dolt-topology" }
+
+func (c *doltTopologyCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	r := &doctor.CheckResult{Name: c.Name()}
+	if c.cfg == nil || !workspaceUsesManagedBdStoreContract(c.cityPath, c.cfg.Rigs) {
+		r.Status = doctor.StatusOK
+		r.Message = "not using bd-backed Dolt topology"
+		return r
+	}
+	if err := validateCanonicalCompatDoltDrift(c.cityPath, c.cfg); err != nil {
+		r.Status = doctor.StatusError
+		r.Message = fmt.Sprintf("canonical/compat Dolt drift: %v", err)
+		r.FixHint = "reconcile canonical .beads config with deprecated city.toml Dolt settings"
+		return r
+	}
+	r.Status = doctor.StatusOK
+	r.Message = "canonical and deprecated Dolt endpoint config agree"
+	return r
+}
+
+func (c *doltTopologyCheck) CanFix() bool { return false }
+
+func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
+
 func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
@@ -60,44 +124,31 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	// Core checks — always run.
 	d.Register(&doctor.CityStructureCheck{})
 	d.Register(&doctor.CityConfigCheck{})
+	registerV2DeprecationChecks(d)
+	d.Register(&doctor.ImplicitImportCacheCheck{})
+	d.Register(&doctor.DeprecatedAttachmentFieldsCheck{})
 
 	// Load config for deeper checks. If it fails, we still run the core
 	// checks above (which will report the parse error).
 	cfg, cfgErr := loadCityConfig(cityPath)
 	if cfgErr == nil {
-		// Register city Dolt config so bdRuntimeEnv can resolve the
-		// correct port for bead store checks (mirrors startBeadsLifecycle).
-		if cfg.Dolt.Host != "" || cfg.Dolt.Port != 0 {
-			cityDoltConfigs.Store(cityPath, cfg.Dolt)
-			defer cityDoltConfigs.Delete(cityPath)
+		resolveRigPaths(cityPath, cfg.Rigs)
+		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
+			d.Register(newDoltTopologyCheck(cityPath, cfg))
 		}
 		d.Register(doctor.NewConfigValidCheck(cfg))
 		d.Register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		d.Register(doctor.NewBuiltinPackFamilyCheck(cfg, cityPath))
 		d.Register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		d.Register(doctor.NewDurationRangeCheck(cfg))
+		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
+		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
+		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 
-	// System formulas check.
-	expected := ListEmbeddedSystemFormulas(systemFormulasFS, "system_formulas")
-	if len(expected) > 0 {
-		expectedContent := make(map[string][]byte)
-		for _, rel := range expected {
-			data, err := fs.ReadFile(systemFormulasFS, "system_formulas/"+rel)
-			if err == nil {
-				expectedContent[rel] = data
-			}
-		}
-		d.Register(&doctor.SystemFormulasCheck{
-			CityPath:        cityPath,
-			Expected:        expected,
-			ExpectedContent: expectedContent,
-			FixFn: func() error {
-				_, err := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
-				return err
-			},
-		})
-	}
+	// System formulas/orders now ship via the core bootstrap pack; pack
+	// materialization and the bootstrap collision checks cover what the
+	// legacy SystemFormulasCheck used to verify.
 
 	// Pack cache check (if config has remote packs).
 	if cfgErr == nil && len(cfg.Packs) > 0 {
@@ -130,12 +181,16 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
 	}
 
+	storeFactory := openStoreForCity(cityPath)
+
 	// Data checks.
 	if cfgErr == nil {
-		d.Register(doctor.NewBeadsStoreCheck(cityPath, openStore))
+		d.Register(doctor.NewBDSplitStoreCheck(cityPath))
+		d.Register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
+		d.Register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
-	skipDolt := rawBeadsProvider(cityPath) != "bd" || os.Getenv("GC_DOLT") == "skip"
-	d.Register(doctor.NewDoltServerCheck(cityPath, skipDolt))
+	skipCityDoltCheck := os.Getenv("GC_DOLT") == "skip" || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
+	d.Register(newDoctorDoltServerCheck(cityPath, skipCityDoltCheck))
 	d.Register(&doctor.EventsLogCheck{})
 	d.Register(doctor.NewEventLogSizeCheck())
 
@@ -149,15 +204,16 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			if rig.Suspended {
 				continue
 			}
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
 			d.Register(doctor.NewRigPathCheck(rig))
 			d.Register(doctor.NewRigGitCheck(rig))
-			d.Register(doctor.NewRigBeadsCheck(rig, openStore))
+			d.Register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
+			d.Register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
+			d.Register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || os.Getenv("GC_DOLT") == "skip"))
 			// Custom types check — rig store.
-			rigPath := rig.Path
-			if !filepath.IsAbs(rigPath) {
-				rigPath = filepath.Join(cityPath, rigPath)
-			}
-			d.Register(doctor.NewCustomTypesCheck(rigPath, rig.Name))
+			d.Register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
 		}
 	}
 
@@ -173,15 +229,12 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 
 	// Pack doctor checks — scripts shipped with packs.
 	if cfgErr == nil {
-		allPackDirs := collectPackDirs(cfg)
-		entries := config.LoadPackDoctorEntries(fsys.OSFS{}, allPackDirs)
-		for _, info := range entries {
-			scriptPath := filepath.Join(info.TopoDir, info.Entry.Script)
+		for _, entry := range cfg.PackDoctors {
 			d.Register(&doctor.PackScriptCheck{
-				CheckName: info.PackName + ":" + info.Entry.Name,
-				Script:    scriptPath,
-				PackDir:   info.TopoDir,
-				PackName:  info.PackName,
+				CheckName: entry.PackName + ":" + entry.Name,
+				Script:    entry.RunScript,
+				PackDir:   entry.PackDir,
+				PackName:  entry.PackName,
 			})
 		}
 	}
@@ -225,13 +278,16 @@ func backfillRigIndex(cityPath string) error {
 		return err
 	}
 
+	resolveRigPaths(cityPath, cfg.Rigs)
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	for _, rig := range cfg.Rigs {
 		rigPath := rig.Path
-		if !filepath.IsAbs(rigPath) {
-			rigPath = filepath.Join(cityPath, rigPath)
+		// Unbound rigs (no .gc/site.toml binding) have an empty path;
+		// registering that would pollute the supervisor registry with
+		// an entry pointing at the city root.
+		if strings.TrimSpace(rigPath) == "" {
+			continue
 		}
-		rigPath = filepath.Clean(rigPath)
 
 		if err := reg.RegisterRig(rigPath, rig.Name, cityPath); err != nil {
 			// Non-fatal — may be a name conflict with another city's rig.
@@ -243,22 +299,11 @@ func backfillRigIndex(cityPath string) error {
 	return nil
 }
 
-// openStore creates a beads.Store from a directory path. Used as a factory
-// for doctor checks that need to verify store accessibility.
-func openStore(dirPath string) (beads.Store, error) {
-	cityPath := cityForStoreDir(dirPath)
-	prov := rawBeadsProvider(cityPath)
-	switch {
-	case strings.HasPrefix(prov, "exec:"):
-		store := beadsexec.NewStore(strings.TrimPrefix(prov, "exec:"))
-		store.SetEnv(citylayout.CityRuntimeEnvMap(cityPath))
-		return store, nil
-	case prov == "file":
-		return beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityPath, ".gc", "beads.json"))
-	default: // "bd"
-		if _, err := exec.LookPath("bd"); err != nil {
-			return nil, fmt.Errorf("bd not found in PATH")
-		}
-		return bdStoreForCity(dirPath, cityPath), nil
+// openStoreForCity creates a beads.Store factory rooted in the given city.
+// Doctor uses this so rig stores outside the city tree still inherit the
+// canonical city topology instead of guessing from the rig path.
+func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
+	return func(dirPath string) (beads.Store, error) {
+		return openStoreAtForCity(dirPath, cityPath)
 	}
 }

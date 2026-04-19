@@ -55,7 +55,7 @@ func ConfiguredRigName(cityPath string, a config.Agent, rigs []config.Rig) strin
 	}
 	abs := ResolveDirPath(cityPath, a.Dir)
 	for _, rig := range rigs {
-		if filepath.Clean(abs) == filepath.Clean(rig.Path) {
+		if samePath(abs, rig.Path) {
 			return rig.Name
 		}
 	}
@@ -84,6 +84,53 @@ func PathContextForQualifiedName(cityPath, cityName, qualifiedName string, a con
 		CityRoot:  cityPath,
 		CityName:  cityName,
 	}
+}
+
+// ExpandCommandTemplate renders command using the same PathContext surface as
+// work_dir and session_setup templates. When cityName is empty, it falls back
+// to the city directory basename so callers don't have to duplicate that logic.
+func ExpandCommandTemplate(command, cityPath, cityName string, a config.Agent, rigs []config.Rig) (string, error) {
+	if command == "" || !strings.Contains(command, "{{") {
+		return command, nil
+	}
+	if strings.TrimSpace(cityName) == "" {
+		cityName = filepath.Base(filepath.Clean(cityPath))
+	}
+	ctx := PathContextForQualifiedName(cityPath, cityName, a.QualifiedName(), a, rigs)
+	return ExpandTemplateStrict(command, ctx)
+}
+
+// SessionQualifiedName returns the canonical work_dir identity for a concrete
+// session instance. Single-session agents keep their template identity; pooled
+// agents use the alias or generated explicit name.
+func SessionQualifiedName(cityPath string, a config.Agent, rigs []config.Rig, alias, explicitName string) string {
+	if !a.SupportsMultipleSessions() {
+		return a.QualifiedName()
+	}
+	identity := strings.TrimSpace(alias)
+	if identity == "" {
+		identity = strings.TrimSpace(explicitName)
+	}
+	if identity == "" {
+		return a.QualifiedName()
+	}
+
+	_, instanceName := config.ParseQualifiedName(identity)
+	if instanceName != "" {
+		identity = instanceName
+	}
+	if a.BindingName != "" {
+		prefix := a.BindingName + "."
+		identity = strings.TrimPrefix(identity, prefix)
+	}
+
+	qualified := a.QualifiedInstanceName(identity)
+	rigName := ConfiguredRigName(cityPath, a, rigs)
+	if rigName == "" {
+		return qualified
+	}
+	_, agentBase := config.ParseQualifiedName(qualified)
+	return rigName + "/" + agentBase
 }
 
 // ExpandTemplateStrict expands Go text/template placeholders in a work_dir
@@ -142,4 +189,39 @@ func ResolveWorkDirPath(cityPath, cityName, qualifiedName string, a config.Agent
 		return ResolveDirPath(cityPath, ExpandTemplate(a.WorkDir, ctx))
 	}
 	return path
+}
+
+func samePath(a, b string) bool {
+	return normalizePathForCompare(a) == normalizePathForCompare(b)
+}
+
+func normalizePathForCompare(path string) string {
+	if path == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	path = filepath.Clean(path)
+	path = canonicalizeExistingPathPrefix(path)
+	return filepath.Clean(path)
+}
+
+func canonicalizeExistingPathPrefix(path string) string {
+	current := path
+	var suffix []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return resolved
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
 }

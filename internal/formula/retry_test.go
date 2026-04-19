@@ -117,6 +117,10 @@ func TestApplyRetriesBasic(t *testing.T) {
 }
 
 func TestCompileRetryManagedStepBlocksWorkflowOnLogicalBead(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
 	dir := t.TempDir()
 	formulaContent := `
 formula = "retry-demo"
@@ -125,14 +129,14 @@ version = 2
 [[steps]]
 id = "review"
 title = "Review"
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 type = "task"
 
 [steps.retry]
 max_attempts = 3
 on_exhausted = "soft_fail"
 `
-	if err := os.WriteFile(filepath.Join(dir, "retry-demo.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "retry-demo.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

@@ -117,6 +117,27 @@ func TestConfigFingerprintIgnoresGCDir(t *testing.T) {
 	}
 }
 
+func TestConfigFingerprintIgnoresGCAlias(t *testing.T) {
+	base := Config{Command: "claude", Env: map[string]string{
+		"GC_CITY":     "/gc",
+		"GC_TEMPLATE": "repo/coder",
+	}}
+	withAlias := Config{Command: "claude", Env: map[string]string{
+		"GC_CITY":     "/gc",
+		"GC_TEMPLATE": "repo/coder",
+		"GC_ALIAS":    "repo/coder-1",
+	}}
+	if ConfigFingerprint(base) != ConfigFingerprint(withAlias) {
+		t.Error("GC_ALIAS should not affect config fingerprint")
+	}
+	if CoreFingerprint(base) != CoreFingerprint(withAlias) {
+		t.Error("GC_ALIAS should not affect core config fingerprint")
+	}
+	if CoreFingerprintBreakdown(base)["Env"] != CoreFingerprintBreakdown(withAlias)["Env"] {
+		t.Error("GC_ALIAS should not affect core env fingerprint breakdown")
+	}
+}
+
 func TestConfigFingerprintIgnoresNonAllowedGCVars(t *testing.T) {
 	// GC_* vars not on the allow list should not affect the hash.
 	// This is the core invariant: new env vars are safe by default.
@@ -188,11 +209,11 @@ func TestConfigFingerprintNilVsEmptyExtra(t *testing.T) {
 	}
 }
 
-func TestConfigFingerprintIncludesNudge(t *testing.T) {
+func TestConfigFingerprintIgnoresNudge(t *testing.T) {
 	a := Config{Command: "claude", Nudge: ""}
 	b := Config{Command: "claude", Nudge: "hello agent"}
-	if ConfigFingerprint(a) == ConfigFingerprint(b) {
-		t.Error("different Nudge should produce different hashes")
+	if ConfigFingerprint(a) != ConfigFingerprint(b) {
+		t.Error("different Nudge should not produce different hashes")
 	}
 }
 

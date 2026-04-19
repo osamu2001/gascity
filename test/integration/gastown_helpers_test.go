@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	gcevents "github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -62,8 +63,17 @@ func setupGasTownCity(t *testing.T, guard *tmuxtest.Guard, agents []gasTownAgent
 
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
-		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
+		if out, err := runGCWithEnv(env, "", "stop", cityDir); err != nil {
+			t.Logf("cleanup: gc stop %s: %v\n%s", cityDir, err, out)
+		}
+		// Pass --wait so the supervisor (and its controller children)
+		// is confirmed gone before t.TempDir() tries to rmdir the city.
+		// Without this, the supervisor's async shutdown races against
+		// tempdir cleanup and produces "unlinkat: directory not empty"
+		// flakes tied to orphan gc subprocesses.
+		if out, err := runGCWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
+			t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
+		}
 	})
 
 	time.Sleep(200 * time.Millisecond)
@@ -265,8 +275,21 @@ func verifyEvents(t *testing.T, cityDir, eventType string) {
 	if err != nil {
 		t.Fatalf("gc events --type %s failed: %v\noutput: %s", eventType, err, out)
 	}
-	if strings.Contains(out, "No events.") {
-		t.Errorf("expected events of type %s, got 'No events.'", eventType)
+	if strings.TrimSpace(out) == "" {
+		t.Errorf("expected events of type %s, got empty output", eventType)
+	}
+}
+
+// verifyEventLog checks the persisted event log directly. Use it for
+// assertions after the city controller has stopped and the live API is gone.
+func verifyEventLog(t *testing.T, cityDir, eventType string) {
+	t.Helper()
+	items, err := gcevents.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), gcevents.Filter{Type: eventType})
+	if err != nil {
+		t.Fatalf("read event log for %s: %v", eventType, err)
+	}
+	if len(items) == 0 {
+		t.Errorf("expected events of type %s in event log", eventType)
 	}
 }
 
@@ -280,7 +303,7 @@ func setupBareGitRepo(t *testing.T) string {
 		dir  string
 		args []string
 	}{
-		{"", []string{"git", "init", "--bare", bare}},
+		{"", []string{"git", "init", "--bare", "--initial-branch=main", bare}},
 	}
 
 	// Create a temp working dir to make the initial commit

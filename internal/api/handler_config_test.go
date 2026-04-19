@@ -18,11 +18,11 @@ func TestHandleConfigGet(t *testing.T) {
 	fs.cfg.Providers = map[string]config.ProviderSpec{
 		"custom": {DisplayName: "Custom", Command: "custom-cli"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -53,11 +53,11 @@ func TestHandleConfigGet(t *testing.T) {
 
 func TestHandleConfigGet_NoPatches(t *testing.T) {
 	fs := newFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -76,11 +76,11 @@ func TestHandleConfigGet_WithPatches(t *testing.T) {
 	fs.cfg.Patches.Agents = []config.AgentPatch{
 		{Dir: "rig1", Name: "worker"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -103,11 +103,11 @@ func TestHandleConfigExplain(t *testing.T) {
 	fs.cfg.Providers = map[string]config.ProviderSpec{
 		"claude": {DisplayName: "My Claude", Command: "my-claude"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config/explain", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/explain"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -150,11 +150,11 @@ func TestHandleConfigExplain(t *testing.T) {
 
 func TestHandleConfigValidate_Valid(t *testing.T) {
 	fs := newFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config/validate", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/validate"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -171,11 +171,11 @@ func TestHandleConfigValidate_WithWarnings(t *testing.T) {
 	fs := newFakeState(t)
 	// Agent references a nonexistent provider — should produce a warning.
 	fs.cfg.Agents[0].Provider = "nonexistent-provider"
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config/validate", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/validate"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -201,11 +201,11 @@ func TestHandleConfigValidate_InvalidServiceRuntimeSupport(t *testing.T) {
 		Name:     "review-intake",
 		Workflow: config.ServiceWorkflowConfig{Contract: "missing.contract"},
 	}}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config/validate", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/validate"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
@@ -226,6 +226,95 @@ func TestHandleConfigValidate_InvalidServiceRuntimeSupport(t *testing.T) {
 	}
 }
 
+func TestHandleConfigGet_V2BindingNameIncludedInAgentName(t *testing.T) {
+	// V2 imported agents carry a BindingName that's runtime-only (json:"-").
+	// The config response still needs to expose it so clients can
+	// reconstruct the same qualified identity that appears in
+	// session.template — otherwise downstream filters (e.g. gasworks-gui's
+	// CityInfo session bucket) compare "mayor" against "gastown.mayor" and
+	// drop the session.
+	fs := newFakeState(t)
+	fs.cfg.Agents = []config.Agent{
+		// City-scoped V2 agent: Dir="", BindingName set.
+		{Name: "mayor", BindingName: "gastown", Provider: "claude"},
+		// Rig-scoped V2 agent: Dir="myrig", BindingName set.
+		{Name: "polecat", Dir: "myrig", BindingName: "gastown", Provider: "claude"},
+		// V1 agent (no binding): Name must pass through unchanged.
+		{Name: "worker", Dir: "myrig", Provider: "claude"},
+	}
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp configResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+
+	if len(resp.Agents) != 3 {
+		t.Fatalf("agents count = %d, want 3", len(resp.Agents))
+	}
+
+	// City-scoped V2: name should include binding, dir stays empty so
+	// qualified identity reconstructs as "gastown.mayor".
+	if got, want := resp.Agents[0].Name, "gastown.mayor"; got != want {
+		t.Errorf("city V2 agent name = %q, want %q", got, want)
+	}
+	if got := resp.Agents[0].Dir; got != "" {
+		t.Errorf("city V2 agent dir = %q, want empty", got)
+	}
+
+	// Rig-scoped V2: name includes binding, dir stays on Dir so
+	// qualified identity reconstructs as "myrig/gastown.polecat".
+	if got, want := resp.Agents[1].Name, "gastown.polecat"; got != want {
+		t.Errorf("rig V2 agent name = %q, want %q", got, want)
+	}
+	if got, want := resp.Agents[1].Dir, "myrig"; got != want {
+		t.Errorf("rig V2 agent dir = %q, want %q", got, want)
+	}
+
+	// V1 agent: no binding → name passes through unchanged.
+	if got, want := resp.Agents[2].Name, "worker"; got != want {
+		t.Errorf("V1 agent name = %q, want %q", got, want)
+	}
+	if got, want := resp.Agents[2].Dir, "myrig"; got != want {
+		t.Errorf("V1 agent dir = %q, want %q", got, want)
+	}
+}
+
+func TestHandleConfigExplain_V2BindingNameIncludedInAgentName(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cfg.Agents = []config.Agent{
+		{Name: "mayor", BindingName: "gastown", Provider: "claude"},
+	}
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/explain"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+	agents := resp["agents"].([]any)
+	if len(agents) != 1 {
+		t.Fatalf("agents count = %d, want 1", len(agents))
+	}
+	agent0 := agents[0].(map[string]any)
+	if got, want := agent0["name"], "gastown.mayor"; got != want {
+		t.Errorf("explain agent name = %q, want %q", got, want)
+	}
+}
+
 func TestHandleConfigExplain_PackDerivedAgent(t *testing.T) {
 	fs := newFakeState(t)
 	// Simulate pack-derived agent: present in expanded config (cfg) but
@@ -238,11 +327,11 @@ func TestHandleConfigExplain_PackDerivedAgent(t *testing.T) {
 			{Name: "myrig", Path: "/tmp/myrig"},
 		},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/config/explain", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/config/explain"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)

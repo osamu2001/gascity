@@ -64,6 +64,9 @@ func TestCityStatusWithAgents(t *testing.T) {
 	}
 	out := stdout.String()
 
+	if !strings.Contains(out, "/home/user/city") {
+		t.Errorf("stdout missing city path, got:\n%s", out)
+	}
 	if !strings.Contains(out, "Agents:") {
 		t.Errorf("stdout missing 'Agents:', got:\n%s", out)
 	}
@@ -123,9 +126,9 @@ func TestCityStatusPoolExpansion(t *testing.T) {
 	}
 	out := stdout.String()
 
-	// Pool header line.
-	if !strings.Contains(out, "pool (min=1, max=3)") {
-		t.Errorf("stdout missing pool header, got:\n%s", out)
+	// Scaled header line.
+	if !strings.Contains(out, "scaled (min=1, max=3)") {
+		t.Errorf("stdout missing scaled header, got:\n%s", out)
 	}
 	// Instance lines.
 	if !strings.Contains(out, "polecat-1") {
@@ -269,18 +272,15 @@ func TestCityStatusJSONWithAgents(t *testing.T) {
 		t.Error("agents[0].pool should be nil for singleton")
 	}
 
-	// Second agent: polecat-1 (pool, not running).
+	// Second agent: polecat-1 (scaled, not running).
 	if status.Agents[1].QualifiedName != "myrig/polecat-1" {
 		t.Errorf("agents[1].qualified_name = %q, want %q", status.Agents[1].QualifiedName, "myrig/polecat-1")
 	}
 	if status.Agents[1].Scope != "rig" {
 		t.Errorf("agents[1].scope = %q, want %q", status.Agents[1].Scope, "rig")
 	}
-	if status.Agents[1].Pool == nil {
-		t.Fatal("agents[1].pool should not be nil")
-	}
-	if status.Agents[1].Pool.Max != 3 {
-		t.Errorf("agents[1].pool.max = %d, want 3", status.Agents[1].Pool.Max)
+	if status.Agents[1].Pool != nil {
+		t.Fatal("agents[1].pool should be nil for scaled session output")
 	}
 
 	// Rigs.
@@ -317,104 +317,17 @@ func TestCityStatusAgentSuspendedByRig(t *testing.T) {
 	}
 }
 
-func TestCityStatusHalted(t *testing.T) {
-	sp := runtime.NewFake()
-	dops := newFakeDrainOps()
-	cityPath := t.TempDir()
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "city", MaxActiveSessions: intPtr(1)},
-		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
-	}
-
-	// Write halt file so isCityHalted returns true.
-	if err := writeHaltFile(cityPath); err != nil {
-		t.Fatalf("writeHaltFile: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, cityPath, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0", code)
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "Halted:     yes") {
-		t.Errorf("stdout missing 'Halted:     yes', got:\n%s", out)
-	}
-}
-
-func TestCityStatusNotHalted(t *testing.T) {
-	sp := runtime.NewFake()
-	dops := newFakeDrainOps()
-	cityPath := t.TempDir()
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "city"},
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, cityPath, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0", code)
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "Halted:     no") {
-		t.Errorf("stdout missing 'Halted:     no', got:\n%s", out)
-	}
-}
-
-func TestCityStatusJSONHalted(t *testing.T) {
-	sp := runtime.NewFake()
-	cityPath := t.TempDir()
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "city"},
-	}
-
-	if err := writeHaltFile(cityPath); err != nil {
-		t.Fatalf("writeHaltFile: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := doCityStatusJSON(sp, cfg, cityPath, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-
-	var status StatusJSON
-	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
-		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
-	}
-	if !status.Halted {
-		t.Error("halted should be true")
-	}
-}
-
-func TestCityStatusJSONNotHalted(t *testing.T) {
-	sp := runtime.NewFake()
-	cityPath := t.TempDir()
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "city"},
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := doCityStatusJSON(sp, cfg, cityPath, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
-	}
-
-	var status StatusJSON
-	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
-		t.Fatalf("unmarshal: %v; output: %s", err, stdout.String())
-	}
-	if status.Halted {
-		t.Error("halted should be false")
-	}
-}
-
 func TestControllerStatusLine(t *testing.T) {
 	tests := []struct {
 		name string
 		ctrl ControllerJSON
 		want string
 	}{
+		{
+			name: "standalone running",
+			ctrl: ControllerJSON{Mode: "standalone", PID: 1234, Running: true},
+			want: "standalone-managed (PID 1234)",
+		},
 		{
 			name: "supervisor not running",
 			ctrl: ControllerJSON{Mode: "supervisor"},
@@ -423,22 +336,22 @@ func TestControllerStatusLine(t *testing.T) {
 		{
 			name: "supervisor city stopped",
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321},
-			want: "supervisor (PID 4321, city stopped)",
+			want: "supervisor-managed (PID 4321, city stopped)",
 		},
 		{
 			name: "supervisor city starting bead store",
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Status: "starting_bead_store"},
-			want: "supervisor (PID 4321, starting bead store)",
+			want: "supervisor-managed (PID 4321, starting bead store)",
 		},
 		{
 			name: "supervisor city init failed",
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Status: "init_failed"},
-			want: "supervisor (PID 4321, init failed)",
+			want: "supervisor-managed (PID 4321, init failed)",
 		},
 		{
 			name: "supervisor running",
 			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Running: true},
-			want: "supervisor (PID 4321)",
+			want: "supervisor-managed (PID 4321)",
 		},
 	}
 
@@ -446,6 +359,81 @@ func TestControllerStatusLine(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := controllerStatusLine(tt.ctrl); got != tt.want {
 				t.Fatalf("controllerStatusLine(%+v) = %q, want %q", tt.ctrl, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestControllerStatusGuidance(t *testing.T) {
+	tests := []struct {
+		name string
+		ctrl ControllerJSON
+		want []string
+	}{
+		{
+			name: "standalone running",
+			ctrl: ControllerJSON{Mode: "standalone", PID: 1234, Running: true},
+			want: []string{
+				"Authority: standalone controller PID 1234",
+				"Next: gc stop /tmp/city && gc start /tmp/city to hand ownership to the supervisor",
+			},
+		},
+		{
+			name: "supervisor registered but down",
+			ctrl: ControllerJSON{Mode: "supervisor"},
+			want: []string{
+				"Authority: supervisor registry; no supervisor process is running",
+				"Next: gc start /tmp/city to start the supervisor and reconcile this city",
+			},
+		},
+		{
+			name: "supervisor city stopped",
+			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321},
+			want: []string{
+				"Authority: supervisor process PID 4321",
+				"Next: gc start /tmp/city to ask the supervisor to start this city",
+			},
+		},
+		{
+			name: "supervisor starting",
+			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Status: "starting_bead_store"},
+			want: []string{
+				"Authority: supervisor process PID 4321",
+				"Next: gc supervisor logs to inspect startup progress",
+			},
+		},
+		{
+			name: "supervisor init failed",
+			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Status: "init_failed"},
+			want: []string{
+				"Authority: supervisor process PID 4321",
+				"Next: gc supervisor logs to see the init failure",
+			},
+		},
+		{
+			name: "supervisor running",
+			ctrl: ControllerJSON{Mode: "supervisor", PID: 4321, Running: true},
+			want: []string{
+				"Authority: supervisor process PID 4321",
+			},
+		},
+		{
+			name: "unmanaged stopped",
+			ctrl: ControllerJSON{},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := controllerStatusGuidance(tt.ctrl, "/tmp/city")
+			if len(got) != len(tt.want) {
+				t.Fatalf("controllerStatusGuidance length = %d, want %d; got %#v", len(got), len(tt.want), got)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("controllerStatusGuidance[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
 			}
 		})
 	}

@@ -27,30 +27,33 @@ gc [flags]
 | [gc config](#gc-config) | Inspect and validate city configuration |
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
-| [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the city |
+| [gc dashboard](#gc-dashboard) | Web dashboard for monitoring the supervisor and managed cities |
 | [gc doctor](#gc-doctor) | Check workspace health |
 | [gc event](#gc-event) | Event operations |
-| [gc events](#gc-events) | Show the event log |
+| [gc events](#gc-events) | Show events from the GC API |
 | [gc formula](#gc-formula) | Manage and inspect formulas |
 | [gc graph](#gc-graph) | Show dependency graph for beads |
 | [gc handoff](#gc-handoff) | Send handoff mail and restart this session |
 | [gc help](#gc-help) | Help about any command |
 | [gc hook](#gc-hook) | Check for available work (use --inject for Stop hook output) |
+| [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
+| [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
+| [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
 | [gc resume](#gc-resume) | Resume a suspended city |
 | [gc rig](#gc-rig) | Manage rigs (projects) |
 | [gc runtime](#gc-runtime) | Process-intrinsic runtime operations |
 | [gc service](#gc-service) | Inspect workspace services |
 | [gc session](#gc-session) | Manage interactive chat sessions |
-| [gc skill](#gc-skill) | Show command reference for a topic |
-| [gc sling](#gc-sling) | Route work to an agent or pool |
+| [gc skill](#gc-skill) | List visible skills |
+| [gc sling](#gc-sling) | Route work to a session config or agent |
 | [gc start](#gc-start) | Start the city under the machine-wide supervisor |
 | [gc status](#gc-status) | Show city-wide status overview |
 | [gc stop](#gc-stop) | Stop all agent sessions in the city |
@@ -74,17 +77,22 @@ gc agent
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc agent add](#gc-agent-add) | Add an agent to the workspace |
+| [gc agent add](#gc-agent-add) | Add an agent scaffold |
 | [gc agent resume](#gc-agent-resume) | Resume a suspended agent |
 | [gc agent suspend](#gc-agent-suspend) | Suspend an agent (reconciler will skip it) |
 
 ## gc agent add
 
-Add a new agent to the workspace configuration.
+Add a new agent scaffold under agents/&lt;name&gt;/.
 
-Appends an [[agent]] block to city.toml. The agent will be started
-on the next "gc start" or controller reconcile tick. Use --dir to
-scope the agent to a rig's working directory.
+Creates agents/&lt;name&gt;/prompt.template.md and, when needed,
+agents/&lt;name&gt;/agent.toml. These files live in the city directory and do
+not append [[agent]] blocks to city.toml.
+
+Use --prompt-template to copy prompt content from an existing file into
+the canonical prompt.template.md location. Use --dir to record a rig or
+working-directory prefix in agent.toml. Use --suspended to scaffold the
+agent in a suspended state.
 
 ```
 gc agent add --name <name> [flags]
@@ -95,7 +103,7 @@ gc agent add --name <name> [flags]
 ```
 gc agent add --name mayor
   gc agent add --name polecat --dir my-project
-  gc agent add --name worker --prompt-template prompts/worker.md --suspended
+  gc agent add --name worker --prompt-template ./worker.md --suspended
 ```
 
 | Flag | Type | Default | Description |
@@ -107,7 +115,7 @@ gc agent add --name mayor
 
 ## gc agent resume
 
-Resume a suspended agent by clearing suspended in city.toml.
+Resume a suspended agent by clearing suspended in its durable config.
 
 The reconciler will start the agent on its next tick. Supports bare
 names (resolved via rig context) and qualified names (e.g. "myrig/worker").
@@ -118,7 +126,7 @@ gc agent resume <name>
 
 ## gc agent suspend
 
-Suspend an agent by setting suspended=true in city.toml.
+Suspend an agent by setting suspended=true in its durable config.
 
 Suspended agents are skipped by the reconciler — their sessions are not
 started or restarted. Existing sessions continue running but won't be
@@ -156,7 +164,7 @@ gc bd --rig my-project list
 
 Manage the beads provider (backing store for issue tracking).
 
-Subcommands for health checking and diagnostics.
+Subcommands for topology operations, health checking, and diagnostics.
 
 ```
 gc beads
@@ -164,7 +172,52 @@ gc beads
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
+
+## gc beads city
+
+Manage the canonical city endpoint topology for bd-backed beads stores.
+
+Use use-managed to make the city GC-managed again. Use use-external to pin the
+city to an external Dolt endpoint and rewrite inherited rig mirrors.
+
+```
+gc beads city
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc beads city use-external](#gc-beads-city-use-external) | Set the city endpoint to an external Dolt server |
+| [gc beads city use-managed](#gc-beads-city-use-managed) | Set the city endpoint to GC-managed |
+
+## gc beads city use-external
+
+Set the city endpoint to an external Dolt server
+
+```
+gc beads city use-external [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--adopt-unverified` | bool |  | record the endpoint without live validation |
+| `--dry-run` | bool |  | show the canonical changes without writing files |
+| `--host` | string |  | external Dolt host |
+| `--port` | string |  | external Dolt port |
+| `--user` | string |  | external Dolt user |
+
+## gc beads city use-managed
+
+Set the city endpoint to GC-managed
+
+```
+gc beads city use-managed [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | show the canonical changes without writing files |
 
 ## gc beads health
 
@@ -237,6 +290,18 @@ List all cities registered with the machine-wide supervisor.
 
 ```
 gc cities
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc cities list](#gc-cities-list) | List registered cities |
+
+## gc cities list
+
+List registered cities
+
+```
+gc cities list
 ```
 
 ## gc config
@@ -446,8 +511,10 @@ gc convoy
 | [gc convoy control](#gc-convoy-control) | Execute control beads or run the control-dispatcher loop |
 | [gc convoy create](#gc-convoy-create) | Create a convoy and optionally track issues |
 | [gc convoy delete](#gc-convoy-delete) | Close and optionally delete a convoy and all its beads |
+| [gc convoy delete-source](#gc-convoy-delete-source) | Close workflows sourced from a bead |
 | [gc convoy land](#gc-convoy-land) | Land an owned convoy (terminate + cleanup) |
 | [gc convoy list](#gc-convoy-list) | List open convoys with progress |
+| [gc convoy reopen-source](#gc-convoy-reopen-source) | Reopen a source bead after workflow cleanup |
 | [gc convoy status](#gc-convoy-status) | Show detailed convoy status |
 | [gc convoy stranded](#gc-convoy-stranded) | Find convoys with ready work but no workers |
 | [gc convoy target](#gc-convoy-target) | Set the target branch on a convoy |
@@ -536,7 +603,7 @@ Searches all stores (city + rigs) for the convoy root and all beads
 with matching gc.root_bead_id. Without --force, shows a preview.
 
 By default, beads are closed with gc.outcome=skipped. Use --delete to
-also remove them from the store via bd delete --force.
+also remove them from the store after closing.
 
 ```
 gc convoy delete <convoy-id> [flags]
@@ -546,6 +613,23 @@ gc convoy delete <convoy-id> [flags]
 |------|------|---------|-------------|
 | `--delete` | bool |  | Also delete beads from the store after closing |
 | `-f`, `--force` | bool |  | Actually close/delete (without this, shows preview) |
+
+## gc convoy delete-source
+
+Find every live workflow root sourced from the given bead and close
+its subtree. By default this is a preview. Use --apply to mutate.
+Use --delete with --apply to also delete closed beads.
+
+```
+gc convoy delete-source <source-bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--apply` | bool |  | Actually close/delete matched workflows |
+| `--delete` | bool |  | Also delete beads from the store after closing |
+| `--rig` | string |  | Select the rig store for the source bead |
+| `--store-ref` | string |  | Select the source bead store (city:&lt;name&gt; or rig:&lt;name&gt;) |
 
 ## gc convoy land
 
@@ -583,6 +667,19 @@ child issues.
 gc convoy list
 ```
 
+## gc convoy reopen-source
+
+Reopen a source bead after workflow cleanup
+
+```
+gc convoy reopen-source <source-bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--rig` | string |  | Select the rig store for the source bead |
+| `--store-ref` | string |  | Select the source bead store (city:&lt;name&gt; or rig:&lt;name&gt;) |
+
 ## gc convoy status
 
 Show detailed status of a convoy and all its child issues.
@@ -618,7 +715,11 @@ gc convoy target <convoy-id> <branch>
 
 ## gc dashboard
 
-Web dashboard for monitoring the city
+Open the static GC dashboard against the machine-wide supervisor API.
+
+Without a city in scope, the dashboard shows supervisor-level state and managed
+city tabs. From a city directory or with --city, city-specific panels and action
+forms are enabled for that city.
 
 ```
 gc dashboard [flags]
@@ -635,7 +736,11 @@ gc dashboard [flags]
 
 ## gc dashboard serve
 
-Start the web dashboard
+Start the static GC dashboard against the machine-wide supervisor API.
+
+Without a city in scope, the dashboard shows supervisor-level state and managed
+city tabs. From a city directory or with --city, city-specific panels and action
+forms are enabled for that city.
 
 ```
 gc dashboard serve [flags]
@@ -704,12 +809,15 @@ gc event emit <type> [flags]
 
 ## gc events
 
-Show the city event log with optional filtering.
+Show events from the GC API with optional filtering.
 
-Events are recorded to .gc/events.jsonl by the controller, agent
-lifecycle operations, and bead mutations. Use --type and --since to
-filter. Use --watch to block until matching events arrive (useful for
-scripting and automation).
+The API is the source of truth for both city-scoped and supervisor-scoped
+events. In a city directory (or with --city), this command reflects the
+city's /v0/city/&#123;cityName&#125;/events and /stream endpoints. Without a city in
+scope, it reflects the supervisor's /v0/events and /stream endpoints.
+
+List, watch, and follow output are always JSON Lines. Each line is one API
+DTO or SSE envelope.
 
 ```
 gc events [flags]
@@ -723,19 +831,21 @@ gc events
   gc events --watch --type convoy.closed --timeout 5m
   gc events --follow
   gc events --seq
+  gc events --follow --after-cursor city-a:12,city-b:9
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--after` | uint64 |  | Resume watching from this sequence number (0 = current head) |
+| `--after` | uint64 |  | Resume from this city event sequence number (city scope only) |
+| `--after-cursor` | string |  | Resume from this supervisor event cursor (supervisor scope only) |
+| `--api` | string |  | GC API server URL override (auto-discovered by default) |
 | `--follow` | bool |  | Continuously stream events as they arrive |
-| `--json` | bool |  | Output in JSON format (list mode only) |
 | `--payload-match` | stringArray |  | Filter by payload field (key=value, repeatable) |
-| `--seq` | bool |  | Print the current head sequence number and exit |
+| `--seq` | bool |  | Print the current head cursor and exit |
 | `--since` | string |  | Show events since duration ago (e.g. 1h, 30m) |
 | `--timeout` | string | `30s` | Max wait duration for --watch (e.g. 30s, 5m) |
 | `--type` | string |  | Filter by event type (e.g. bead.created) |
-| `--watch` | bool |  | Block until matching events arrive (exits after first match) |
+| `--watch` | bool |  | Block until matching events arrive (exits after first match or buffered replay) |
 
 ## gc formula
 
@@ -878,7 +988,7 @@ Checks for available work using the agent's work_query config.
 Without --inject: prints raw output, exits 0 if work exists, 1 if empty.
 With --inject: wraps output in &lt;system-reminder&gt; for hook injection, always exits 0.
 
-The agent is determined from $GC_AGENT or a positional argument.
+		The agent is determined from $GC_AGENT or a positional argument.
 
 ```
 gc hook [agent] [flags]
@@ -886,17 +996,100 @@ gc hook [agent] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--hook-format` | string |  | format hook output for a provider |
 | `--inject` | bool |  | output &lt;system-reminder&gt; block for hook injection |
+
+## gc import
+
+Manage pack imports
+
+```
+gc import
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc import add](#gc-import-add) | Add a pack import |
+| [gc import install](#gc-import-install) | Install imports from packs.lock |
+| [gc import list](#gc-import-list) | List imported packs |
+| [gc import migrate](#gc-import-migrate) | Migrate a V1 city layout to the V2 pack shape |
+| [gc import remove](#gc-import-remove) | Remove a pack import |
+| [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
+
+## gc import add
+
+Add a pack import
+
+```
+gc import add <source> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--name` | string |  | Local binding name override |
+| `--version` | string |  | Version constraint for git-backed imports |
+
+## gc import install
+
+Install imports from packs.lock
+
+```
+gc import install
+```
+
+## gc import list
+
+List imported packs
+
+```
+gc import list [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--tree` | bool |  | Show the import dependency tree |
+
+## gc import migrate
+
+Rewrite a legacy city into the V2 migration shape.
+
+Moves workspace.includes into pack imports, converts [[agent]] tables
+into agents/&lt;name&gt;/ directories, and stages prompt/overlay/namepool
+assets into their V2 locations.
+
+```
+gc import migrate [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | print what would change without writing |
+
+## gc import remove
+
+Remove a pack import
+
+```
+gc import remove <name>
+```
+
+## gc import upgrade
+
+Upgrade imported packs within their constraints
+
+```
+gc import upgrade [name]
+```
 
 ## gc init
 
 Create a new Gas City workspace in the given directory (or cwd).
 
 Runs an interactive wizard to choose a config template and coding agent
-provider. Creates the .gc/ runtime directory, default
-prompts and formulas, and writes city.toml. Use --provider to create the
-default mayor city non-interactively, or --file to initialize from an
-existing TOML config file.
+provider. Creates the .gc/ runtime directory plus pack.toml, city.toml,
+the standard top-level directories, and .template.md prompt templates, then
+writes the default formulas. Use --provider to create the default mayor city
+non-interactively, or --file to initialize from an existing TOML config file.
 
 ```
 gc init [path] [flags]
@@ -984,6 +1177,7 @@ gc mail check
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--hook-format` | string |  | format hook output for a provider |
 | `--inject` | bool |  | output &lt;system-reminder&gt; block for hook injection |
 
 ## gc mail count
@@ -1113,6 +1307,35 @@ Show all messages sharing a thread ID, ordered by time.
 gc mail thread <thread-id>
 ```
 
+## gc mcp
+
+Inspect the projected MCP catalog for a concrete target.
+
+Projected MCP is target-specific. Use "gc mcp list --agent &lt;name&gt;" when
+the agent has a single deterministic projection target from config, or
+"gc mcp list --session &lt;id&gt;" for a live session target.
+
+```
+gc mcp
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc mcp list](#gc-mcp-list) | Show projected MCP servers |
+
+## gc mcp list
+
+Show the precedence-resolved MCP servers that Gas City would project into the provider-native config for one agent or session target.
+
+```
+gc mcp list [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--agent` | string |  | show the projected MCP config for this agent |
+| `--session` | string |  | show the projected MCP config for this session |
+
 ## gc nudge
 
 Inspect and deliver deferred nudges.
@@ -1142,7 +1365,7 @@ gc nudge status [session]
 
 Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in orders/NAME/order.toml files. Each order pairs a gate
+Orders live in flat orders/*.toml files. Each order pairs a gate
 condition (cooldown, cron, condition, event, or manual) with an action
 (a formula or an exec script). The controller evaluates gates on each
 tick and dispatches work when a gate opens.
@@ -1189,7 +1412,7 @@ gc order history [name] [flags]
 
 List all available orders with their gate type, schedule, and target.
 
-Scans orders/ directories for order.toml files defining gate conditions,
+Scans orders/ directories for flat .toml files defining gate conditions,
 scheduling parameters, and target pools.
 
 ```
@@ -1290,18 +1513,45 @@ gc prime [agent-name] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--hook` | bool |  | compatibility mode for runtime hook invocations |
+| `--hook-format` | string |  | format hook output for a provider |
 
 ## gc register
 
 Register a city directory with the machine-wide supervisor.
 
 If no path is given, registers the current city (discovered from cwd).
+Use --name to set the machine-local registration alias. The alias is stored
+in the machine-local supervisor registry and never written back to city.toml.
+When --name is omitted, workspace.name is used if present, otherwise
+[pack].name is used — in either case city.toml is not modified.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.
 
 ```
-gc register [path]
+gc register [path] [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--name` | string |  | machine-local alias for this city registration |
+
+## gc reload
+
+Force the current city controller to re-read effective config and
+process one reload tick without restarting the city/controller.
+
+Reload may fetch configured remote packs before recomputing effective
+config. Existing per-session restarts may still happen if normal config
+drift rules require them.
+
+```
+gc reload [path] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--async` | bool |  | Return after the controller accepts the reload request |
+| `--timeout` | string | `5m` | How long to wait for reload completion |
 
 ## gc restart
 
@@ -1347,6 +1597,7 @@ gc rig
 | [gc rig remove](#gc-rig-remove) | Remove a rig from the city |
 | [gc rig restart](#gc-rig-restart) | Restart all agents in a rig |
 | [gc rig resume](#gc-rig-resume) | Resume a suspended rig |
+| [gc rig set-endpoint](#gc-rig-set-endpoint) | Set the canonical endpoint ownership for a rig |
 | [gc rig status](#gc-rig-status) | Show rig status and agent running state |
 | [gc rig suspend](#gc-rig-suspend) | Suspend a rig (reconciler will skip its agents) |
 
@@ -1357,12 +1608,17 @@ Register an external project directory as a rig.
 Initializes beads database, installs agent hooks if configured,
 generates cross-rig routes, and appends the rig to city.toml.
 If the target directory doesn't exist, it is created. Use --include
-to apply a pack directory that defines the rig's agent configuration.
+to apply a pack directory that defines the rig's agent configuration;
+repeat the flag to compose multiple packs for one rig.
 
 Use --name to set the rig name explicitly (default: directory basename).
 Use --prefix to set the bead ID prefix explicitly (default: derived from name).
 Use --start-suspended to add the rig in a suspended state (dormant-by-default).
 The rig's agents won't spawn until explicitly resumed with "gc rig resume".
+
+Use --adopt to register a directory that already has a fully initialized
+.beads/ directory (must include both metadata.json and config.yaml).
+Skips beads init; the git repo check remains informational.
 
 ```
 gc rig add <path> [flags]
@@ -1375,12 +1631,15 @@ gc rig add /path/to/project
   gc rig add /path/to/project --name myrig
   gc rig add /path/to/project --prefix r1
   gc rig add ./my-project --include packs/gastown
+  gc rig add ./my-project --include packs/planner --include packs/architect
   gc rig add ./my-project --include packs/gastown --start-suspended
+  gc rig add /path/to/existing --adopt
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--include` | string |  | pack directory for rig agents |
+| `--adopt` | bool |  | adopt existing .beads/ directory (skip init) |
+| `--include` | stringArray |  | pack directory for rig agents (repeatable) |
 | `--name` | string |  | rig name (default: directory basename) |
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
 | `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |
@@ -1463,6 +1722,38 @@ The reconciler will start the rig's agents on its next tick.
 ```
 gc rig resume [name]
 ```
+
+## gc rig set-endpoint
+
+Set the canonical endpoint ownership for a rig.
+
+Use --inherit to make a rig derive its endpoint from the current city
+topology. Use --external to pin the rig to its own external Dolt endpoint.
+
+This command owns the rig's canonical .beads/config.yaml topology state.
+
+```
+gc rig set-endpoint <rig> [flags]
+```
+
+**Example:**
+
+```
+gc rig set-endpoint frontend --inherit
+  gc rig set-endpoint frontend --external --host db.example.com --port 3307
+  gc rig set-endpoint frontend --external --host db.example.com --port 3307 --user agent --adopt-unverified
+  gc rig set-endpoint frontend --inherit --dry-run
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--adopt-unverified` | bool |  | record the endpoint without live validation |
+| `--dry-run` | bool |  | show the canonical changes without writing files |
+| `--external` | bool |  | set an explicit external endpoint for the rig |
+| `--host` | string |  | external Dolt host |
+| `--inherit` | bool |  | inherit the city endpoint |
+| `--port` | string |  | external Dolt port |
+| `--user` | string |  | external Dolt user |
 
 ## gc rig status
 
@@ -1631,13 +1922,15 @@ gc session
 | [gc session new](#gc-session-new) | Create a new chat session from an agent template |
 | [gc session nudge](#gc-session-nudge) | Send a text message to a running session |
 | [gc session peek](#gc-session-peek) | View session output without attaching |
+| [gc session pin](#gc-session-pin) | Keep a session awake |
 | [gc session prune](#gc-session-prune) | Close old suspended sessions |
 | [gc session rename](#gc-session-rename) | Rename a session |
 | [gc session reset](#gc-session-reset) | Restart a session fresh while preserving the bead |
 | [gc session submit](#gc-session-submit) | Submit a message with semantic delivery intent |
 | [gc session suspend](#gc-session-suspend) | Suspend a session (save state, free resources) |
+| [gc session unpin](#gc-session-unpin) | Remove a session awake pin |
 | [gc session wait](#gc-session-wait) | Register a dependency wait for a session |
-| [gc session wake](#gc-session-wake) | Wake a session (clear hold and quarantine) |
+| [gc session wake](#gc-session-wake) | Wake a session (request start and clear holds) |
 
 ## gc session attach
 
@@ -1721,8 +2014,9 @@ gc session logs mayor
 
 ## gc session new
 
-Create a new persistent conversation from an agent template defined in
-city.toml. By default, attaches the terminal after creation.
+Create a new persistent conversation from an agent template defined
+in the loaded city configuration. By default, attaches the terminal
+after creation.
 
 When --title-hint is provided without --title, the session title is
 auto-generated from the hint text: a short version is set immediately
@@ -1778,6 +2072,18 @@ gc session peek <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--lines` | int | `50` | number of lines to capture |
+
+## gc session pin
+
+Keep a session awake by setting its durable pin override.
+
+Pinning does not clear suspend holds or other hard blockers. If the target is
+a configured named session that has not been materialized yet, pin creates its
+canonical bead so the reconciler can start it when unblocked.
+
+```
+gc session pin <session-id-or-alias>
+```
 
 ## gc session prune
 
@@ -1855,6 +2161,17 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 gc session suspend <session-id-or-alias>
 ```
 
+## gc session unpin
+
+Remove only the durable pin override from a session.
+
+Unpinning does not force an immediate stop. The reconciler will apply the
+normal wake/sleep rules on its next pass.
+
+```
+gc session unpin <session-id-or-alias>
+```
+
 ## gc session wait
 
 Register a dependency wait for a session
@@ -1872,7 +2189,7 @@ gc session wait [session-id-or-alias] [flags]
 
 ## gc session wake
 
-Release a user hold and/or crash-loop quarantine on a session.
+Request wake for a session and release user hold or crash-loop quarantine metadata.
 
 After waking, the reconciler will start the session on its next tick
 if it has wake reasons (e.g., a matching config agent). If the session
@@ -1893,26 +2210,45 @@ gc session wake gc-42
 
 ## gc skill
 
-Show curated command reference for a Gas City topic.
+List skills visible to the current city.
 
-Without arguments, lists available topics. With a topic name,
-prints the full command reference for that topic.
+Output includes:
+  - City pack skills (skills/&lt;name&gt;/SKILL.md under the city root)
+  - Imported pack shared skills (binding-qualified, e.g. ops.code-review)
+  - Bootstrap implicit-import pack skills (e.g. core)
+  - With --agent/--session: that agent's agents/&lt;name&gt;/skills/ catalog
+
+The listing is a diagnostic view of what's *available*. It does not
+collapse precedence, filter to agents whose provider has a vendor
+sink, or predict exactly which entries the materializer will pick on
+name collision. For the materialized set, inspect the
+&lt;scope-root&gt;/.&lt;vendor&gt;/skills/ sink after "gc start" or run
+"gc doctor" to surface collisions.
 
 ```
-gc skill [topic]
+gc skill
 ```
 
-**Example:**
+| Subcommand | Description |
+|------------|-------------|
+| [gc skill list](#gc-skill-list) | List visible skills |
+
+## gc skill list
+
+List the current shared and agent-local visible skills, optionally scoped to an agent or session.
 
 ```
-gc skill work       # beads command reference
-  gc skill dispatch   # sling and formula reference
-  gc skill            # list all topics
+gc skill list [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--agent` | string |  | show the effective skill view for this agent |
+| `--session` | string |  | show the effective skill view for this session |
 
 ## gc sling
 
-Route a bead to an agent or pool using the target's sling_query.
+Route a bead to a session config or agent using the target's sling_query.
 
 The target is an agent qualified name (e.g. "mayor" or "hello-world/polecat").
 The second argument is a bead ID, a formula name when --formula is set, or
@@ -2096,9 +2432,21 @@ gc supervisor status
 
 Stop the running machine-wide supervisor and all its cities.
 
+By default, returns as soon as the supervisor acknowledges the stop
+request — shutdown continues asynchronously. Pass --wait to block
+until the supervisor socket is no longer answering, which is what
+most callers that need deterministic cleanup want (e.g., integration
+tests that then expect to remove temp directories without racing
+against lingering supervisor / controller subprocesses).
+
 ```
-gc supervisor stop
+gc supervisor stop [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--wait` | bool |  | Wait for the supervisor to finish stopping all managed cities and release its socket before returning |
+| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set |
 
 ## gc supervisor uninstall
 
@@ -2311,4 +2659,3 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
-

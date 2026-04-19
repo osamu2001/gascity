@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -80,8 +81,8 @@ func setupCity(t *testing.T, guard *tmuxtest.Guard, agents []agentConfig) string
 	// Register cleanup: gc stop on test end.
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
-		runGCWithEnv(env, "", "stop", cityDir)      //nolint:errcheck // best-effort cleanup
-		runGCWithEnv(env, "", "supervisor", "stop") //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
 	})
 
 	// Give sessions a moment to register.
@@ -105,6 +106,97 @@ func setupRunningCity(t *testing.T, guard *tmuxtest.Guard) string {
 	return setupCity(t, guard, []agentConfig{
 		{Name: "mayor", StartCommand: "sleep 3600"},
 	})
+}
+
+func initCityWithManagedDoltRecovery(t *testing.T, env []string, configPath, cityDir string) {
+	t.Helper()
+
+	var (
+		out          string
+		err          error
+		sawTransient bool
+	)
+	for attempt := 1; attempt <= 2; attempt++ {
+		out, err = runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+		if err == nil {
+			return
+		}
+
+		transient := isTransientManagedDoltInitFailure(out)
+		alreadyInitialized := isAlreadyInitializedGCInitFailure(out)
+		if !transient && !(sawTransient && alreadyInitialized) {
+			t.Fatalf("gc init failed: %v\noutput: %s", err, out)
+		}
+		sawTransient = sawTransient || transient
+
+		if attempt < 2 {
+			t.Logf("retrying gc init after transient managed Dolt startup failure (attempt %d/2)", attempt+1)
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+	}
+
+	startOut, startErr := runGCDoltWithEnv(env, "", "start", cityDir)
+	if startErr != nil && !isGCStartAlreadyRunning(startOut) && !isTransientManagedDoltInitFailure(startOut) {
+		t.Fatalf("gc init failed after transient managed Dolt startup failure: %v\ninit output: %s\ngc start recovery failed: %v\nstart output: %s", err, out, startErr, startOut)
+	}
+	if readyOut, readyErr := waitForManagedDoltCityReady(env, cityDir, 20*time.Second); readyErr == nil {
+		t.Log("recovered partially initialized city after transient managed Dolt startup failure")
+		return
+	} else {
+		t.Fatalf("gc init failed after transient managed Dolt startup failure: %v\ninit output: %s\ngc start recovery failed: %v\nstart output: %s\ncity never became ready: %v\nlast bd output: %s", err, out, startErr, startOut, readyErr, readyOut)
+	}
+}
+
+func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	var (
+		lastOut string
+		lastErr error
+	)
+	for time.Now().Before(deadline) {
+		if port, ok := currentManagedDoltPortForTest(cityDir); ok {
+			probeEnv := filterEnvMany(env,
+				"GC_CITY",
+				"GC_CITY_PATH",
+				"GC_CITY_ROOT",
+				"GC_CITY_RUNTIME_DIR",
+				"GC_DOLT_PORT",
+			)
+			probeEnv = append(probeEnv,
+				"GC_CITY="+cityDir,
+				"GC_CITY_PATH="+cityDir,
+				"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
+				"GC_DOLT_PORT="+port,
+			)
+			lastOut, lastErr = runCommand(cityDir, probeEnv, integrationBDCommandTimeout, bdBinary, "list", "--all", "--json", "--limit=0")
+			if lastErr == nil {
+				return lastOut, nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timed out after %s waiting for managed Dolt city readiness", timeout)
+	}
+	return lastOut, lastErr
+}
+
+func isTransientManagedDoltInitFailure(out string) bool {
+	msg := strings.ToLower(out)
+	return strings.Contains(msg, "dolt server exited during startup") ||
+		strings.Contains(msg, "did not become query-ready after 30s") ||
+		strings.Contains(msg, "supervisor did not become ready") ||
+		strings.Contains(msg, "supervisor did not start") ||
+		strings.Contains(msg, "supervisor stopped before city became ready")
+}
+
+func isAlreadyInitializedGCInitFailure(out string) bool {
+	return strings.Contains(strings.ToLower(out), "already initialized")
+}
+
+func isGCStartAlreadyRunning(out string) bool {
+	return strings.Contains(strings.ToLower(out), "already running")
 }
 
 func agentNames(agents []agentConfig) []string {
@@ -184,7 +276,7 @@ func writeCityToml(t *testing.T, cityDir, cityName, startCommand string) {
 
 // quote returns a TOML-safe quoted string.
 func quote(s string) string {
-	return "\"" + s + "\""
+	return strconv.Quote(s)
 }
 
 func repoRoot(t *testing.T) string {

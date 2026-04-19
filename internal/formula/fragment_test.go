@@ -9,6 +9,10 @@ import (
 )
 
 func TestCompileExpansionFragmentRunsInlineExpansionAndConditionFiltering(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
 	dir := t.TempDir()
 
 	leaf := `
@@ -20,7 +24,7 @@ version = 2
 id = "{target}.draft"
 title = "Draft"
 `
-	if err := os.WriteFile(filepath.Join(dir, "leaf-expand.formula.toml"), []byte(leaf), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "leaf-expand.toml"), []byte(leaf), 0o644); err != nil {
 		t.Fatalf("write leaf expansion: %v", err)
 	}
 
@@ -34,7 +38,7 @@ id = "{target}.worker"
 title = "Worker"
 expand = "leaf-expand"
 `
-	if err := os.WriteFile(filepath.Join(dir, "parent-expand.formula.toml"), []byte(parent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "parent-expand.toml"), []byte(parent), 0o644); err != nil {
 		t.Fatalf("write parent expansion: %v", err)
 	}
 
@@ -116,6 +120,10 @@ func TestApplyFragmentRecipeGraphControlsAddsInheritedScopeChecks(t *testing.T) 
 }
 
 func TestCompileExpansionFragmentValidatesRequiredVars(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
 	dir := t.TempDir()
 
 	expansion := `
@@ -131,7 +139,7 @@ required = true
 id = "{target}.implement"
 title = "[{target.title}] Implement: {{feature}}"
 `
-	if err := os.WriteFile(filepath.Join(dir, "expand-required.formula.toml"), []byte(expansion), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "expand-required.toml"), []byte(expansion), 0o644); err != nil {
 		t.Fatalf("write expansion: %v", err)
 	}
 
@@ -283,6 +291,35 @@ func TestFragmentSinkStepIDsExcludesSpecBeads(t *testing.T) {
 	}
 	if !sawWork {
 		t.Fatal("expected work step in fragment sinks")
+	}
+}
+
+func TestCompileExpansionFragmentFailsWhenFormulaV2Disabled(t *testing.T) {
+	prev := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(false)
+	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+
+	dir := t.TempDir()
+	expansion := `
+formula = "needs-v2-fragment"
+type = "expansion"
+version = 2
+
+[[template]]
+id = "{target}.work"
+title = "Work"
+`
+	if err := os.WriteFile(filepath.Join(dir, "needs-v2-fragment.formula.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion: %v", err)
+	}
+
+	target := &Step{ID: "demo.target", Title: "Target"}
+	_, err := CompileExpansionFragment(context.Background(), "needs-v2-fragment", []string{dir}, target, nil)
+	if err == nil {
+		t.Fatal("CompileExpansionFragment succeeded, want error for v2 expansion with FormulaV2Enabled=false")
+	}
+	if !strings.Contains(err.Error(), "formula_v2") {
+		t.Fatalf("error = %v, want message mentioning formula_v2", err)
 	}
 }
 

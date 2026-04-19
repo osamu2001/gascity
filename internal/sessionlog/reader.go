@@ -28,6 +28,16 @@ type Session struct {
 
 	// Pagination metadata.
 	Pagination *PaginationInfo
+
+	// Diagnostics surfaces parser health for the underlying session file.
+	Diagnostics SessionDiagnostics
+}
+
+// SessionDiagnostics reports non-fatal issues detected while loading a
+// session file.
+type SessionDiagnostics struct {
+	MalformedLineCount int
+	MalformedTail      bool
 }
 
 // PaginationInfo describes the pagination state of a session response.
@@ -37,6 +47,52 @@ type PaginationInfo struct {
 	ReturnedMessageCount   int    `json:"returned_message_count"`
 	TruncatedBeforeMessage string `json:"truncated_before_message,omitempty"`
 	TotalCompactions       int    `json:"total_compactions"`
+}
+
+// RawPayloads decodes each non-empty Entry.Raw into a generic JSON value
+// (map[string]any for objects, []any for arrays, etc.) and returns the
+// slice. Used by API response builders so handlers can emit the
+// provider-native transcript frames as typed `any` fields without
+// touching json.RawMessage in the API layer.
+//
+// Deprecated: prefer RawPayloadBytes when the downstream consumer will
+// marshal-and-ship the result. The Unmarshal→`any`→Marshal round-trip
+// loses int64 precision above 2^53 (tool-call IDs, nanosecond
+// timestamps) and does not preserve map-key order. Kept for the small
+// number of callers that actually consume the decoded form.
+func (s *Session) RawPayloads() []any {
+	out := make([]any, 0, len(s.Messages))
+	for _, entry := range s.Messages {
+		if entry == nil || len(entry.Raw) == 0 {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal(entry.Raw, &v); err != nil {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// RawPayloadBytes returns the raw JSON bytes for each non-empty
+// Entry.Raw. Each returned slice is a defensive copy — callers can
+// append/modify freely without corrupting the underlying Session.
+// Prefer this over RawPayloads when the data is about to be emitted
+// on the wire (SSE streams, API responses), because it preserves
+// byte-identity, int64 precision, and map-key order.
+func (s *Session) RawPayloadBytes() []json.RawMessage {
+	out := make([]json.RawMessage, 0, len(s.Messages))
+	for _, entry := range s.Messages {
+		if entry == nil || len(entry.Raw) == 0 {
+			continue
+		}
+		if !json.Valid(entry.Raw) {
+			continue
+		}
+		out = append(out, append(json.RawMessage(nil), entry.Raw...))
+	}
+	return out
 }
 
 // displayTypes are entry types included in the display output.
@@ -52,7 +108,7 @@ var displayTypes = map[string]bool{
 // entries. Returns the most recent tailCompactions worth of messages
 // (0 = all messages).
 func ReadFile(path string, tailCompactions int) (*Session, error) {
-	entries, err := parseFile(path)
+	entries, diagnostics, err := parseFileDetailed(path)
 	if err != nil {
 		return nil, err
 	}
@@ -76,6 +132,7 @@ func ReadFile(path string, tailCompactions int) (*Session, error) {
 		Messages:           messages,
 		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
 		HasBranches:        dag.HasBranches,
+		Diagnostics:        diagnostics,
 	}
 
 	// Apply compact-boundary pagination.
@@ -104,7 +161,7 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 // All DAG-resolved entries are returned, preserving tool_use, progress,
 // and other non-display types. Used by the raw transcript API.
 func ReadFileRaw(path string, tailCompactions int) (*Session, error) {
-	entries, err := parseFile(path)
+	entries, diagnostics, err := parseFileDetailed(path)
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +177,7 @@ func ReadFileRaw(path string, tailCompactions int) (*Session, error) {
 		Messages:           messages,
 		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
 		HasBranches:        dag.HasBranches,
+		Diagnostics:        diagnostics,
 	}
 
 	if tailCompactions > 0 {
@@ -149,7 +207,7 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 // ReadFileOlder loads older messages before a cursor, returning the
 // previous tailCompactions segment.
 func ReadFileOlder(path string, tailCompactions int, beforeMessageID string) (*Session, error) {
-	entries, err := parseFile(path)
+	entries, diagnostics, err := parseFileDetailed(path)
 	if err != nil {
 		return nil, err
 	}
@@ -174,12 +232,13 @@ func ReadFileOlder(path string, tailCompactions int, beforeMessageID string) (*S
 		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
 		HasBranches:        dag.HasBranches,
 		Pagination:         info,
+		Diagnostics:        diagnostics,
 	}, nil
 }
 
 // ReadFileRawOlder loads older raw (unfiltered) messages before a cursor.
 func ReadFileRawOlder(path string, tailCompactions int, beforeMessageID string) (*Session, error) {
-	entries, err := parseFile(path)
+	entries, diagnostics, err := parseFileDetailed(path)
 	if err != nil {
 		return nil, err
 	}
@@ -198,6 +257,7 @@ func ReadFileRawOlder(path string, tailCompactions int, beforeMessageID string) 
 		OrphanedToolUseIDs: dag.OrphanedToolUseIDs,
 		HasBranches:        dag.HasBranches,
 		Pagination:         info,
+		Diagnostics:        diagnostics,
 	}, nil
 }
 
@@ -231,13 +291,22 @@ func ReadProviderFileRawOlder(provider, path string, tailCompactions int, before
 
 // parseFile reads all JSONL lines from a file into entries.
 func parseFile(path string) ([]*Entry, error) {
+	entries, _, err := parseFileDetailed(path)
+	return entries, err
+}
+
+// parseFileDetailed reads all JSONL lines from a file into entries and
+// returns load diagnostics for malformed lines and torn tails.
+func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("opening session file: %w", err)
+		return nil, SessionDiagnostics{}, fmt.Errorf("opening session file: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
 	var entries []*Entry
+	var diagnostics SessionDiagnostics
+	var lastNonEmptyLineMalformed bool
 	scanner := bufio.NewScanner(f)
 	// Default scanner buffer is 64KB; Claude entries can be large
 	// (tool results with full file contents, base64 images, etc.).
@@ -251,8 +320,11 @@ func parseFile(path string) ([]*Entry, error) {
 		}
 		var e Entry
 		if err := json.Unmarshal(line, &e); err != nil {
+			diagnostics.MalformedLineCount++
+			lastNonEmptyLineMalformed = true
 			continue // skip malformed lines
 		}
+		lastNonEmptyLineMalformed = false
 		// Preserve the raw JSON for API pass-through.
 		raw := make([]byte, len(line))
 		copy(raw, line)
@@ -260,10 +332,11 @@ func parseFile(path string) ([]*Entry, error) {
 		entries = append(entries, &e)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scanning session file: %w", err)
+		return nil, SessionDiagnostics{}, fmt.Errorf("scanning session file: %w", err)
 	}
 
-	return entries, nil
+	diagnostics.MalformedTail = lastNonEmptyLineMalformed
+	return entries, diagnostics, nil
 }
 
 // sliceAtCompactBoundaries returns the tail portion of messages starting
@@ -356,6 +429,21 @@ func FindSessionFileForProvider(searchPaths []string, provider, workDir string) 
 	}
 }
 
+// FindProviderFallbackSessionFile resolves the narrower provider-specific
+// fallback path to use when a keyed transcript lookup misses. This avoids
+// silently jumping to an unrelated transcript that merely shares the same
+// workdir while still allowing canonical provider fallback files.
+func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir string) string {
+	switch providerFamily(provider) {
+	case "codex":
+		return FindCodexSessionFile(searchPaths, workDir)
+	case "gemini":
+		return FindGeminiSessionFile(searchPaths, workDir)
+	default:
+		return findClaudeLatestSessionFile(searchPaths, workDir)
+	}
+}
+
 // FindSessionFileByID resolves a Claude-style session log path using the
 // known session ID. This is the safest lookup when multiple sessions share
 // the same working directory.
@@ -363,15 +451,42 @@ func FindSessionFileByID(searchPaths []string, workDir, sessionID string) string
 	if workDir == "" || sessionID == "" {
 		return ""
 	}
+	fileName := safeSessionLogFileName(sessionID)
+	if fileName == "" {
+		return ""
+	}
 	slug := ProjectSlug(workDir)
 	for _, base := range searchPaths {
-		path := filepath.Join(base, slug, sessionID+".jsonl")
+		path := filepath.Join(base, slug, fileName)
 		info, err := os.Stat(path)
 		if err == nil && !info.IsDir() {
 			return path
 		}
 	}
 	return ""
+}
+
+func findClaudeLatestSessionFile(searchPaths []string, workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	slug := ProjectSlug(workDir)
+	for _, base := range searchPaths {
+		path := filepath.Join(base, slug, "latest-session.jsonl")
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	return ""
+}
+
+func safeSessionLogFileName(sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || strings.Contains(sessionID, "..") || strings.ContainsAny(sessionID, `/\`) {
+		return ""
+	}
+	return filepath.Base(sessionID) + ".jsonl"
 }
 
 // findSlugSessionFile searches slug-organized search paths for the most

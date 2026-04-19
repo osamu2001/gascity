@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path"
 	"path/filepath"
@@ -105,7 +106,7 @@ func computePoolSessions(cfg *config.City, cityName, _ string, sp runtime.Provid
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
 		sp0 := scaleParamsFor(&a)
-		if !isMultiSessionCfgAgent(&a) {
+		if !a.SupportsInstanceExpansion() {
 			continue
 		}
 		timeout := a.DrainTimeoutDuration()
@@ -116,33 +117,37 @@ func computePoolSessions(cfg *config.City, cityName, _ string, sp runtime.Provid
 	return ps
 }
 
-// poolDeathInfo holds the on_death command and working directory for a pool instance.
+// poolDeathInfo holds the pre-expanded on_death command and working
+// directory for a pool instance.
 type poolDeathInfo struct {
-	Command string // on_death shell command (pre-baked with instance QN)
-	Dir     string // working directory for bd commands
+	Command string            // on_death shell command pre-expanded for the instance
+	Dir     string            // working directory for bd commands
+	Env     map[string]string // canonical runtime env for the agent scope
 }
 
 // computePoolDeathHandlers builds a map from session name to death handler
 // for every pool instance (static for bounded pools, currently running for
 // unlimited). Used to detect and handle pool deaths.
-func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp runtime.Provider) map[string]poolDeathInfo {
+func computePoolDeathHandlers(cfg *config.City, cityName, cityPath string, sp runtime.Provider, stderr io.Writer) map[string]poolDeathInfo {
 	handlers := make(map[string]poolDeathInfo)
 	st := cfg.Workspace.SessionTemplate
 	for _, a := range cfg.Agents {
 		sp0 := scaleParamsFor(&a)
-		if !isMultiSessionCfgAgent(&a) {
+		if !a.SupportsInstanceExpansion() {
 			continue
 		}
+		agentEnv := controllerQueryRuntimeEnv(cityPath, cfg, &a)
 		for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 			_, instanceName := config.ParseQualifiedName(qualifiedInstance)
-			instance := config.Agent{Name: instanceName, Dir: a.Dir, PoolName: a.QualifiedName()}
+			instance := deepCopyAgent(&a, instanceName, a.Dir)
 			cmd := instance.EffectiveOnDeath()
 			if cmd == "" {
 				continue
 			}
+			cmd = expandAgentCommandTemplate(cityPath, cityName, &instance, cfg.Rigs, "on_death", cmd, stderr)
 			dir := agentCommandDir(cityPath, &a, cfg.Rigs)
 			sn := startupSessionName(cityName, qualifiedInstance, st)
-			handlers[sn] = poolDeathInfo{Command: cmd, Dir: dir}
+			handlers[sn] = poolDeathInfo{Command: cmd, Dir: dir, Env: agentEnv}
 		}
 	}
 	return handlers
@@ -186,17 +191,18 @@ func buildIdleTracker(cfg *config.City, cityName, _ string, sp runtime.Provider)
 		named := config.FindNamedSession(cfg, a.QualifiedName())
 		if named != nil {
 			// Configured named sessions own the canonical runtime session for
-			// singletons. mode="always" must never be subject to idle timeout.
+			// direct configured identities. mode="always" must never be subject
+			// to idle timeout.
 			if named.ModeOrDefault() != "always" {
 				it.setTimeout(config.NamedSessionRuntimeName(cityName, cfg.Workspace, a.QualifiedName()), timeout)
 				registeredAny = true
 			}
-			if !isMultiSessionCfgAgent(&a) {
+			if !a.SupportsInstanceExpansion() {
 				continue
 			}
 		}
 		sp0 := scaleParamsFor(&a)
-		if isMultiSessionCfgAgent(&a) {
+		if a.SupportsInstanceExpansion() {
 			// Register each pool instance (worker-1, worker-2, ...).
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, st, sp) {
 				sn := startupSessionName(cityName, qualifiedInstance, st)
@@ -256,6 +262,10 @@ Use "gc supervisor run" for foreground operation.`,
 }
 
 func doStart(args []string, controllerMode bool, stdout, stderr io.Writer) int {
+	return doStartWithNameOverride(args, controllerMode, stdout, stderr, "")
+}
+
+func doStartWithNameOverride(args []string, controllerMode bool, stdout, stderr io.Writer, nameOverride string) int {
 	if controllerMode || dryRunMode {
 		return doStartStandalone(args, controllerMode, stdout, stderr)
 	}
@@ -292,7 +302,7 @@ func doStart(args []string, controllerMode bool, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "gc start: install the missing dependencies, then try again") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if code := registerCityWithSupervisor(cityPath, stdout, stderr, "gc start", true); code != 0 {
+	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, stdout, stderr, "gc start", true); code != 0 {
 		return code
 	}
 	fmt.Fprintln(stdout, "City started under supervisor.") //nolint:errcheck // best-effort stdout
@@ -420,24 +430,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 
-	// Materialize the gc-beads-bd script so the exec: provider can use it.
-	if _, err := MaterializeBeadsBdScript(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: materializing gc-beads-bd: %v\n", err) //nolint:errcheck // best-effort stderr
-		// Non-fatal: only needed if provider = "bd".
-	}
-
-	// Materialize builtin packs (bd + dolt) so doctor checks and commands are available.
+	// Materialize builtin packs (bd + dolt) so doctor checks, commands,
+	// and the bd pack's gc-beads-bd script are available.
 	if err := MaterializeBuiltinPacks(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc start: materializing builtin packs: %v\n", err) //nolint:errcheck // best-effort stderr
 		// Non-fatal: only needed if provider = "bd".
 	}
-	// Materialize builtin prompts and formulas to stay in sync with binary.
-	if err := materializeBuiltinPrompts(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: builtin prompts: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
-	if err := materializeBuiltinFormulas(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: builtin formulas: %v\n", err) //nolint:errcheck // best-effort stderr
-	}
+	// Built-in prompts and formulas now arrive via the core bootstrap pack.
 	ensureInitArtifacts(cityPath, cfg, stderr, "gc start")
 
 	// Resolve rig paths and run the full bead store lifecycle:
@@ -457,12 +456,8 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		// Non-fatal warning — server may recover by the time agents need it.
 	}
 
-	// Materialize system formulas into the city formulas/ directory.
-	if _, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath); sysErr != nil {
-		fmt.Fprintf(stderr, "gc start: system formulas: %v\n", sysErr) //nolint:errcheck // best-effort stderr
-	}
-
 	// Materialize formula symlinks before agent startup.
+	// System formulas/orders now arrive via the core bootstrap pack.
 	if len(cfg.FormulaLayers.City) > 0 {
 		if err := ResolveFormulas(cityPath, cfg.FormulaLayers.City); err != nil {
 			fmt.Fprintf(stderr, "gc start: city formulas: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -477,20 +472,6 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 			if err := ResolveFormulas(r.Path, layers); err != nil {
 				fmt.Fprintf(stderr, "gc start: rig %q formulas: %v\n", r.Name, err) //nolint:errcheck // best-effort stderr
 			}
-		}
-	}
-
-	// Materialize Claude skill stubs (after formulas, before agent startup).
-	if cfg.Workspace.Provider == "claude" {
-		dirs := []string{cityPath}
-		for _, r := range cfg.Rigs {
-			if r.Path != "" {
-				dirs = append(dirs, r.Path)
-			}
-		}
-		if err := materializeSkillStubs(dirs...); err != nil {
-			fmt.Fprintf(stderr, "gc start: skill stubs: %v\n", err) //nolint:errcheck // best-effort stderr
-			// Non-fatal.
 		}
 	}
 
@@ -510,6 +491,33 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	// Validate agents.
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Skill collision validator — hard gate. Two agents sharing a
+	// (scope-root, vendor) sink cannot both provide an agent-local
+	// skill under the same name; the materialiser below would write
+	// conflicting symlinks. Block start so the operator fixes the
+	// collision before any half-written sink state lands. Per
+	// engdocs/proposals/skill-materialization.md § "Collision
+	// validation (startup validator)".
+	if err := checkSkillCollisions(cfg, cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Stage-1 skill materialization — runs for every eligible agent
+	// at its scope root before sessions spawn. Non-fatal: per-agent
+	// errors are logged inline by runStage1SkillMaterialization
+	// itself; it never returns a non-nil error to its caller.
+	_ = runStage1SkillMaterialization(cityPath, cfg, stderr)
+
+	// Stage-1 MCP projection is a hard gate because it mutates the provider's
+	// active runtime config surface. Conflicting shared targets or projection
+	// write failures must block startup before sessions launch against stale or
+	// ambiguous MCP state.
+	if err := runStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -571,11 +579,11 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	if controllerMode {
 		poolSessions := computePoolSessions(cfg, cityName, cityPath, sp)
-		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp)
-		watchDirs := config.WatchDirs(prov, cfg, cityPath)
+		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp, stderr)
+		watchTargets := config.WatchTargets(prov, cfg, cityPath)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
 		return runController(cityPath, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
-			newDrainOps(sp), poolSessions, poolDeathHandlers, watchDirs, recorder, eventProv, stdout, stderr)
+			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, recorder, eventProv, stdout, stderr)
 	}
 
 	// One-shot reconciliation (default): no drain (kill is fine).
@@ -629,7 +637,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
 	reconcileSessionBeadsAtPath(
 		sigCtx, cityPath, open, ds, cfgNames, cfg, sp, oneShotStore,
-		nil, nil, nil, dt, poolDesired,
+		nil, nil, nil, nil, dt, poolDesired,
 		dsResult.StoreQueryPartial,
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
@@ -689,6 +697,10 @@ func printDryRunPreview(desiredState map[string]TemplateParams, cfg *config.City
 // it resolves correctly regardless of the session's working directory. The K8s
 // provider remaps city-root references to /workspace automatically.
 // Returns empty string for non-Claude providers or if no settings file is present.
+//
+// Note: this uses Stat-level existence only. It does NOT verify the file is
+// readable. Use settingsArgsIfReadable in best-effort fallback paths where
+// pointing Claude at an unreadable file would be worse than no --settings.
 func settingsArgs(cityPath, providerName string) string {
 	if providerName != "claude" {
 		return ""
@@ -698,6 +710,59 @@ func settingsArgs(cityPath, providerName string) string {
 		return ""
 	}
 	return fmt.Sprintf("--settings %q", settingsPath)
+}
+
+// settingsArgsIfReadable is the stricter variant used by best-effort fallback
+// paths (e.g. buildResumeCommand on projection failure). It returns "--settings
+// <path>" only if the discovered file is actually readable — not just present.
+// This prevents `gc session attach` from pointing Claude at a 0o000 or
+// otherwise-unreadable .gc/settings.json that a failed projection could not
+// repair this tick.
+func settingsArgsIfReadable(cityPath, providerName string) string {
+	if providerName != "claude" {
+		return ""
+	}
+	settingsPath, _ := claudeSettingsSource(cityPath)
+	if settingsPath == "" {
+		return ""
+	}
+	if _, err := os.ReadFile(settingsPath); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("--settings %q", settingsPath)
+}
+
+// ensureClaudeSettingsArgs projects managed Claude settings to
+// .gc/settings.json (idempotent: no-op when bytes match) and returns the
+// "--settings <path>" arg for the resolved Claude command. This is the
+// single chokepoint that guarantees every Claude launch path — reconciler
+// or session attach/submit — sees the projected file before settingsArgs
+// probes for it. Returns empty string and nil error for non-Claude providers.
+//
+// Returns a non-nil error when projection fails. Strict callers
+// (resolveTemplate) should propagate so that a malformed preferred override
+// fails loudly at agent creation rather than silently running with stale
+// bytes from a prior tick. Best-effort callers (buildResumeCommand) may
+// choose to log-and-continue so a `gc session attach` still succeeds when
+// projection is transiently broken.
+//
+// fs may be nil; in that case OSFS is used. stderr may be nil; in that
+// case projection errors are only returned, not written.
+func ensureClaudeSettingsArgs(fs fsys.FS, cityPath, providerName string, stderr io.Writer) (string, error) {
+	if providerName != "claude" || cityPath == "" {
+		return "", nil
+	}
+	if fs == nil {
+		fs = fsys.OSFS{}
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	if err := hooks.Install(fs, cityPath, cityPath, []string{"claude"}); err != nil {
+		fmt.Fprintf(stderr, "claude hooks: %v\n", err) //nolint:errcheck // best-effort stderr
+		return "", fmt.Errorf("projecting Claude settings: %w", err)
+	}
+	return settingsArgs(cityPath, providerName), nil
 }
 
 func claudeSettingsSource(cityPath string) (src, rel string) {
@@ -716,10 +781,14 @@ func claudeSettingsSource(cityPath string) (src, rel string) {
 	return "", ""
 }
 
-// stageHookFiles adds hook files installed by hooks.Install() to the
-// copy_files list so container providers (K8s) can stage them into pods.
-// Docker doesn't need this (bind-mount), but the extra entries are harmless.
-// Avoids duplicating .gc/settings.json if settingsArgs already added it.
+// stageHookFiles adds hook files to the copy_files list so container
+// providers (K8s) can stage them into pods. Docker doesn't need this
+// (bind-mount), but the extra entries are harmless.
+//
+// Claude's city-level .gc/settings.json is staged here because settingsArgs
+// points --settings at the city-root path. All other provider hook files
+// ship via the core pack overlay and flow through PackOverlayDirs staging,
+// so they are not handled here.
 func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []runtime.CopyEntry {
 	// Compute the relative path from cityPath to workDir so that
 	// container-side RelDst places files under the agent's WorkingDir
@@ -732,14 +801,14 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 		}
 	}
 
-	// workDir-based hooks: gemini, codex, opencode, copilot, pi, omp.
-	// Use path.Join for RelDst (container-target, always forward slashes).
+	// workDir-based hooks: gemini, codex, opencode, copilot, cursor, pi, omp.
 	for _, rel := range []string{
 		path.Join(".gemini", "settings.json"),
 		path.Join(".codex", "hooks.json"),
 		path.Join(".opencode", "plugins", "gascity.js"),
 		path.Join(".github", "hooks", "gascity.json"),
 		path.Join(".github", "copilot-instructions.md"),
+		path.Join(".cursor", "hooks.json"),
 		path.Join(".pi", "extensions", "gc-hooks.js"),
 		path.Join(".omp", "hooks", "gc-hook.ts"),
 	} {
@@ -751,6 +820,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string) []r
 			})
 		}
 	}
+
 	// Stage Claude skills directory (if materialized).
 	skillsDir := filepath.Join(workDir, ".claude", "skills")
 	if info, err := os.Stat(skillsDir); err == nil && info.IsDir() {
@@ -817,11 +887,14 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 	}
 }
 
-func resolveConfiguredWorkDir(cityPath, cityName string, a *config.Agent, rigs []config.Rig) (string, error) {
+func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
 	if a == nil {
 		return resolveAgentDir(cityPath, "")
 	}
-	workDir, err := workdirutil.ResolveWorkDirPathStrict(cityPath, cityName, a.QualifiedName(), *a, rigs)
+	if strings.TrimSpace(qualifiedName) == "" {
+		qualifiedName = a.QualifiedName()
+	}
+	workDir, err := workdirutil.ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName, *a, rigs)
 	if err != nil {
 		return "", err
 	}
@@ -853,7 +926,7 @@ func agentCommandDir(cityPath string, a *config.Agent, rigs []config.Rig) string
 	}
 	if rigName := configuredRigName(cityPath, a, rigs); rigName != "" {
 		if rigRoot := rigRootForName(rigName, rigs); rigRoot != "" {
-			return rigRoot
+			return resolveAgentDirPath(cityPath, rigRoot)
 		}
 	}
 	if dir, err := resolveAgentDir(cityPath, a.Dir); err == nil {
@@ -1028,7 +1101,7 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 		count := 0
 		for _, qn := range instances {
 			sn := sessionName(nil, cityName, qn, sessionTemplate)
-			if sp.IsRunning(sn) {
+			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
 				count++
 			}
 		}
@@ -1053,7 +1126,7 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 		// Fallback: individual IsRunning calls (original behavior).
 		count := 0
 		for sn := range expected {
-			if sp.IsRunning(sn) {
+			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
 				count++
 			}
 		}
@@ -1071,15 +1144,24 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 
 // buildFingerprintExtra builds the fpExtra map for an agent's fingerprint
 // from its config. Returns nil if no extra fields are present.
+//
+// Note on pool.check omission: the default EffectiveScaleCheck string bakes
+// the agent's QualifiedName into the shell expression. Different code paths
+// in buildDesiredState resolve the same session bead with sometimes a base
+// agent ("pool-name") and sometimes a deep-copied instance agent
+// ("pool-name-1"), producing different pool.check strings and a different
+// fingerprint for the same session bead on different ticks. The constant
+// oscillation drives config-drift drain on every live pool/named session
+// (minutes-into-work reaps — see gascity ga-00f). scale_check is a runtime
+// probe for demand, not a behavioral-identity field; changes to ScaleCheck
+// don't need to reap live sessions. pool.min / pool.max / depends_on /
+// wake_mode continue to contribute since those are genuinely identity.
 func buildFingerprintExtra(a *config.Agent) map[string]string {
 	m := make(map[string]string)
-	if isMultiSessionCfgAgent(a) {
+	if a.MinActiveSessions != nil || a.MaxActiveSessions != nil || a.ScaleCheck != "" || a.DrainTimeout != "" {
 		sp := scaleParamsFor(a)
 		m["pool.min"] = strconv.Itoa(sp.Min)
 		m["pool.max"] = strconv.Itoa(sp.Max)
-		if sp.Check != "" {
-			m["pool.check"] = sp.Check
-		}
 	}
 	if len(a.DependsOn) > 0 {
 		m["depends_on"] = strings.Join(a.DependsOn, ",")

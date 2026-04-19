@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
-	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
@@ -34,6 +33,7 @@ type controllerState struct {
 	mu            sync.RWMutex
 	cfg           *config.City
 	sp            runtime.Provider
+	cacheCtx      context.Context
 	beadStores    map[string]beads.Store
 	cityBeadStore beads.Store   // city-level store for session beads
 	cityMailProv  mail.Provider // city-level mail provider (all mail is city-scoped)
@@ -53,15 +53,20 @@ type controllerState struct {
 // newControllerState creates a controllerState with per-rig stores.
 // BdStores are wrapped with CachingStore for in-memory reads.
 func newControllerState(
+	ctx context.Context,
 	cfg *config.City,
 	sp runtime.Provider,
 	ep events.Provider,
 	cityName, cityPath string,
 ) *controllerState {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cs := &controllerState{
 		cfg:        cfg,
 		sp:         sp,
+		cacheCtx:   ctx,
 		eventProv:  ep,
 		editor:     configedit.NewEditor(fsys.OSFS{}, tomlPath),
 		cityName:   cityName,
@@ -75,7 +80,7 @@ func newControllerState(
 	if store, err := openCityStoreAt(cityPath); err != nil {
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
-		cs.cityBeadStore = wrapWithCachingStore(store, ep)
+		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep)
 		cs.cityMailProv = newMailProvider(cs.cityBeadStore)
 		svc := extmsg.NewServices(cs.cityBeadStore)
 		cs.extmsgSvc = &svc
@@ -85,10 +90,13 @@ func newControllerState(
 
 // wrapWithCachingStore wraps a BdStore with a CachingStore that primes
 // and starts a background reconciler. Non-BdStore stores are returned as-is.
-func wrapWithCachingStore(store beads.Store, ep events.Provider) beads.Store {
+func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider) beads.Store {
 	bdStore, ok := store.(*beads.BdStore)
 	if !ok {
 		return store
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	var recorder events.Recorder
 	if ep != nil {
@@ -116,11 +124,14 @@ func wrapWithCachingStore(store beads.Store, ep events.Provider) beads.Store {
 	// callers (convergence reconcile, sweep, API handlers).
 	go func() {
 		log.Printf("caching-store: priming ...")
-		if err := cs.Prime(context.Background()); err != nil {
+		if err := cs.Prime(ctx); err != nil {
 			log.Printf("caching-store: prime FAILED: %v (reads will use bd subprocess)", err)
 			return
 		}
-		cs.StartReconciler(context.Background())
+		if ctx.Err() != nil {
+			return
+		}
+		cs.StartReconciler(ctx)
 	}()
 	return cs
 }
@@ -129,71 +140,61 @@ func wrapWithCachingStore(store beads.Store, ep events.Provider) beads.Store {
 // Mail providers are NOT built here — all mail uses the city-level store.
 // Pure function of cfg — does not read or write cs fields (safe to call unlocked).
 func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store {
-	provider := beadsProviderFor(cfg)
+	cityProvider := rawBeadsProviderForScope(cs.cityPath, cs.cityPath)
 	stores := make(map[string]beads.Store, len(cfg.Rigs))
 
-	// For the "file" provider, all rigs share the same city-level beads.json.
-	var sharedFileStore beads.Store
-	if provider == "file" {
-		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cs.cityPath, ".gc", "beads.json"))
+	var sharedLegacyFileStore beads.Store
+	if cityProvider == "file" && !fileStoreUsesScopedRoots(cs.cityPath) {
+		store, err := openCompatibleFileStore(cs.cityPath, cs.cityPath)
 		if err == nil {
-			sharedFileStore = store
-		} else {
-			// Fall back to bd provider rather than opening duplicate per-rig file stores.
-			fmt.Fprintf(os.Stderr, "api: failed to open shared file store: %v (falling back to bd provider)\n", err)
-			provider = "bd"
+			sharedLegacyFileStore = store
 		}
 	}
 
 	for _, rig := range cfg.Rigs {
-		if sharedFileStore != nil {
-			stores[rig.Name] = sharedFileStore
-		} else {
-			stores[rig.Name] = wrapWithCachingStore(
-				cs.openRigStore(provider, rig.Path, rig.EffectivePrefix(), rig.Name, cfg),
-				cs.eventProv,
-			)
+		// Unbound rigs (declared in city.toml but missing a .gc/site.toml
+		// binding) have an empty rig.Path. resolveStoreScopeRoot would
+		// alias them to the city scope, silently routing rig-scoped API
+		// traffic to the city store. Skip them so the API reports no
+		// store for the rig and operators notice the unbound state.
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
 		}
+		scopeRoot := resolveStoreScopeRoot(cs.cityPath, rig.Path)
+		scopeProvider := rawBeadsProviderForScope(scopeRoot, cs.cityPath)
+		store := beads.Store(nil)
+		if sharedLegacyFileStore != nil && scopeProvider == "file" && !scopeUsesFileStoreContract(scopeRoot) {
+			store = sharedLegacyFileStore
+		} else {
+			store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix())
+		}
+		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv)
 	}
 	return stores
 }
 
-// beadsProviderFor returns the bead store provider name from the given config.
-// Pure function — does not read controllerState fields.
-func beadsProviderFor(cfg *config.City) string {
-	if v := os.Getenv("GC_BEADS"); v != "" {
-		return v
-	}
-	if cfg.Beads.Provider != "" {
-		return cfg.Beads.Provider
-	}
-	return "bd"
-}
-
 // openRigStore creates a bead store for a rig path using the given provider.
-// cfg is the config snapshot that triggered this build — callers must pass it
-// explicitly so hot-reload never reads the stale cs.cfg.
-func (cs *controllerState) openRigStore(provider, rigPath, prefix, rigName string, cfg *config.City) beads.Store {
+func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix string) beads.Store {
+	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
 	if strings.HasPrefix(provider, "exec:") {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		env := citylayout.CityRuntimeEnvMap(cs.cityPath)
-		env["GC_BEADS_PREFIX"] = prefix
-		rigPath = filepath.Clean(rigPath)
-		env["BEADS_DIR"] = filepath.Join(rigPath, ".beads")
-		env["GC_RIG_ROOT"] = rigPath
-		env["GC_RIG"] = rigName
-		s.SetEnv(env)
+		s.SetEnv(gcExecStoreEnv(cs.cityPath, execStoreTarget{
+			ScopeRoot: scopeRoot,
+			ScopeKind: "rig",
+			Prefix:    prefix,
+			RigName:   rigName,
+		}, provider))
 		return s
 	}
 	switch provider {
 	case "file":
-		store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cs.cityPath, ".gc", "beads.json"))
+		store, err := openCompatibleFileStore(scopeRoot, cs.cityPath)
 		if err != nil {
-			return bdStoreForRig(rigPath, cs.cityPath, cfg)
+			return unavailableStore{err: fmt.Errorf("open file rig store %s: %w", scopeRoot, err)}
 		}
 		return store
 	default: // "bd" or unrecognized
-		return bdStoreForRig(rigPath, cs.cityPath, cfg)
+		return bdStoreForRig(scopeRoot, cs.cityPath, cs.cfg)
 	}
 }
 
@@ -270,7 +271,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var cityMailProv mail.Provider
 	var extSvc *extmsg.Services
 	if cityStore != nil {
-		cityStore = wrapWithCachingStore(cityStore, cs.eventProv)
+		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv)
 		cityMailProv = newMailProvider(cityStore)
 		svc := extmsg.NewServices(cityStore)
 		extSvc = &svc
@@ -464,35 +465,47 @@ func (cs *controllerState) DisableOrder(name, rig string) error {
 	})
 }
 
-// SuspendAgent writes suspended=true to city.toml (durable desired state).
-// Uses configedit.Editor for provenance-aware edit (inline vs patch).
+// SuspendAgent writes suspended=true to durable agent config.
+// Uses configedit.Editor for provenance-aware edit (inline vs discovered vs patch).
 func (cs *controllerState) SuspendAgent(name string) error {
-	return cs.editor.SuspendAgent(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.SuspendAgent(name)
+	})
 }
 
-// ResumeAgent clears suspended in city.toml (durable desired state).
+// ResumeAgent clears suspended in durable agent config.
 func (cs *controllerState) ResumeAgent(name string) error {
-	return cs.editor.ResumeAgent(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.ResumeAgent(name)
+	})
 }
 
 // SuspendRig writes suspended=true on the rig in city.toml.
 func (cs *controllerState) SuspendRig(name string) error {
-	return cs.editor.SuspendRig(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.SuspendRig(name)
+	})
 }
 
 // ResumeRig clears suspended on the rig in city.toml.
 func (cs *controllerState) ResumeRig(name string) error {
-	return cs.editor.ResumeRig(name)
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.ResumeRig(name)
+	})
 }
 
 // SuspendCity sets workspace.suspended = true.
 func (cs *controllerState) SuspendCity() error {
-	return cs.editor.SuspendCity()
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.SuspendCity()
+	})
 }
 
 // ResumeCity sets workspace.suspended = false.
 func (cs *controllerState) ResumeCity() error {
-	return cs.editor.ResumeCity()
+	return cs.mutateAndPoke(func() error {
+		return cs.editor.ResumeCity()
+	})
 }
 
 // CreateAgent adds a new agent to city.toml.
@@ -584,6 +597,14 @@ func (cs *controllerState) SetProviderPatch(patch config.ProviderPatch) error {
 // DeleteProviderPatch removes a provider patch from city.toml.
 func (cs *controllerState) DeleteProviderPatch(name string) error {
 	return cs.editor.DeleteProviderPatch(name)
+}
+
+func (cs *controllerState) mutateAndPoke(mutate func() error) error {
+	if err := mutate(); err != nil {
+		return err
+	}
+	cs.Poke()
+	return nil
 }
 
 // Poke signals the controller to trigger an immediate reconciler tick.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -13,13 +14,13 @@ import (
 
 func TestMailLifecycle(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	// Send a message. Bare "worker" resolves to "myrig/worker" (the qualified name).
 	body := `{"from":"mayor","to":"worker","subject":"Review needed","body":"Please check gc-456"}`
-	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
+	req := newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("send status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
@@ -35,9 +36,9 @@ func TestMailLifecycle(t *testing.T) {
 	}
 
 	// Check inbox using the resolved qualified name.
-	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
+	req = httptest.NewRequest("GET", cityURL(state, "/mail?agent=myrig/worker"), nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var inbox struct {
 		Items []mail.Message `json:"items"`
@@ -49,18 +50,18 @@ func TestMailLifecycle(t *testing.T) {
 	}
 
 	// Mark read.
-	req = newPostRequest("/v0/mail/"+sent.ID+"/read", nil)
+	req = newPostRequest(cityURL(state, "/mail/")+sent.ID+"/read", nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("read status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
 	// Inbox should be empty now (only unread).
-	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
+	req = httptest.NewRequest("GET", cityURL(state, "/mail?agent=myrig/worker"), nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
 	if inbox.Total != 0 {
@@ -68,18 +69,18 @@ func TestMailLifecycle(t *testing.T) {
 	}
 
 	// Get still works.
-	req = httptest.NewRequest("GET", "/v0/mail/"+sent.ID, nil)
+	req = httptest.NewRequest("GET", cityURL(state, "/mail/")+sent.ID, nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
 	// Archive.
-	req = newPostRequest("/v0/mail/"+sent.ID+"/archive", nil)
+	req = newPostRequest(cityURL(state, "/mail/")+sent.ID+"/archive", nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("archive status = %d, want %d", rec.Code, http.StatusOK)
@@ -88,22 +89,49 @@ func TestMailLifecycle(t *testing.T) {
 
 func TestMailSendValidation(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	// Missing required fields.
+	// Missing required fields (to, subject).
 	body := `{"from":"mayor"}`
-	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
+	req := newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want %d; body = %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
 	}
 
-	var apiErr Error
-	json.NewDecoder(rec.Body).Decode(&apiErr) //nolint:errcheck
-	if len(apiErr.Details) != 2 {
-		t.Errorf("Details count = %d, want 2", len(apiErr.Details))
+	// Huma validation errors follow RFC 9457: status, title, detail, errors[].
+	// Each validation error is an entry in the errors array with a location
+	// like "body.to" identifying the offending field.
+	var apiErr struct {
+		Status int `json:"status"`
+		Errors []struct {
+			Location string `json:"location"`
+			Message  string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&apiErr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Each missing required field yields one entry in the errors array.
+	// Expect errors for both "to" and "subject" — Huma reports them with
+	// location "body" and the field name in the message.
+	var hasToErr, hasSubjectErr bool
+	for _, e := range apiErr.Errors {
+		if strings.Contains(e.Message, "to") {
+			hasToErr = true
+		}
+		if strings.Contains(e.Message, "subject") {
+			hasSubjectErr = true
+		}
+	}
+	if !hasToErr {
+		t.Errorf("missing validation error for 'to' field; errors = %+v", apiErr.Errors)
+	}
+	if !hasSubjectErr {
+		t.Errorf("missing validation error for 'subject' field; errors = %+v", apiErr.Errors)
 	}
 }
 
@@ -112,11 +140,11 @@ func TestMailCount(t *testing.T) {
 	mp := state.cityMailProv
 	mp.Send("a", "b", "msg1", "body1") //nolint:errcheck
 	mp.Send("a", "b", "msg2", "body2") //nolint:errcheck
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/mail/count?agent=b", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/mail/count?agent=b"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp map[string]int
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
@@ -129,21 +157,21 @@ func TestMailDelete(t *testing.T) {
 	state := newFakeState(t)
 	mp := state.cityMailProv
 	msg, _ := mp.Send("mayor", "worker", "To delete", "content")
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("DELETE", "/v0/mail/"+msg.ID, nil)
+	req := httptest.NewRequest("DELETE", cityURL(state, "/mail/")+msg.ID, nil)
 	req.Header.Set("X-GC-Request", "true")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("delete status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
 	// After delete (soft delete/archive), message should no longer appear in inbox.
-	req = httptest.NewRequest("GET", "/v0/mail?agent=worker", nil)
+	req = httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker"), nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var inbox struct {
 		Items []mail.Message `json:"items"`
@@ -157,12 +185,12 @@ func TestMailDelete(t *testing.T) {
 
 func TestMailDeleteNotFound(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("DELETE", "/v0/mail/nonexistent", nil)
+	req := httptest.NewRequest("DELETE", cityURL(state, "/mail/nonexistent"), nil)
 	req.Header.Set("X-GC-Request", "true")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -177,12 +205,12 @@ func TestMailListStatusAll(t *testing.T) {
 	mp.Send("mayor", "worker", "First", "body1")  //nolint:errcheck
 	mp.Send("mayor", "worker", "Second", "body2") //nolint:errcheck
 
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	// Default (no status) returns only unread — both should appear.
-	req := httptest.NewRequest("GET", "/v0/mail?agent=worker", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []mail.Message `json:"items"`
@@ -197,9 +225,9 @@ func TestMailListStatusAll(t *testing.T) {
 	mp.MarkRead(resp.Items[0].ID) //nolint:errcheck
 
 	// Default (unread) should now return 1.
-	req = httptest.NewRequest("GET", "/v0/mail?agent=worker&status=unread", nil)
+	req = httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker&status=unread"), nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if resp.Total != 1 {
@@ -207,9 +235,9 @@ func TestMailListStatusAll(t *testing.T) {
 	}
 
 	// status=all should return both (read + unread).
-	req = httptest.NewRequest("GET", "/v0/mail?agent=worker&status=all", nil)
+	req = httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker&status=all"), nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=all returned %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -228,12 +256,12 @@ func TestMailListStatusAllAcrossRigs(t *testing.T) {
 	msg2, _ := mp.Send("mayor", "worker", "Msg2", "body2")
 	mp.MarkRead(msg2.ID) //nolint:errcheck
 
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	// status=all without rig param aggregates across all rigs.
-	req := httptest.NewRequest("GET", "/v0/mail?agent=worker&status=all", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?agent=worker&status=all"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=all returned %d, want %d", rec.Code, http.StatusOK)
@@ -251,11 +279,11 @@ func TestMailListStatusAllAcrossRigs(t *testing.T) {
 
 func TestMailListStatusInvalid(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/mail?status=bogus", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?status=bogus"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status=bogus returned %d, want %d", rec.Code, http.StatusBadRequest)
@@ -266,12 +294,12 @@ func TestMailReply(t *testing.T) {
 	state := newFakeState(t)
 	mp := state.cityMailProv
 	msg, _ := mp.Send("mayor", "worker", "Initial", "content")
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	body := `{"from":"worker","subject":"Re: Initial","body":"Done!"}`
-	req := newPostRequest("/v0/mail/"+msg.ID+"/reply", bytes.NewBufferString(body))
+	req := newPostRequest(cityURL(state, "/mail/")+msg.ID+"/reply", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("reply status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
@@ -288,12 +316,12 @@ func TestMailListIncludesRig(t *testing.T) {
 	state := newFakeState(t)
 	mp := state.cityMailProv
 	mp.Send("alice", "bob", "Hi", "hello") //nolint:errcheck
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	// List without rig filter — aggregation path.
-	req := httptest.NewRequest("GET", "/v0/mail?status=all", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/mail?status=all"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []mail.Message `json:"items"`
@@ -307,9 +335,9 @@ func TestMailListIncludesRig(t *testing.T) {
 	}
 
 	// List with rig filter — single-rig path. The rig param is used as the tag.
-	req = httptest.NewRequest("GET", "/v0/mail?rig=test-city&status=all", nil)
+	req = httptest.NewRequest("GET", cityURL(state, "/mail?rig=test-city&status=all"), nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if len(resp.Items) == 0 {
@@ -328,11 +356,11 @@ func TestMailThreadIncludesRig(t *testing.T) {
 	// Reply to create a thread.
 	mp.Reply(msg.ID, "bob", "Re: Thread test", "reply body") //nolint:errcheck
 
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/mail/thread/"+msg.ThreadID+"?rig=test-city", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/mail/thread/")+msg.ThreadID+"?rig=test-city", nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []mail.Message `json:"items"`
@@ -350,22 +378,22 @@ func TestMailThreadIncludesRig(t *testing.T) {
 
 func TestMailSendIdempotentReplayIncludesRig(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	body := `{"rig":"test-city","from":"alice","to":"worker","subject":"Hi","body":"hello"}`
-	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
+	req := newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body))
 	req.Header.Set("Idempotency-Key", "mail-send-1")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("first send status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
 
-	req = newPostRequest("/v0/mail", bytes.NewBufferString(body))
+	req = newPostRequest(cityURL(state, "/mail"), bytes.NewBufferString(body))
 	req.Header.Set("Idempotency-Key", "mail-send-1")
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("replayed send status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
@@ -382,11 +410,11 @@ func TestMailGetWithoutRigHintIncludesResolvedRig(t *testing.T) {
 	state := newFakeState(t)
 	mp := state.cityMailProv
 	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/mail/"+msg.ID, nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/mail/")+msg.ID, nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -404,11 +432,11 @@ func TestMailMutationEventsUseResolvedRigWithoutHint(t *testing.T) {
 	ep := state.eventProv.(*events.Fake)
 	mp := state.cityMailProv
 	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := newPostRequest("/v0/mail/"+msg.ID+"/read", nil)
+	req := newPostRequest(cityURL(state, "/mail/")+msg.ID+"/read", nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("read status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -433,12 +461,12 @@ func TestMailReplyWithoutRigHintUsesResolvedRig(t *testing.T) {
 	ep := state.eventProv.(*events.Fake)
 	mp := state.cityMailProv
 	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	body := `{"from":"bob","subject":"Re: Hi","body":"reply"}`
-	req := newPostRequest("/v0/mail/"+msg.ID+"/reply", bytes.NewBufferString(body))
+	req := newPostRequest(cityURL(state, "/mail/")+msg.ID+"/reply", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("reply status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())

@@ -28,6 +28,9 @@ func EnsureClaudeStateFile(home string, configDir ...string) error {
 			return err
 		}
 		root["hasCompletedOnboarding"] = true
+		if theme, _ := root["theme"].(string); strings.TrimSpace(theme) == "" {
+			root["theme"] = "light"
+		}
 		if err := saveClaudeState(statePath, root); err != nil {
 			return err
 		}
@@ -56,14 +59,14 @@ func EnsureClaudeProjectState(env *Env, projectPath string) error {
 	if home == "" {
 		return nil
 	}
-	if err := EnsureClaudeStateFile(home); err != nil {
-		return err
-	}
 	configDir := filepath.Join(home, ".claude")
 	if env != nil {
 		if v := strings.TrimSpace(env.Get("CLAUDE_CONFIG_DIR")); v != "" {
 			configDir = v
 		}
+	}
+	if err := EnsureClaudeStateFile(home, configDir); err != nil {
+		return err
 	}
 	for _, statePath := range claudeStatePaths(home, configDir) {
 		root, err := loadClaudeState(statePath)

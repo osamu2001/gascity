@@ -7,16 +7,34 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
-// GraphApplyEnabled controls whether Instantiate uses the GraphApplyStore
+// graphApplyEnabled controls whether Instantiate uses the GraphApplyStore
 // batch path. When false, falls back to sequential bead creation.
 // Set by the daemon config loader from [daemon] formula_v2.
-var GraphApplyEnabled bool
+//
+// Stored as atomic.Bool so config reload can race safely with in-flight
+// instantiation. Each instantiate call snapshots the value once via
+// IsGraphApplyEnabled.
+var graphApplyEnabled atomic.Bool
+
+// SetGraphApplyEnabled sets the graph-apply batch instantiation flag. Safe
+// for concurrent use with IsGraphApplyEnabled; intended for the daemon
+// config loader and tests.
+func SetGraphApplyEnabled(v bool) {
+	graphApplyEnabled.Store(v)
+}
+
+// IsGraphApplyEnabled reports whether graph-apply batch instantiation is
+// allowed. Safe for concurrent use.
+func IsGraphApplyEnabled() bool {
+	return graphApplyEnabled.Load()
+}
 
 func graphApplyTracef(format string, args ...any) {
 	path := os.Getenv("GC_SLING_TRACE")
@@ -113,7 +131,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 		}
 		if step.IsRoot {
 			rootIncluded = true
-			if step.Metadata["gc.kind"] != "workflow" {
+			if !opts.PreserveRootType && step.Metadata["gc.kind"] != "workflow" {
 				node.Type = "molecule"
 			}
 			if opts.Title != "" {
@@ -135,7 +153,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 			if node.Metadata["gc.step_ref"] == "" {
 				node.Metadata["gc.step_ref"] = step.ID
 			}
-			if graphWorkflow || step.Metadata["gc.kind"] != "" {
+			if (graphWorkflow || step.Metadata["gc.kind"] != "") && node.Metadata["gc.root_bead_id"] == "" {
 				if node.MetadataRefs == nil {
 					node.MetadataRefs = make(map[string]string, 1)
 				}

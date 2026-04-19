@@ -2,6 +2,8 @@ package main
 
 import (
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -134,6 +136,49 @@ func TestTemplateParamsToConfigNoneModeWithHooksSkipsStartupNudge(t *testing.T) 
 	}
 	if cfg.Nudge != "existing nudge" {
 		t.Errorf("Nudge = %q, want existing nudge only", cfg.Nudge)
+	}
+}
+
+func TestTemplateParamsToConfigHookEnabledProviderSkipsLaunchPrompt(t *testing.T) {
+	tests := []struct {
+		name       string
+		promptMode string
+		promptFlag string
+	}{
+		{name: "arg mode", promptMode: "arg"},
+		{name: "flag mode", promptMode: "flag", promptFlag: "--prompt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tp := TemplateParams{
+				Command: "claude",
+				Prompt:  "startup prompt",
+				Hints: agent.StartupHints{
+					Nudge: "existing nudge",
+				},
+				HookEnabled: true,
+				ResolvedProvider: &config.ResolvedProvider{
+					Name:          "claude",
+					Command:       "claude",
+					PromptMode:    tt.promptMode,
+					PromptFlag:    tt.promptFlag,
+					SupportsHooks: true,
+				},
+			}
+
+			cfg := templateParamsToConfig(tp)
+
+			if cfg.PromptSuffix != "" {
+				t.Fatalf("PromptSuffix should be empty for hook-enabled startup, got %q", cfg.PromptSuffix)
+			}
+			if cfg.PromptFlag != "" {
+				t.Fatalf("PromptFlag should be empty for hook-enabled startup, got %q", cfg.PromptFlag)
+			}
+			if cfg.Nudge != "existing nudge" {
+				t.Fatalf("Nudge = %q, want existing nudge only", cfg.Nudge)
+			}
+		})
 	}
 }
 
@@ -308,5 +353,98 @@ func TestResolveTemplateHookEnabledOpencodeOmitsPrimeInstruction(t *testing.T) {
 	}
 	if strings.Contains(tp.Prompt, "Run `gc prime`") {
 		t.Fatalf("hook-enabled prompt should omit manual gc prime instruction: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateExpandsPromptCommandTemplates(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Work={{ .WorkQuery }}\nSling={{ .SlingQuery }}")
+
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		rigs:            []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		Dir:            "demo",
+		PromptTemplate: "prompts/worker.template.md",
+		Provider:       "opencode",
+		WorkQuery:      "echo {{.CityName}} {{.Rig}} {{.AgentBase}}",
+		SlingQuery:     "dispatch {} --route={{.Rig}}/{{.AgentBase}} --city={{.CityName}}",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, "Work=echo demo-city demo worker") {
+		t.Fatalf("Prompt missing expanded WorkQuery: %q", tp.Prompt)
+	}
+	if !strings.Contains(tp.Prompt, "Sling=dispatch {} --route=demo/worker --city=demo-city") {
+		t.Fatalf("Prompt missing expanded SlingQuery: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateClaudeProjectsCityDotClaudeSettingsIntoRuntimeFile(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "prompts", "mayor.md"), []byte("mayor prompt body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".claude", "settings.json"), []byte(`{"custom": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	params := &agentBuildParams{
+		fs:              fsys.OSFS{},
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "claude"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "mayor",
+		PromptTemplate: "prompts/mayor.md",
+		Provider:       "claude",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Command, `.gc/settings.json`) {
+		t.Fatalf("command missing Claude settings path: %q", tp.Command)
+	}
+	runtimePath := filepath.Join(cityPath, ".gc", "settings.json")
+	data, err := os.ReadFile(runtimePath)
+	if err != nil {
+		t.Fatalf("resolveTemplate did not materialize %s: %v", runtimePath, err)
+	}
+	rendered := string(data)
+	if !strings.Contains(rendered, `"custom": true`) {
+		t.Fatalf("runtime settings missing city .claude override:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "SessionStart") {
+		t.Fatalf("runtime settings lost default Claude hooks:\n%s", rendered)
 	}
 }

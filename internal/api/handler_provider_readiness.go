@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -158,43 +157,6 @@ type cachedProviderProbeStore struct {
 	entries map[string]cachedProviderProbe
 }
 
-func handleProviderReadiness(w http.ResponseWriter, r *http.Request) {
-	providers, err := parseRequestedReadinessItems(
-		r.URL.Query().Get("providers"),
-		"providers",
-		defaultProviderReadinessItems,
-		supportedProviderReadiness,
-	)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	fresh, err := parseFreshParam(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-
-	resp, err := buildReadinessResponse(r.Context(), providers, fresh)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-
-	providerResp := providerReadinessResponse{
-		Providers: make(map[string]providerReadiness, len(providers)),
-	}
-	for _, provider := range providers {
-		item := resp.Items[provider]
-		providerResp.Providers[provider] = providerReadiness{
-			DisplayName: item.DisplayName,
-			Status:      item.Status,
-		}
-	}
-
-	writeJSON(w, http.StatusOK, providerResp)
-}
-
 // SupportsProviderReadiness reports whether the named provider has a built-in
 // readiness probe.
 func SupportsProviderReadiness(name string) bool {
@@ -218,31 +180,6 @@ func ProbeProviders(ctx context.Context, providers []string, fresh bool) (map[st
 		out[provider] = resp.Items[provider]
 	}
 	return out, nil
-}
-
-func handleReadiness(w http.ResponseWriter, r *http.Request) {
-	items, err := parseRequestedReadinessItems(
-		r.URL.Query().Get("items"),
-		"items",
-		defaultReadinessItems,
-		supportedReadiness,
-	)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	fresh, err := parseFreshParam(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-
-	resp, err := buildReadinessResponse(r.Context(), items, fresh)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 func parseRequestedReadinessItems(
@@ -296,21 +233,6 @@ func validateRequestedReadinessItems(items []string, allowed readinessItemSet, l
 		return nil, fmt.Errorf("%s is required", label)
 	}
 	return out, nil
-}
-
-func parseFreshParam(r *http.Request) (bool, error) {
-	fresh := strings.TrimSpace(r.URL.Query().Get("fresh"))
-	if fresh == "" {
-		return false, nil
-	}
-	switch fresh {
-	case "0":
-		return false, nil
-	case "1":
-		return true, nil
-	default:
-		return false, errors.New("fresh must be 0 or 1")
-	}
 }
 
 func workspaceHomeDir() (string, error) {
@@ -407,16 +329,7 @@ func probeClaude(ctx context.Context, homeDir string) providerProbeResult {
 		return providerProbeResult{status: probeStatusNotInstalled}
 	}
 
-	// Claude-specific env: OAuth token and config dir are only relevant
-	// for the Claude probe — keep them out of the shared probeCommandEnv
-	// to avoid leaking credentials to unrelated subprocesses (e.g., gh).
-	var claudeEnv []string
-	for _, key := range []string{"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"} {
-		if value := os.Getenv(key); value != "" {
-			claudeEnv = append(claudeEnv, key+"="+value)
-		}
-	}
-	stdout, _, err := runProbeCommand(ctx, homeDir, 5*time.Second, claudeEnv, path, "auth", "status", "--json")
+	stdout, _, err := runProbeCommand(ctx, homeDir, 5*time.Second, path, "auth", "status", "--json")
 	if err != nil && strings.TrimSpace(stdout) == "" {
 		return providerProbeResult{status: probeStatusProbeError}
 	}
@@ -428,10 +341,9 @@ func probeClaude(ctx context.Context, homeDir string) providerProbeResult {
 	if !status.LoggedIn {
 		return providerProbeResult{status: probeStatusNeedsAuth}
 	}
-	// Gas City supports Claude's first-party login flows. That includes the
-	// interactive claude.ai login and long-lived oauth_token auth used for
-	// isolated acceptance environments.
-	if (status.AuthMethod == "claude.ai" || status.AuthMethod == "oauth_token") && status.APIProvider == "firstParty" {
+	// Onboarding only supports the first-party claude.ai OAuth flow. API-key
+	// or alternate providers are intentionally treated as unsupported.
+	if status.AuthMethod == "claude.ai" && status.APIProvider == "firstParty" {
 		return providerProbeResult{status: probeStatusConfigured}
 	}
 	return providerProbeResult{status: probeStatusInvalidConfiguration}
@@ -566,7 +478,6 @@ func probeGitHubCLIAuthStatus(ctx context.Context, homeDir, ghPath string) provi
 		ctx,
 		homeDir,
 		2*time.Second,
-		nil,
 		ghPath,
 		"auth",
 		"status",
@@ -617,7 +528,6 @@ func runProbeCommand(
 	ctx context.Context,
 	homeDir string,
 	timeout time.Duration,
-	extraEnv []string,
 	path string,
 	args ...string,
 ) (string, string, error) {
@@ -626,7 +536,7 @@ func runProbeCommand(
 
 	cmd := providerProbeCommandContext(ctx, path, args...)
 	cmd.Dir = homeDir
-	cmd.Env = append(probeCommandEnv(homeDir), extraEnv...)
+	cmd.Env = probeCommandEnv(homeDir)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

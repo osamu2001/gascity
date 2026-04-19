@@ -10,7 +10,8 @@
 // Requires: gc binary, bd binary, tmux, dolt, Synthetic/Anthropic env
 // credentials (ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN), or Claude OAuth.
 // Expected duration: ~5 min per scenario.
-// Trigger: manual (make test-acceptance-c), then nightly.
+// Trigger: manual (make test-acceptance-c). Worker-inference acceptance_c
+// lanes run nightly.
 package tierc_test
 
 import (
@@ -18,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,14 +42,16 @@ func TestMain(m *testing.M) {
 	// 1. ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN env var (CI mode)
 	// 2. GC_TIERC_FORCE=1 env var (local OAuth mode — user asserts Claude is authed)
 	// 3. Detect OAuth: check if ~/.claude/ exists with credentials
+	authToken := strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN"))
 	apiKey := firstNonEmpty(
 		strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")),
-		strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")),
+		authToken,
 	)
+	hasEnvAuth := authToken != "" || apiKey != ""
 	forceRun := os.Getenv("GC_TIERC_FORCE") == "1"
 	hasOAuth := oauthCredentialsExist()
 
-	if apiKey == "" && !forceRun && !hasOAuth {
+	if !hasEnvAuth && !forceRun && !hasOAuth {
 		// No credentials available, skip silently.
 		os.Exit(0)
 	}
@@ -80,6 +84,11 @@ func TestMain(m *testing.M) {
 		panic("acceptance-c: " + err.Error())
 	}
 
+	providerBinDir := filepath.Join(gcHome, ".local", "bin")
+	if err := stageTierCAcceptanceProviders(providerBinDir, apiKey); err != nil {
+		panic("acceptance-c: staging provider binaries: " + err.Error())
+	}
+
 	// Configure dolt identity in the isolated home (dolt requires user.name).
 	doltCfgDir := filepath.Join(gcHome, ".dolt")
 	if err := os.MkdirAll(doltCfgDir, 0o755); err != nil {
@@ -101,20 +110,9 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "acceptance-c: OAuth preflight refresh failed: %v\n%s\n", err, refreshOut)
 	}
 
-	// Symlink the host's .claude dir so the test always sees fresh OAuth
-	// tokens (including tokens refreshed by aimux during the test run).
-	// Copying credentials leads to stale token failures on long test suites.
 	realHome, _ := os.UserHomeDir()
-	srcClaudeDir := filepath.Join(realHome, ".claude")
 	dstClaudeDir := filepath.Join(gcHome, ".claude")
-	if _, err := os.Stat(srcClaudeDir); err == nil {
-		if err := os.Symlink(srcClaudeDir, dstClaudeDir); err != nil {
-			// Fall back to copy if symlink fails (e.g., cross-device).
-			if err2 := stageClaudeOAuth(realHome, gcHome); err2 != nil {
-				panic("acceptance-c: staging Claude oauth: " + err2.Error())
-			}
-		}
-	} else if err := stageClaudeOAuth(realHome, gcHome); err != nil {
+	if err := stageClaudeOAuth(realHome, gcHome); err != nil {
 		panic("acceptance-c: staging Claude oauth: " + err.Error())
 	}
 	// Keep onboarding state isolated from the host, then force the minimal
@@ -122,14 +120,16 @@ func TestMain(m *testing.M) {
 	if err := copyFileIfExists(filepath.Join(realHome, ".claude.json"), filepath.Join(gcHome, ".claude.json"), 0o600); err != nil {
 		panic("acceptance-c: staging Claude state: " + err.Error())
 	}
-	if err := helpers.EnsureClaudeStateFile(gcHome); err != nil {
+	if err := helpers.EnsureClaudeStateFile(gcHome, dstClaudeDir); err != nil {
 		panic("acceptance-c: ensuring Claude state: " + err.Error())
 	}
 
 	testEnvC = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
 		Without("GC_SESSION"). // use real tmux, not subprocess
 		Without("GC_BEADS").   // use real bd (dolt-backed) provider
-		Without("GC_DOLT")     // let gc manage dolt (don't skip it)
+		Without("GC_DOLT").    // let gc manage dolt (don't skip it)
+		With("CLAUDE_CONFIG_DIR", dstClaudeDir)
+	testEnvC = testEnvC.With("PATH", providerBinDir+":"+testEnvC.Get("PATH"))
 
 	if apiKey != "" {
 		testEnvC = testEnvC.With("ANTHROPIC_API_KEY", apiKey)
@@ -157,7 +157,7 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	helpers.RunGC(testEnvC, "", "supervisor", "stop") //nolint:errcheck
+	helpers.RunGC(testEnvC, "", "supervisor", "stop", "--wait") //nolint:errcheck
 	os.Exit(code)
 }
 
@@ -643,6 +643,67 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func stageTierCAcceptanceProviders(binDir, apiKey string) error {
+	claudeShim, err := tierCProviderShim("claude", apiKey)
+	if err != nil {
+		return err
+	}
+	return helpers.StageProviderBinary(binDir, "claude", claudeShim)
+}
+
+func tierCProviderShim(name, apiKey string) (string, error) {
+	switch name {
+	case "claude":
+		if strings.TrimSpace(apiKey) != "" || strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) != "" {
+			return "", nil
+		}
+		return tierCHostProviderShim(name, []string{"CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME"})
+	default:
+		return "", nil
+	}
+}
+
+func tierCHostProviderShim(name string, unsetVars []string) (string, error) {
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", err
+	}
+
+	realHome, _ := os.UserHomeDir()
+	userName := strings.TrimSpace(os.Getenv("USER"))
+	login := strings.TrimSpace(os.Getenv("LOGNAME"))
+	if current, err := user.Current(); err == nil {
+		if userName == "" {
+			userName = strings.TrimSpace(current.Username)
+		}
+		if login == "" {
+			login = strings.TrimSpace(current.Username)
+		}
+	}
+	if login == "" {
+		login = filepath.Base(realHome)
+	}
+	if userName == "" {
+		userName = login
+	}
+
+	parts := []string{"env"}
+	for _, key := range unsetVars {
+		parts = append(parts, "-u", key)
+	}
+	parts = append(parts,
+		"HOME="+shellQuoteTierC(realHome),
+		"USER="+shellQuoteTierC(userName),
+		"LOGNAME="+shellQuoteTierC(login),
+		shellQuoteTierC(path),
+	)
+	return strings.Join(parts, " "), nil
+}
+
+func shellQuoteTierC(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 func stageClaudeOAuth(realHome, gcHome string) error {

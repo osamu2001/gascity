@@ -36,6 +36,20 @@ func (s *failingMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]s
 	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
+type failNthMetadataBatchStore struct {
+	*beads.MemStore
+	failOn int
+	calls  int
+}
+
+func (s *failNthMetadataBatchStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.calls++
+	if s.calls == s.failOn {
+		return errors.New("batch failed")
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
 type gatedStartProvider struct {
 	*runtime.Fake
 	mu            sync.Mutex
@@ -275,6 +289,35 @@ func (p *interruptExitProvider) Interrupt(name string) error {
 	return p.Stop(name)
 }
 
+type staleIsRunningAfterInterruptProvider struct {
+	*runtime.Fake
+	mu          sync.Mutex
+	interrupted map[string]bool
+}
+
+func newStaleIsRunningAfterInterruptProvider() *staleIsRunningAfterInterruptProvider {
+	return &staleIsRunningAfterInterruptProvider{
+		Fake:        runtime.NewFake(),
+		interrupted: make(map[string]bool),
+	}
+}
+
+func (p *staleIsRunningAfterInterruptProvider) Interrupt(name string) error {
+	p.mu.Lock()
+	p.interrupted[name] = true
+	p.mu.Unlock()
+	return p.Fake.Interrupt(name)
+}
+
+func (p *staleIsRunningAfterInterruptProvider) IsRunning(name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.interrupted[name] {
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
 type dropDependencyAfterNStartsProvider struct {
 	*runtime.Fake
 	mu        sync.Mutex
@@ -443,7 +486,7 @@ func TestReconcileSessionBeads_FailedDependencyBlocksDependentButNotSibling(t *t
 	}
 }
 
-func TestPrepareStartCandidate_UsesLogicalTemplateForTaskWorkDir(t *testing.T) {
+func TestPrepareStartCandidate_UsesSessionIDForTaskWorkDir(t *testing.T) {
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{
 		Title:  "worker",
@@ -469,7 +512,7 @@ func TestPrepareStartCandidate_UsesLogicalTemplateForTaskWorkDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	status := "in_progress"
-	assignee := "frontend/worker"
+	assignee := session.ID
 	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
 		t.Fatal(err)
 	}
@@ -713,6 +756,55 @@ func TestReconcileSessionBeads_BlockedCandidatesDoNotConsumeWakeBudget(t *testin
 	}
 }
 
+// TestReconcileSessionBeads_DaemonMaxWakesPerTickOverride covers the fix for
+// issue #772: [daemon].max_wakes_per_tick = N raises (or lowers) the wake
+// budget away from the 5-per-tick default. Cities with slow cold-starts
+// need this to drain the candidate queue.
+func TestReconcileSessionBeads_DaemonMaxWakesPerTickOverride(t *testing.T) {
+	env := newReconcilerTestEnv()
+	override := 8
+	env.cfg = &config.City{
+		Daemon: config.DaemonConfig{MaxWakesPerTick: &override},
+		Agents: []config.Agent{
+			{Name: "ready-1"},
+			{Name: "ready-2"},
+			{Name: "ready-3"},
+			{Name: "ready-4"},
+			{Name: "ready-5"},
+			{Name: "ready-6"},
+			{Name: "ready-7"},
+			{Name: "ready-8"},
+			{Name: "ready-9"},
+		},
+	}
+	names := []string{"ready-1", "ready-2", "ready-3", "ready-4", "ready-5", "ready-6", "ready-7", "ready-8", "ready-9"}
+	for _, name := range names {
+		env.addDesired(name, name, false)
+	}
+
+	var seeded []beads.Bead
+	for _, name := range names {
+		b := env.createSessionBead(name, name)
+		env.markSessionCreating(&b)
+		seeded = append(seeded, b)
+	}
+
+	woken := env.reconcile(seeded)
+
+	if woken != override {
+		t.Fatalf("woken = %d, want %d (overridden wake budget)", woken, override)
+	}
+	// First 8 run, 9th is deferred_by_wake_budget.
+	for _, name := range names[:override] {
+		if !env.sp.IsRunning(name) {
+			t.Fatalf("%s should have started under override=%d", name, override)
+		}
+	}
+	if env.sp.IsRunning(names[override]) {
+		t.Fatalf("%s should have been deferred once budget hit", names[override])
+	}
+}
+
 func TestPrepareStartCandidate_NoneModeInitialMessageStaysInNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
@@ -826,7 +918,14 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 	}
 }
 
-func TestCommitStartResult_ClearsPendingCreateClaimBeforeHashBatch(t *testing.T) {
+// When the atomic start batch fails, NO state change lands: state stays
+// "creating", pending_create_claim stays "true", and the post-create marker
+// is absent. The reconciler's next tick retries via recoverRunningPendingCreate.
+// This is the intentional consequence of folding the claim clear into the
+// same SetMetadataBatch as the state/state_reason/creation_complete_at
+// transition so the sweep never observes a transient state without either
+// the claim or the marker.
+func TestCommitStartResult_AtomicBatchFailureLeavesClaimIntact(t *testing.T) {
 	store := &failingMetadataBatchStore{MemStore: beads.NewMemStore(), failBatch: true}
 	bead, err := store.Create(beads.Bead{
 		Title:  "helper",
@@ -836,6 +935,7 @@ func TestCommitStartResult_ClearsPendingCreateClaimBeforeHashBatch(t *testing.T)
 			"session_name":          "sky",
 			"session_name_explicit": "true",
 			"pending_create_claim":  "true",
+			"state":                 "creating",
 		},
 	})
 	if err != nil {
@@ -867,8 +967,181 @@ func TestCommitStartResult_ClearsPendingCreateClaimBeforeHashBatch(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want preserved (atomic batch failed, state unchanged)", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["state"] != "creating" {
+		t.Fatalf("state = %q, want creating (atomic batch failed)", got.Metadata["state"])
+	}
+	if got.Metadata["creation_complete_at"] != "" {
+		t.Fatalf("creation_complete_at = %q, want empty (atomic batch failed)", got.Metadata["creation_complete_at"])
+	}
+}
+
+func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadataRetry(t *testing.T) {
+	store := &failNthMetadataBatchStore{MemStore: beads.NewMemStore(), failOn: 2}
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)}
+	tp := TemplateParams{
+		Command:      "echo ready",
+		SessionName:  "sky",
+		TemplateName: "helper",
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":          "sky",
+			"session_name_explicit": "true",
+			"template":              "helper",
+			"state":                 "asleep",
+			"generation":            "1",
+			"instance_token":        "old-token",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.SetMeta("sky", "GC_DRAIN_ACK", "1"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN_ACK): %v", err)
+	}
+	if err := sp.SetMeta("sky", "GC_DRAIN", "manual"); err != nil {
+		t.Fatalf("SetMeta(GC_DRAIN): %v", err)
+	}
+
+	woken := executePlannedStarts(
+		context.Background(),
+		[]startCandidate{{session: &bead, tp: tp, order: 0}},
+		&config.City{Agents: []config.Agent{{Name: "helper"}}},
+		map[string]TemplateParams{"sky": tp},
+		sp,
+		store,
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 after metadata batch retry", woken)
+	}
+	if !sp.IsRunning("sky") {
+		t.Fatal("provider start should have succeeded before metadata retry")
+	}
+	if ack, _ := sp.GetMeta("sky", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK = %q, want cleared after provider start", ack)
+	}
+	if drain, _ := sp.GetMeta("sky", "GC_DRAIN"); drain != "manual" {
+		t.Fatalf("GC_DRAIN = %q, want explicit drain preserved", drain)
+	}
+}
+
+// recoverRunningPendingCreate heals an already-active bead whose runtime
+// is alive but whose pending_create_claim flag was left set (typically
+// after a partial write on a prior tick). The heal MUST stamp a fresh
+// creation_complete_at alongside the claim clear, otherwise the sweep's
+// post-create guard treats the healed bead as stale and the bead can be
+// closed on the next tick if the runtime briefly dies — re-opening the
+// spin loop this PR is meant to close.
+func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "sky",
+			"pending_create_claim": "true",
+			"state":                "active",
+			"state_reason":         "creation_complete",
+			// No creation_complete_at from the original start — the
+			// exact legacy shape recovery needs to heal.
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
+	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
+
+	if !recoverRunningPendingCreate(&bead, tp, cfg, store, &clock.Fake{Time: clkTime}, nil) {
+		t.Fatal("recoverRunningPendingCreate returned false, want true")
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+	if got.Metadata["creation_complete_at"] != clkTime.Format(time.RFC3339) {
+		t.Fatalf("creation_complete_at = %q, want %q — sweep guard would treat healed bead as stale without this stamp",
+			got.Metadata["creation_complete_at"], clkTime.Format(time.RFC3339))
+	}
+}
+
+// A successful atomic start batch must land state=active, state_reason,
+// creation_complete_at, AND the pending_create_claim clear together —
+// downstream readers (e.g. the pool bead sweep) rely on this atomicity so
+// they never observe state=active without either the claim or the
+// creation_complete_at marker that the post-create guard keys on.
+func TestCommitStartResult_AtomicBatchLandsStateAndClaimClearTogether(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "sky",
+			"pending_create_claim": "true",
+			"state":                "creating",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				session: &bead,
+				tp: TemplateParams{
+					SessionName:  "sky",
+					TemplateName: "helper",
+				},
+			},
+			coreHash: "core",
+			liveHash: "live",
+		},
+		outcome:  "success",
+		started:  time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC),
+		finished: time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC),
+	}
+
+	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
+	ok := commitStartResult(result, store, &clock.Fake{Time: clkTime}, events.Discard, 0, ioDiscard{}, ioDiscard{})
+	if !ok {
+		t.Fatal("commitStartResult returned false for successful start")
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["state"] != "active" {
+		t.Fatalf("state = %q, want active", got.Metadata["state"])
+	}
+	if got.Metadata["state_reason"] != "creation_complete" {
+		t.Fatalf("state_reason = %q, want creation_complete", got.Metadata["state_reason"])
+	}
+	if got.Metadata["creation_complete_at"] == "" {
+		t.Fatal("creation_complete_at empty — sweep guard would not key on post-create window")
+	}
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared atomically with state transition", got.Metadata["pending_create_claim"])
 	}
 }
 
@@ -1261,6 +1534,31 @@ func TestGracefulStopAll_UsesLegacyAgentLabelForPoolSubject(t *testing.T) {
 	}
 }
 
+func TestGracefulStopAll_UsesListRunningToStopLingeringSessions(t *testing.T) {
+	sp := newStaleIsRunningAfterInterruptProvider()
+	if err := sp.Start(context.Background(), "custom-worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := events.NewFake()
+	var stdout, stderr bytes.Buffer
+
+	gracefulStopAll([]string{"custom-worker"}, sp, 20*time.Millisecond, rec, nil, nil, &stdout, &stderr)
+
+	var stopCalls int
+	for _, call := range sp.Calls {
+		if call.Method == "Stop" && call.Name == "custom-worker" {
+			stopCalls++
+		}
+	}
+	if stopCalls == 0 {
+		t.Fatalf("expected gracefulStopAll to force-stop lingering session, calls=%+v", sp.Calls)
+	}
+	if !strings.Contains(stdout.String(), "Stopped agent 'custom-worker'") {
+		t.Fatalf("stdout = %q, want forced stop message", stdout.String())
+	}
+}
+
 func TestStopWaveOrder_HandlesUnknownTemplateWithoutSerialFallback(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -1304,7 +1602,7 @@ func TestStopTargetsBounded_FallsBackToSerialWhenTemplateUnresolved(t *testing.T
 			{name: "db", template: "db", subject: "db", order: 0, resolved: true},
 			{name: "worker", template: "worker", subject: "worker", order: 1, resolved: true},
 			{name: "custom", template: "custom-session", subject: "custom", order: 2, resolved: false},
-		}, cfg, sp, rec, "gc", &stdout, &stderr)
+		}, cfg, nil, sp, rec, "gc", &stdout, &stderr)
 	}()
 
 	first := sp.waitForStops(t, 1)
@@ -1365,7 +1663,7 @@ func TestStopTargetsBounded_AllUnresolvedFallsBackToSerial(t *testing.T) {
 			{name: "orphan-b", subject: "orphan-b", order: 1},
 			{name: "orphan-c", subject: "orphan-c", order: 2},
 			{name: "orphan-d", subject: "orphan-d", order: 3},
-		}, cfg, sp, rec, "gc", &stdout, &stderr)
+		}, cfg, nil, sp, rec, "gc", &stdout, &stderr)
 	}()
 
 	first := sp.waitForStops(t, 1)
@@ -1478,7 +1776,7 @@ func TestInterruptTargetsBounded_LogsSuccessOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	sent := interruptTargetsBounded([]stopTarget{{name: "worker", template: "worker", resolved: true}}, sp, &stderr)
+	sent := interruptTargetsBounded([]stopTarget{{name: "worker", template: "worker", resolved: true}}, nil, nil, sp, &stderr)
 	if sent != 1 {
 		t.Fatalf("sent = %d, want 1", sent)
 	}
@@ -1503,7 +1801,7 @@ func TestInterruptTargetsBounded_BroadcastsAllTargetsConcurrently(t *testing.T) 
 
 	done := make(chan int, 1)
 	go func() {
-		done <- interruptTargetsBounded(targets, sp, ioDiscard{})
+		done <- interruptTargetsBounded(targets, nil, nil, sp, ioDiscard{})
 	}()
 
 	first := sp.waitForInterrupts(t, len(targets))
@@ -1538,7 +1836,7 @@ func TestInterruptTargetsBounded_RespectsInterruptCap(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- interruptTargetsBounded(targets, sp, ioDiscard{})
+		done <- interruptTargetsBounded(targets, nil, nil, sp, ioDiscard{})
 	}()
 
 	first := sp.waitForInterrupts(t, defaultMaxParallelInterrupts)
@@ -1562,7 +1860,6 @@ func TestInterruptTargetsBounded_RespectsInterruptCap(t *testing.T) {
 
 func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 	sp := runtime.NewFake()
-	// Start both sessions.
 	for _, name := range []string{"human-worker", "pool-worker"} {
 		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
 			t.Fatal(err)
@@ -1573,7 +1870,7 @@ func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 		{name: "pool-worker", template: "pool", resolved: true, poolManaged: true},
 	}
 	var stderr bytes.Buffer
-	sent := interruptTargetsBounded(targets, sp, &stderr)
+	sent := interruptTargetsBounded(targets, nil, nil, sp, &stderr)
 	if sent != 1 {
 		t.Fatalf("sent = %d, want 1 (only human-worker)", sent)
 	}
@@ -1593,8 +1890,13 @@ func TestInterruptTargetsBounded_StopsPoolManagedSessions(t *testing.T) {
 func TestExecutePreparedStartWave_PanicIncludesStackTrace(t *testing.T) {
 	results := executePreparedStartWave(
 		context.Background(),
-		[]preparedStart{{candidate: startCandidate{session: &beads.Bead{Metadata: map[string]string{"session_name": "worker"}}}}},
+		[]preparedStart{{
+			candidate: startCandidate{session: &beads.Bead{Metadata: map[string]string{"session_name": "worker"}}},
+			cfg:       runtime.Config{Command: "panic-provider"},
+		}},
 		&panicStartProvider{Fake: runtime.NewFake()},
+		nil,
+		nil,
 		time.Second,
 		1,
 	)
@@ -1633,7 +1935,7 @@ func TestStopTargetsBounded_SanitizesMultilineStopError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	stopped := stopTargetsBounded([]stopTarget{{name: "worker", template: "worker", subject: "worker", resolved: true}}, &config.City{
 		Agents: []config.Agent{{Name: "worker"}},
-	}, sp, rec, "gc", &stdout, &stderr)
+	}, nil, sp, rec, "gc", &stdout, &stderr)
 	if stopped != 0 {
 		t.Fatalf("stopped = %d, want 0", stopped)
 	}
@@ -1813,6 +2115,10 @@ func (p *dieAfterStartProvider) Start(ctx context.Context, name string, cfg runt
 	return nil
 }
 
+func (p *dieAfterStartProvider) IsRunning(name string) bool {
+	return p.Fake.IsRunning(name)
+}
+
 func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
 	item := preparedStart{
@@ -1838,6 +2144,8 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetected(t *testing.T) {
 		context.Background(),
 		[]preparedStart{item},
 		sp,
+		nil,
+		nil,
 		10*time.Second,
 		1,
 	)
@@ -1880,6 +2188,8 @@ func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
 		context.Background(),
 		[]preparedStart{item},
 		sp,
+		nil,
+		nil,
 		10*time.Second,
 		1,
 	)
@@ -1966,10 +2276,12 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 	}
 
 	expected := templateParamsToConfig(tp)
-	expected.Env = mergeEnv(expected.Env, sessionpkg.RuntimeEnvWithAlias(
+	expected.Env = mergeEnv(expected.Env, sessionpkg.RuntimeEnvWithSessionContext(
 		bead.ID,
 		tp.SessionName,
 		tp.Alias,
+		bead.Metadata["template"],
+		bead.Metadata["session_origin"],
 		generation,
 		continuationEpoch,
 		bead.Metadata["instance_token"],
@@ -1982,6 +2294,147 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 	}
 	if got := prepared.cfg.Env["GC_HOME"]; got != "/tmp/gc-home" {
 		t.Fatalf("GC_HOME = %q, want %q", got, "/tmp/gc-home")
+	}
+}
+
+func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title: "ants-ant-1",
+		Type:  "task",
+		Metadata: map[string]string{
+			"session_name": "ants-ant-1",
+			"provider":     "claude",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	tp := TemplateParams{
+		Command: "claude",
+		// Shape matches setTemplateEnvIdentity output (GC_ALIAS+GC_AGENT stamped)
+		// plus an unrelated template key to verify the merge preserves it.
+		Env:                map[string]string{"GC_ALIAS": "ants-ant-1", "GC_AGENT": "ants-ant-1", "TEMPLATE_KEY": "keep"},
+		WorkDir:            t.TempDir(),
+		SessionName:        "ants-ant-1",
+		InstanceName:       "ants-ant-1",
+		PoolSlot:           1,
+		EnvIdentityStamped: true,
+		ResolvedProvider:   &config.ResolvedProvider{Name: "claude", PromptMode: "none"},
+		TemplateName:       "ants",
+	}
+
+	prepared, err := prepareStartCandidate(
+		startCandidate{session: &bead, tp: tp},
+		&config.City{},
+		store,
+		clock.Real{},
+	)
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	if got := prepared.cfg.Env["GC_ALIAS"]; got != "ants-ant-1" {
+		t.Fatalf("GC_ALIAS = %q, want %q (template value must survive merge when bead alias is empty)", got, "ants-ant-1")
+	}
+	if got := prepared.cfg.Env["GC_AGENT"]; got != "ants-ant-1" {
+		t.Fatalf("GC_AGENT = %q, want %q (companion identity key must also survive)", got, "ants-ant-1")
+	}
+	if got := prepared.cfg.Env["TEMPLATE_KEY"]; got != "keep" {
+		t.Fatalf("TEMPLATE_KEY = %q, want %q (unrelated template env must survive merge)", got, "keep")
+	}
+}
+
+func TestPrepareStartCandidate_EmptyAliasEverywhereKeepsEmptyForTmuxScrub(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title: "s-gc-test",
+		Type:  "task",
+		Metadata: map[string]string{
+			"session_name": "s-gc-test",
+			"provider":     "claude",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	tp := TemplateParams{
+		Command: "claude",
+		// Shape matches resolveTemplate output: GC_ALIAS is unconditionally
+		// seeded with qualifiedName on every session, pool or not. The guard
+		// must distinguish identity-stamped templates from the resolver's
+		// default stamping so that the empty runtime value still wins here
+		// and tmux emits `env -u GC_ALIAS`.
+		Env:              map[string]string{"GC_ALIAS": "s-gc-test", "GC_AGENT": "s-gc-test", "BASE": "1"},
+		WorkDir:          t.TempDir(),
+		SessionName:      "s-gc-test",
+		InstanceName:     "s-gc-test",
+		ResolvedProvider: &config.ResolvedProvider{Name: "claude", PromptMode: "none"},
+		TemplateName:     "s",
+		// EnvIdentityStamped is false — setTemplateEnvIdentity was not called.
+	}
+
+	prepared, err := prepareStartCandidate(
+		startCandidate{session: &bead, tp: tp},
+		&config.City{},
+		store,
+		clock.Real{},
+	)
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	got, ok := prepared.cfg.Env["GC_ALIAS"]
+	if !ok {
+		t.Fatalf("GC_ALIAS should be present with empty value so tmux emits `env -u GC_ALIAS`; got absent")
+	}
+	if got != "" {
+		t.Fatalf("GC_ALIAS = %q, want empty (tmux env -u scrub)", got)
+	}
+}
+
+func TestPrepareStartCandidate_NonEmptyBeadAliasOverridesTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title: "mayor",
+		Type:  "task",
+		Metadata: map[string]string{
+			"session_name": "s-mayor",
+			"provider":     "claude",
+			"alias":        "mayor",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	tp := TemplateParams{
+		Command:          "claude",
+		Env:              map[string]string{"GC_ALIAS": "stale-from-template"},
+		WorkDir:          t.TempDir(),
+		SessionName:      "s-mayor",
+		InstanceName:     "mayor",
+		ResolvedProvider: &config.ResolvedProvider{Name: "claude", PromptMode: "none"},
+		TemplateName:     "mayor",
+	}
+
+	prepared, err := prepareStartCandidate(
+		startCandidate{session: &bead, tp: tp},
+		&config.City{},
+		store,
+		clock.Real{},
+	)
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	if got := prepared.cfg.Env["GC_ALIAS"]; got != "mayor" {
+		t.Fatalf("GC_ALIAS = %q, want %q (runtime alias must override stale template value)", got, "mayor")
 	}
 }
 

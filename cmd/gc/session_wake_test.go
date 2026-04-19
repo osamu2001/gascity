@@ -10,12 +10,27 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 type countingWakeMetadataStore struct {
 	*beads.MemStore
 	singleCalls int
 	batchCalls  int
+}
+
+func makeWakeBead(id string, meta map[string]string) beads.Bead {
+	cloned := make(map[string]string, len(meta)+2)
+	for k, v := range meta {
+		cloned[k] = v
+	}
+	if cloned["provider"] == "" {
+		cloned["provider"] = "claude"
+	}
+	if cloned["work_dir"] == "" {
+		cloned["work_dir"] = "/tmp/gc-session-test"
+	}
+	return beads.Bead{ID: id, Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: cloned}
 }
 
 func (s *countingWakeMetadataStore) SetMetadata(id, key, value string) error {
@@ -209,69 +224,97 @@ func writeTestFile(path string) error {
 }
 
 func TestVerifiedStop_MatchingToken(t *testing.T) {
+	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
-	_ = sp.SetMeta("test-session", "GC_INSTANCE_TOKEN", "abc123")
+	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	session, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
 
-	session := makeBead("b1", map[string]string{
-		"session_name":   "test-session",
-		"instance_token": "abc123",
-	})
-
-	err := verifiedStop(session, sp)
+	err = verifiedStop(session, store, sp, nil)
 	if err != nil {
 		t.Errorf("verifiedStop with matching token: %v", err)
 	}
-	if sp.IsRunning("test-session") {
+	if sp.IsRunning(info.SessionName) {
 		t.Error("expected session to be stopped")
 	}
 }
 
 func TestVerifiedStop_MismatchedToken(t *testing.T) {
+	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
-	_ = sp.SetMeta("test-session", "GC_INSTANCE_TOKEN", "old-token")
+	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "instance_token", "new-token"); err != nil {
+		t.Fatalf("SetMetadata(instance_token): %v", err)
+	}
+	if err := sp.SetMeta(info.SessionName, "GC_INSTANCE_TOKEN", "old-token"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
+	session, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
 
-	session := makeBead("b1", map[string]string{
-		"session_name":   "test-session",
-		"instance_token": "new-token",
-	})
-
-	err := verifiedStop(session, sp)
+	err = verifiedStop(session, store, sp, nil)
 	if err == nil {
 		t.Error("expected error for mismatched token")
 	}
-	if !sp.IsRunning("test-session") {
+	if !sp.IsRunning(info.SessionName) {
 		t.Error("session should NOT be stopped on token mismatch")
 	}
 }
 
 func TestVerifiedStop_NoToken(t *testing.T) {
+	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
+	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "instance_token", ""); err != nil {
+		t.Fatalf("SetMetadata(instance_token): %v", err)
+	}
+	session, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
 
-	session := makeBead("b1", map[string]string{
-		"session_name":   "test-session",
-		"instance_token": "",
-	})
-
-	err := verifiedStop(session, sp)
+	err = verifiedStop(session, store, sp, nil)
 	if err != nil {
 		t.Errorf("verifiedStop with no token: %v", err)
 	}
 }
 
 func TestVerifiedInterrupt_MismatchedToken(t *testing.T) {
+	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
-	_ = sp.SetMeta("test-session", "GC_INSTANCE_TOKEN", "old-token")
+	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	info, err := mgr.Create(context.Background(), "worker", "Worker", "claude", t.TempDir(), "claude", nil, sessionpkg.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "instance_token", "new-token"); err != nil {
+		t.Fatalf("SetMetadata(instance_token): %v", err)
+	}
+	if err := sp.SetMeta(info.SessionName, "GC_INSTANCE_TOKEN", "old-token"); err != nil {
+		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
+	}
+	session, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
 
-	session := makeBead("b1", map[string]string{
-		"session_name":   "test-session",
-		"instance_token": "new-token",
-	})
-
-	err := verifiedInterrupt(session, sp)
+	err = verifiedInterrupt(session, store, sp, nil)
 	if err == nil {
 		t.Error("expected error for mismatched token")
 	}
@@ -285,7 +328,7 @@ func TestBeginSessionDrain(t *testing.T) {
 
 	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
 
-	session := makeBead("b1", map[string]string{
+	session := makeWakeBead("b1", map[string]string{
 		"session_name": "test-session",
 		"generation":   "5",
 	})
@@ -315,7 +358,7 @@ func TestBeginSessionDrain_AlreadyDraining(t *testing.T) {
 
 	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
 
-	session := makeBead("b1", map[string]string{
+	session := makeWakeBead("b1", map[string]string{
 		"session_name": "test-session",
 		"generation":   "5",
 	})
@@ -338,7 +381,7 @@ func TestCancelSessionDrain(t *testing.T) {
 		generation: 5,
 	})
 
-	session := makeBead("b1", map[string]string{
+	session := makeWakeBead("b1", map[string]string{
 		"generation": "5",
 	})
 
@@ -362,7 +405,7 @@ func TestCancelSessionDrain_ClearsAck(t *testing.T) {
 		ackSet:     true,
 	})
 
-	session := makeBead("b1", map[string]string{
+	session := makeWakeBead("b1", map[string]string{
 		"session_name": "test-session",
 		"generation":   "5",
 	})
@@ -385,12 +428,32 @@ func TestCancelSessionDrain_GenerationMismatch(t *testing.T) {
 		generation: 5,
 	})
 
-	session := makeBead("b1", map[string]string{
+	session := makeWakeBead("b1", map[string]string{
 		"generation": "6", // re-woken
 	})
 
 	if cancelSessionDrain(session, sp, dt) {
 		t.Error("cancel should fail when generation doesn't match")
+	}
+}
+
+func TestCancelSessionDrain_NonCancelableReason(t *testing.T) {
+	sp := runtime.NewFake()
+	dt := newDrainTracker()
+	dt.set("b1", &drainState{
+		reason:     "orphaned",
+		generation: 5,
+	})
+
+	session := makeWakeBead("b1", map[string]string{
+		"generation": "5",
+	})
+
+	if cancelSessionDrain(session, sp, dt) {
+		t.Error("cancel should fail for non-cancelable drain reason")
+	}
+	if ds := dt.get("b1"); ds == nil || ds.reason != "orphaned" {
+		t.Errorf("non-cancelable drain should remain, got %+v", ds)
 	}
 }
 
@@ -425,7 +488,7 @@ func TestAdvanceSessionDrains_ProcessExited(t *testing.T) {
 	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}, cfg, map[string]int{}, nil, nil, clk)
+	}, cfg, map[string]int{"worker": 1}, nil, nil, clk)
 
 	// Drain should be cleaned up.
 	if dt.get(b.ID) != nil {
@@ -453,11 +516,16 @@ func TestAdvanceSessionDrains_Timeout(t *testing.T) {
 	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
+			"provider":     "claude",
+			"work_dir":     t.TempDir(),
 			"generation":   "3",
+			"state":        "active",
 		},
 	})
 
@@ -496,10 +564,14 @@ func TestAdvanceSessionDrains_WakeReasonsReappear(t *testing.T) {
 	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
+			"provider":     "claude",
+			"work_dir":     t.TempDir(),
 			"generation":   "3",
 		},
 	})
@@ -542,16 +614,20 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name": "test-session",
 			"template":     "worker",
+			"provider":     "claude",
+			"work_dir":     t.TempDir(),
 			"generation":   "3",
 		},
 	})
 
 	// beginSessionDrain no longer sends Ctrl-C immediately.
-	beginSessionDrain(makeBead(b.ID, map[string]string{
+	beginSessionDrain(makeWakeBead(b.ID, map[string]string{
 		"session_name": "test-session",
 		"generation":   "3",
 	}), sp, dt, "orphaned", clk, 30*time.Second)
@@ -570,16 +646,8 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CanceledBeforeSignal(t *testing.
 		return &got
 	}, cfg, map[string]int{"worker": 1}, nil, nil, clk)
 
-	// Drain should be canceled — orphaned drains ARE cancelable in the
-	// advanceSessionDrains cancelation check since they're based on
-	// desired-state membership. But wait: orphaned IS in the non-cancelable
-	// list (reason != "config-drift" && reason != "orphaned" && reason != "suspended").
-	// So the drain survives cancelation but should still have sent the
-	// deferred interrupt. Let's verify the interrupt WAS sent for a
-	// non-cancelable drain.
-
-	// For orphaned drains (non-cancelable), GC_DRAIN_ACK should be set
-	// on the advance tick since the drain isn't canceled.
+	// Orphaned drains are non-cancelable because the session is leaving the
+	// desired set. The drain survives and receives its deferred signal.
 	ds := dt.get(b.ID)
 	if ds == nil {
 		t.Fatal("orphaned drain should not be canceled by wake reasons")
@@ -623,7 +691,7 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CancelableNoSignal(t *testing.T)
 	})
 
 	// Begin a cancelable drain (no-wake-reason).
-	beginSessionDrain(makeBead(b.ID, map[string]string{
+	beginSessionDrain(makeWakeBead(b.ID, map[string]string{
 		"session_name": "test-session",
 		"generation":   "3",
 	}), sp, dt, "no-wake-reason", clk, 30*time.Second)
@@ -658,7 +726,7 @@ func TestAdvanceSessionDrains_DeferredInterrupt_CancelableNoSignal(t *testing.T)
 	}
 }
 
-func TestAdvanceSessionDrains_ConfigDriftNotCancelable(t *testing.T) {
+func TestAdvanceSessionDrains_ConfigDriftCancelableOnPendingWake(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 	sp := runtime.NewFake()
@@ -680,26 +748,20 @@ func TestAdvanceSessionDrains_ConfigDriftNotCancelable(t *testing.T) {
 	dt.set(b.ID, &drainState{
 		startedAt:  now.Add(-10 * time.Second),
 		deadline:   now.Add(20 * time.Second),
-		reason:     "config-drift", // NOT cancelable
+		reason:     "config-drift",
 		generation: 3,
 	})
 
-	// Config has the worker agent — but config-drift drains are not canceled.
-	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "worker"},
-		},
-	}
-
-	advanceSessionDrains(dt, sp, store, func(id string) *beads.Bead {
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	advanceSessionDrainsWithSessionsTraced(dt, sp, store, func(id string) *beads.Bead {
 		got, _ := store.Get(id)
 		return &got
-	}, cfg, map[string]int{}, nil, nil, clk)
+	}, []beads.Bead{b}, map[string]wakeEvaluation{
+		b.ID: {Reasons: []WakeReason{WakePending}},
+	}, cfg, map[string]int{"worker": 1}, nil, nil, clk, nil)
 
-	// Drain should NOT be canceled — config-drift is non-cancelable.
-	// Session is alive and deadline not reached, so drain continues.
-	if dt.get(b.ID) == nil {
-		t.Error("config-drift drain should not be canceled by wake reasons")
+	if dt.get(b.ID) != nil {
+		t.Error("config-drift drain should be canceled by a pending wake")
 	}
 }
 
@@ -715,10 +777,14 @@ func TestAdvanceSessionDrains_TimeoutTokenMismatch(t *testing.T) {
 	_ = sp.SetMeta("test-session", "GC_INSTANCE_TOKEN", "new-token")
 
 	b, _ := store.Create(beads.Bead{
-		Title: "test",
+		Title:  "test",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
 			"session_name":   "test-session",
 			"template":       "worker",
+			"provider":       "claude",
+			"work_dir":       t.TempDir(),
 			"generation":     "3",
 			"instance_token": "old-token", // stale token
 		},
@@ -843,6 +909,28 @@ func TestCompleteDrain_ResumeModePreservesIdentity(t *testing.T) {
 	}
 	if got.Metadata["last_woke_at"] != "" {
 		t.Errorf("last_woke_at should be cleared, got %q", got.Metadata["last_woke_at"])
+	}
+}
+
+func TestCompleteDrain_ClearsPendingCreateClaim(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+
+	b, _ := store.Create(beads.Bead{
+		Title: "test",
+		Metadata: map[string]string{
+			"session_name":         "test-session",
+			"pending_create_claim": "true",
+		},
+	})
+
+	ds := &drainState{reason: "idle"}
+	completeDrain(&b, store, ds, clk)
+
+	got, _ := store.Get(b.ID)
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Errorf("pending_create_claim = %q, want cleared after drain completion", got.Metadata["pending_create_claim"])
 	}
 }
 

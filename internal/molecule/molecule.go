@@ -40,6 +40,11 @@ type Options struct {
 	// PriorityOverride forces every created bead to use the given priority.
 	// When nil, each step's compiled priority is used.
 	PriorityOverride *int
+
+	// PreserveRootType keeps the root bead's declared type instead of
+	// coercing legacy non-workflow roots to molecule containers. Attach uses
+	// this for executable sub-DAG roots such as retry attempts.
+	PreserveRootType bool
 }
 
 // FragmentOptions configures instantiation of a rootless recipe fragment into
@@ -246,6 +251,7 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		Title:            opts.Title,
 		Vars:             opts.Vars,
 		PriorityOverride: clonePriority(parentBead.Priority),
+		PreserveRootType: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("instantiate: %w", err)
@@ -333,7 +339,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
-	if GraphApplyEnabled {
+	if IsGraphApplyEnabled() {
 		if applier, ok := store.(beads.GraphApplyStore); ok {
 			return instantiateViaGraphApply(ctx, applier, recipe, opts)
 		}
@@ -377,7 +383,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 		}
 		// Root bead overrides.
 		if step.IsRoot {
-			if step.Metadata["gc.kind"] != "workflow" {
+			if !opts.PreserveRootType && step.Metadata["gc.kind"] != "workflow" {
 				b.Type = "molecule"
 			}
 			b.Ref = recipe.Name
@@ -536,7 +542,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 		}
 		priorityOverride = clonePriority(root.Priority)
 	}
-	if GraphApplyEnabled {
+	if IsGraphApplyEnabled() {
 		if applier, ok := store.(beads.GraphApplyStore); ok {
 			opts.PriorityOverride = priorityOverride
 			return instantiateFragmentViaGraphApply(ctx, store, applier, recipe, opts)

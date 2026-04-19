@@ -31,7 +31,9 @@ In Gas Town, it is normal to think in terms of:
 
 In Gas City, the default mental model should be:
 
-- everything is configured in `city.toml` plus packs
+- reusable behavior lives in `pack.toml` plus pack directories
+- deployment choices live in `city.toml`
+- machine-local bindings and runtime state live in `.gc/`
 - every durable work item is a bead
 - agents are generic; roles come from prompts, formulas, orders, and config
 - the controller owns SDK infrastructure behavior
@@ -45,14 +47,14 @@ can be expressed in.
 
 | Gas Town concept | Gas City concept | What changes for you |
 |---|---|---|
-| Town config + rig config + role homes | `city.toml` plus packs and overrides | Most behavior is configured declaratively in one place instead of being spread across role-specific directories and managers. |
+| Town config + rig config + role homes | PackV2: `pack.toml`, `city.toml`, `agents/`, and `.gc/` | Definition, deployment, and machine-local state are separated instead of being spread across role-specific directories and managers. |
 | Mayor, deacon, witness, refinery, polecat, crew, dog | Configured agents | Gas City has no baked-in role names in Go. These are pack conventions, not SDK primitives. |
 | Plugin | Order | An exec order runs shell directly with no agent session. A formula order instantiates agent work. If you were thinking "plugin that runs a command", start with an exec order. |
 | Convoy | Convoy bead plus sling/formulas | Convoys are still bead-backed work grouping, but there is no special convoy runtime layer you have to use to get orchestration. |
-| Dog | Usually an order first, sometimes a pool agent | In Gas Town, dogs are named infrastructure helpers. In Gas City, a lot of that work is cleaner as exec orders because no LLM session is needed. |
+| Dog | Usually an order first, sometimes a scalable session config | In Gas Town, dogs are named infrastructure helpers. In Gas City, a lot of that work is cleaner as exec orders because no LLM session is needed. |
 | Deacon watchdog logic | Controller and supervisor | Health patrol, order dispatch, wisp GC, and reconciliation are controller concerns, not role-agent responsibilities. |
-| Witness lifecycle logic | Pack behavior built on waits, formulas, pool config, and controller wake/sleep | The SDK gives you the mechanisms. A pack decides whether to model a witness role at all. |
-| Crew and polecats as hard types | Persistent agents and pool agents | "Crew" and "polecat" are operating styles. Gas City only knows agent config and pool behavior. |
+| Witness lifecycle logic | Pack behavior built on waits, formulas, session scale config, and controller wake/sleep | The SDK gives you the mechanisms. A pack decides whether to model a witness role at all. |
+| Crew and polecats as hard types | Persistent sessions and scalable session configs | "Crew" and "polecat" are operating styles. Gas City only knows agent config and session behavior. |
 | Directory tree under `~/gt` | `dir` for identity scope and `work_dir` for session cwd | Do not encode architecture into paths. Keep identity in config and metadata. Use `work_dir` only when a role really needs filesystem isolation. |
 | Role-specific startup files and local settings dirs | Prompt templates, overlays, provider hooks, `pre_start`, `session_setup`, `gc prime` | Startup shaping is explicit and provider-aware instead of being mostly inferred from where a role lives on disk. |
 | Path-derived identity | Explicit agent identity, rig scope, env, bead metadata | Avoid porting code or prompts that assume cwd implies who the agent is. |
@@ -74,19 +76,17 @@ That keeps role behavior in configuration instead of hardcoding more role
 semantics into the SDK, while still making the common day-one workflow feel
 local and incremental.
 
-### Start In `city.toml`
+### Start With The City Pack And `city.toml`
 
 This is the main day-one habit to adopt.
 
-Most Gas Town users should begin in their local `city.toml`, not by editing a
-pack. Packs are for reusable defaults. Your local city config is for:
+Most Gas Town users should begin with the root city pack plus `city.toml`, not
+by editing an imported shared pack. The split is:
 
-- registering rigs
-- including the Gastown pack
-- adding named crew agents
-- changing providers
-- overriding pool sizes
-- tweaking prompts, hooks, overlays, and timeouts for your own city
+- `pack.toml` imports reusable packs and defines city-specific behavior
+- `agents/<name>/` defines city-owned named agents
+- `city.toml` declares deployment choices such as rigs, substrates, and scale
+- `.gc/` stores site bindings such as local rig paths
 
 Reach for a pack edit when the change should become the new reusable default
 for every consumer of that pack.
@@ -126,7 +126,7 @@ In Gas Town, these feel like first-class worker types. In Gas City, they are
 best thought of as conventions:
 
 - **crew**: persistent named agents you expect humans to reason about
-- **polecats**: pooled or transient agents, often with dedicated worktrees
+- **polecats**: scalable or transient sessions, often with dedicated worktrees
 
 That distinction is real and useful, but the SDK does not force it. A pack can
 adopt the convention, relax it, or replace it.
@@ -140,7 +140,7 @@ Gas City, the controller is the canonical owner of infrastructure operations
 like:
 
 - reconcile desired sessions to running sessions
-- pool scaling
+- session scaling
 - order evaluation
 - health patrol
 - wisp garbage collection
@@ -200,7 +200,7 @@ Ask this first:
 If yes, prefer the order. That gives you trigger logic, history, and controller
 ownership without burning an agent slot.
 
-Reach for a dog-like pool agent only if the task truly needs a long-lived
+Reach for a dog-like scalable session config only if the task truly needs a long-lived
 session, rich interactive context, or repeated agent judgment.
 
 ### "I need a witness-like lifecycle manager"
@@ -232,52 +232,73 @@ Use an exec order before inventing a plugin, helper role, or hidden session.
 
 That is the direct Gas City answer to many old Town automation tasks.
 
-## Common Gastown Overrides In `city.toml`
+## Common Gastown Overrides In PackV2
 
 If you are using the Gastown pack, these are the most common local changes.
 
 ### Register a rig
 
-This activates the rig-scoped Gastown agents for one repo:
+Import the Gastown pack in the root pack, then bind rigs in `city.toml` and
+with `gc rig add`:
 
 ```toml
-[[rigs]]
-name = "myproject"
-path = "/path/to/myproject"
-includes = ["packs/gastown"]
+# pack.toml
+[pack]
+name = "my-city"
+schema = 2
+
+[imports.gastown]
+source = "./assets/gastown"
 ```
 
-### Increase or shrink the polecat pool
+```toml
+# city.toml
+[[rigs]]
+name = "myproject"
+
+[rigs.imports.gastown]
+source = "./assets/gastown"
+```
+
+```bash
+gc rig add /path/to/myproject --name myproject
+```
+
+### Increase or shrink scalable polecat sessions
 
 This is the cleanest answer to "I want more or fewer polecats for this rig."
 
 ```toml
+# city.toml
 [[rigs]]
 name = "myproject"
-path = "/path/to/myproject"
-includes = ["packs/gastown"]
 
-[[rigs.overrides]]
-agent = "polecat"
+[rigs.imports.gastown]
+source = "./assets/gastown"
 
-[rigs.overrides.pool]
+[[rigs.patches]]
+agent = "gastown.polecat"
+
+[rigs.patches.pool]
 max = 10
 ```
 
 ### Change the provider for one rig's polecats
 
 ```toml
+# city.toml
 [[rigs]]
 name = "myproject"
-path = "/path/to/myproject"
-includes = ["packs/gastown"]
 
-[[rigs.overrides]]
-agent = "polecat"
+[rigs.imports.gastown]
+source = "./assets/gastown"
+
+[[rigs.patches]]
+agent = "gastown.polecat"
 provider = "codex"
 ```
 
-You can combine that with pool overrides, env, prompt changes, or hook changes
+You can combine that with session scale overrides, env, prompt changes, or hook changes
 on the same override block.
 
 ### Change a city-scoped Gastown agent
@@ -287,25 +308,28 @@ with patches:
 
 ```toml
 [[patches.agent]]
-dir = ""
-name = "mayor"
+name = "gastown.mayor"
 provider = "codex"
 idle_timeout = "2h"
 ```
 
 Use patches when the target is already a concrete city-scoped agent. Use
-`[[rigs.overrides]]` when the target is a pack agent stamped per rig.
+`[[rigs.patches]]` when the target is a pack agent stamped per rig.
 
 ### Add a named crew agent
 
-Crew is usually city-specific, so it often belongs directly in `city.toml`
-rather than in the shared Gastown pack:
+Crew is usually city-specific, so it often belongs in the root city pack rather
+than in the shared Gastown pack:
+
+```text
+agents/wolf/
+├── agent.toml
+└── prompt.template.md
+```
 
 ```toml
-[[agent]]
-name = "wolf"
-dir = "myproject"
-prompt_template = "packs/gastown/prompts/crew.md.tmpl"
+# agents/wolf/agent.toml
+scope = "rig"
 nudge = "Check your hook and mail, then act accordingly."
 work_dir = ".gc/worktrees/myproject/crew/wolf"
 idle_timeout = "4h"
@@ -319,17 +343,20 @@ long-lived workers.
 This is what rig overrides are for:
 
 ```toml
+# city.toml
 [[rigs]]
 name = "myproject"
-path = "/path/to/myproject"
-includes = ["packs/gastown"]
 
-[[rigs.overrides]]
-agent = "refinery"
-prompt_template = "local/prompts/refinery.md.tmpl"
-overlay_dir = "local/overlays/refinery"
+[rigs.imports.gastown]
+source = "./assets/gastown"
+
+[[rigs.patches]]
+agent = "gastown.refinery"
 idle_timeout = "4h"
 ```
+
+For prompt or overlay replacement, patch the imported agent from your root city
+pack rather than editing the shared pack in place.
 
 If that change turns out to be broadly useful across cities, that is when it
 should move into the pack.
@@ -418,7 +445,7 @@ Two rules help a lot:
 | `gt mayor` | Gastown pack `mayor` agent plus `gc session attach mayor` / `gc status` | Managed as a configured agent, not a baked-in command family. |
 | `gt deacon` | Gastown pack `deacon` agent plus `gc session`, `gc status`, controller behavior | In Gas City, much of what deacon did lives in the controller/supervisor. |
 | `gt boot` | Gastown pack `boot` agent | Same pattern as other role agents. |
-| `gt dog` | usually `gc order`, sometimes a pooled agent in `city.toml` | Dog-like helpers are often better modeled as exec orders. |
+| `gt dog` | usually `gc order`, sometimes a scalable session config in `city.toml` | Dog-like helpers are often better modeled as exec orders. |
 | `gt role` | `gc config explain`, `gc session list`, prompt/config inspection | Role is not a first-class SDK concept. |
 | `gt callbacks` | no direct equivalent | Callback behavior is folded into runtime, hooks, waits, and orders. |
 | `gt cycle` | no direct generic command | Closest equivalents are tmux bindings or pack-specific session UX. |

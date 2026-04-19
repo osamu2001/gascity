@@ -76,6 +76,16 @@ func TestApplyRalphEmitsSpecBeadInsteadOfInlineSourceSpec(t *testing.T) {
 	if got := control.Metadata["gc.source_step_spec"]; got != "" {
 		t.Fatalf("control gc.source_step_spec = %q, want empty; source spec must live in spec bead", got)
 	}
+	var frozenRaw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(spec.Description), &frozenRaw); err != nil {
+		t.Fatalf("unmarshal frozen raw spec: %v", err)
+	}
+	if _, ok := frozenRaw["ralph"]; !ok {
+		t.Fatalf("frozen raw spec = %v, want legacy ralph key for compatibility", frozenRaw)
+	}
+	if _, ok := frozenRaw["check"]; ok {
+		t.Fatalf("frozen raw spec unexpectedly wrote canonical check key")
+	}
 	assertFrozenSpecStep(t, spec, "converge", func(frozen Step) {
 		if frozen.Ralph == nil || frozen.Ralph.MaxAttempts != 5 {
 			t.Fatalf("frozen ralph = %+v, want max_attempts=5", frozen.Ralph)
@@ -158,9 +168,9 @@ func TestNamespaceSourceSpecStepPreservesNestedRef(t *testing.T) {
 }
 
 func TestCompileControlSpecBeadsAreNotWorkflowSinks(t *testing.T) {
-	oldFormulaV2 := FormulaV2Enabled
-	FormulaV2Enabled = true
-	t.Cleanup(func() { FormulaV2Enabled = oldFormulaV2 })
+	oldFormulaV2 := IsFormulaV2Enabled()
+	SetFormulaV2Enabled(true)
+	t.Cleanup(func() { SetFormulaV2Enabled(oldFormulaV2) })
 
 	dir := t.TempDir()
 	formulaContent := `
@@ -170,7 +180,7 @@ version = 2
 [[steps]]
 id = "review"
 title = "Review"
-assignee = "polecat"
+metadata = { "gc.run_target" = "polecat" }
 type = "task"
 
 [steps.retry]
@@ -183,14 +193,14 @@ title = "Converge"
 type = "task"
 needs = ["review"]
 
-[steps.ralph]
+[steps.check]
 max_attempts = 2
 
-[steps.ralph.check]
+[steps.check.check]
 mode = "exec"
 path = "check.sh"
 `
-	if err := os.WriteFile(filepath.Join(dir, "control-spec-demo.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "control-spec-demo.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

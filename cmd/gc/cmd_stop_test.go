@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,8 +54,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 	const seededSession = "seeded-session"
 
-	var controllerStdout bytes.Buffer
-	var controllerStderr syncBuffer
+	var controllerStdout, controllerStderr bytes.Buffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
@@ -71,7 +72,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 		}
 	})
 
-	waitForController(t, dir, 5*time.Second, done, &controllerStderr)
+	waitForController(t, dir)
 	if err := sp.Start(context.Background(), seededSession, runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +122,58 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("unexpected stderr: %q", stderr.String())
+	}
+}
+
+func TestStopCityManagedBeadsProviderIfRunningStopsDefaultBD(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := gcBeadsBdScriptPath(cityDir)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	logFile := filepath.Join(t.TempDir(), "ops.log")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$@\" >> \""+logFile+"\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close() //nolint:errcheck
+
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-state.json"), stateData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	stopCityManagedBeadsProviderIfRunning(cityDir, &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected stderr: %q", stderr.String())
+	}
+	ops := readOpLog(t, logFile)
+	if len(ops) != 1 || ops[0] != "stop" {
+		t.Fatalf("provider ops = %v, want [stop]", ops)
 	}
 }
 
@@ -218,8 +271,7 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
 
-	var controllerStdout bytes.Buffer
-	var controllerStderr syncBuffer
+	var controllerStdout, controllerStderr bytes.Buffer
 	done := make(chan struct{})
 	go func() {
 		runController(dir, filepath.Join(dir, "city.toml"), cfg, "", buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &controllerStdout, &controllerStderr)
@@ -237,7 +289,7 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 		}
 	})
 
-	waitForController(t, dir, 5*time.Second, done, &controllerStderr)
+	waitForController(t, dir)
 
 	const sess = "margin-session"
 	if err := sp.Start(context.Background(), sess, runtime.Config{}); err != nil {

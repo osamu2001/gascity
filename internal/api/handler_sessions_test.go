@@ -4,20 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 func newSessionFakeState(t *testing.T) *fakeState {
@@ -37,6 +41,15 @@ func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title 
 	return info
 }
 
+func writeGeminiHistoryFixtureForAPI(t *testing.T, path, sessionID string, messages ...string) {
+	t.Helper()
+
+	body := fmt.Sprintf("{\n  \"sessionId\": %q,\n  \"messages\": [\n    %s\n  ]\n}\n", sessionID, strings.Join(messages, ",\n    "))
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write gemini transcript %s: %v", path, err)
+	}
+}
+
 type cancelStartProvider struct {
 	*runtime.Fake
 }
@@ -46,6 +59,21 @@ func (p *cancelStartProvider) Start(ctx context.Context, name string, cfg runtim
 		return err
 	}
 	return p.Fake.Start(ctx, name, cfg)
+}
+
+type failNudgeProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *failNudgeProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	if err := p.Fake.Nudge(name, content); err != nil {
+		return err
+	}
+	if p.err != nil {
+		return p.err
+	}
+	return nil
 }
 
 type stateWithSessionProvider struct {
@@ -132,17 +160,64 @@ func writeNamedSessionJSONL(t *testing.T, searchBase, workDir, fileName string, 
 	}
 }
 
+type syncResponseRecorder struct {
+	*httptest.ResponseRecorder
+	mu sync.Mutex
+}
+
+func newSyncResponseRecorder() *syncResponseRecorder {
+	return &syncResponseRecorder{ResponseRecorder: httptest.NewRecorder()}
+}
+
+func (r *syncResponseRecorder) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ResponseRecorder.Write(p)
+}
+
+func (r *syncResponseRecorder) WriteHeader(code int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ResponseRecorder.WriteHeader(code)
+}
+
+func (r *syncResponseRecorder) WriteString(s string) (int, error) {
+	return r.Write([]byte(s))
+}
+
+func (r *syncResponseRecorder) BodyString() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Body.String()
+}
+
+func waitForRecorderSubstring(t *testing.T, rec *syncResponseRecorder, want string, timeout time.Duration) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		body := rec.BodyString()
+		if strings.Contains(body, want) {
+			return body
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return rec.BodyString()
+}
+
 func TestHandleSessionList(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Create two sessions.
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Session A")
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Session B")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
@@ -160,6 +235,8 @@ func TestHandleSessionList(t *testing.T) {
 func TestHandleSessionListFilterByState(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Suspend")
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Stay Active")
@@ -172,8 +249,8 @@ func TestHandleSessionListFilterByState(t *testing.T) {
 
 	// List only active.
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions?state=active", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions?state=active"), nil)
+	h.ServeHTTP(w, r)
 
 	var resp listResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
@@ -187,6 +264,8 @@ func TestHandleSessionListFilterByState(t *testing.T) {
 func TestHandleSessionListPagination(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Create 3 sessions.
 	createTestSession(t, fs.cityBeadStore, fs.sp, "S1")
@@ -195,8 +274,8 @@ func TestHandleSessionListPagination(t *testing.T) {
 
 	// Limit without cursor truncates but returns no next_cursor.
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions?limit=2", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions?limit=2"), nil)
+	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("limit-only: status %d", w.Code)
 	}
@@ -214,8 +293,8 @@ func TestHandleSessionListPagination(t *testing.T) {
 
 	// Cursor mode: first page.
 	w = httptest.NewRecorder()
-	r = httptest.NewRequest("GET", "/v0/sessions?cursor=&limit=2", nil)
-	srv.ServeHTTP(w, r)
+	r = httptest.NewRequest("GET", cityURL(fs, "/sessions?cursor=&limit=2"), nil)
+	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("page1: status %d", w.Code)
 	}
@@ -236,8 +315,8 @@ func TestHandleSessionListPagination(t *testing.T) {
 
 	// Cursor mode: second page.
 	w = httptest.NewRecorder()
-	r = httptest.NewRequest("GET", "/v0/sessions?cursor="+page1.NextCursor+"&limit=2", nil)
-	srv.ServeHTTP(w, r)
+	r = httptest.NewRequest("GET", cityURL(fs, "/sessions?cursor=")+page1.NextCursor+"&limit=2", nil)
+	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("page2: status %d", w.Code)
 	}
@@ -257,12 +336,14 @@ func TestHandleSessionListPagination(t *testing.T) {
 func TestHandleSessionGet(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
@@ -289,10 +370,12 @@ func TestHandleSessionGet(t *testing.T) {
 func TestHandleSessionGetNotFound(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/nonexistent", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/nonexistent"), nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("got status %d, want %d", w.Code, http.StatusNotFound)
@@ -302,12 +385,14 @@ func TestHandleSessionGetNotFound(t *testing.T) {
 func TestHandleSessionSuspend(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Suspend")
 
 	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/suspend", nil)
-	srv.ServeHTTP(w, r)
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/suspend", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -324,9 +409,56 @@ func TestHandleSessionSuspend(t *testing.T) {
 	}
 }
 
+// TestHandleSessionSuspend_IllegalTransition covers Fix 3j: illegal state
+// transitions from the manager surface as 409 Problem Details to the API.
+// Drain puts the session in Draining; a subsequent Suspend is illegal
+// (the state machine only allows Suspend from Active/Asleep/Quarantined).
+func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Drain")
+
+	// Drain the session directly via the manager (the API surface for drain
+	// lives elsewhere; this test isolates the transition check).
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	if err := mgr.BeginDrain(info.ID, "shutdown"); err != nil {
+		t.Fatalf("BeginDrain: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/suspend", nil)
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d (body: %s)", w.Code, http.StatusConflict, w.Body.String())
+	}
+
+	// Response body should be RFC 9457 Problem Details with the
+	// `illegal_transition:` semantic prefix in the detail field.
+	var problem struct {
+		Status int    `json:"status"`
+		Title  string `json:"title"`
+		Detail string `json:"detail"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&problem); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if problem.Status != http.StatusConflict {
+		t.Errorf("problem.status = %d, want %d", problem.Status, http.StatusConflict)
+	}
+	if !strings.Contains(problem.Detail, "illegal_transition") {
+		t.Errorf("problem.detail = %q, want substring %q", problem.Detail, "illegal_transition")
+	}
+}
+
 func TestHandleSessionClose(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Close")
 	wait, err := fs.cityBeadStore.Create(beads.Bead{
@@ -343,8 +475,8 @@ func TestHandleSessionClose(t *testing.T) {
 	nudgeID := seedQueuedWaitNudge(t, fs, wait, "default")
 
 	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/close", nil)
-	srv.ServeHTTP(w, r)
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/close", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -390,6 +522,8 @@ func TestHandleSessionClose(t *testing.T) {
 func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Historical Wait")
 	wait, err := fs.cityBeadStore.Create(beads.Bead{
@@ -430,8 +564,8 @@ func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {
 	})
 
 	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/wake", nil)
-	srv.ServeHTTP(w, r)
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -454,10 +588,12 @@ func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {
 func TestHandleSessionNoCityStore(t *testing.T) {
 	fs := newFakeState(t) // no cityBeadStore set
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("got status %d, want %d", w.Code, http.StatusServiceUnavailable)
@@ -467,6 +603,8 @@ func TestHandleSessionNoCityStore(t *testing.T) {
 func TestHandleSessionWake(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Held Session")
 	wait, err := fs.cityBeadStore.Create(beads.Bead{
@@ -491,8 +629,8 @@ func TestHandleSessionWake(t *testing.T) {
 	})
 
 	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/wake", nil)
-	srv.ServeHTTP(w, r)
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -543,14 +681,16 @@ func TestHandleSessionWake(t *testing.T) {
 func TestHandleSessionWakeClosed(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Closed Session")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	_ = mgr.Close(info.ID)
 
 	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/wake", nil)
-	srv.ServeHTTP(w, r)
+	r := newPostRequest(cityURL(fs, "/session/")+info.ID+"/wake", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
@@ -560,6 +700,8 @@ func TestHandleSessionWakeClosed(t *testing.T) {
 func TestHandleSessionGetByTemplateName(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Named Session")
 
@@ -569,8 +711,8 @@ func TestHandleSessionGetByTemplateName(t *testing.T) {
 	})
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/overseer", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/overseer"), nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -588,14 +730,16 @@ func TestHandleSessionGetByTemplateName(t *testing.T) {
 func TestHandleSessionPatchTitle(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 
 	body := `{"title":"Updated Title"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/session/")+info.ID, strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -613,14 +757,16 @@ func TestHandleSessionPatchTitle(t *testing.T) {
 func TestHandleSessionPatchAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 
 	body := `{"alias":"mayor"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/session/")+info.ID, strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -638,6 +784,8 @@ func TestHandleSessionPatchAlias(t *testing.T) {
 func TestHandleSessionPatchAliasRejectsManagedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
@@ -647,10 +795,10 @@ func TestHandleSessionPatchAliasRejectsManagedSession(t *testing.T) {
 	}
 
 	body := `{"alias":"new-mayor"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/session/")+info.ID, strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
@@ -660,6 +808,8 @@ func TestHandleSessionPatchAliasRejectsManagedSession(t *testing.T) {
 func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.Create(
@@ -678,10 +828,10 @@ func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 	}
 
 	body := `{"alias":"myrig/worker"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/session/")+info.ID, strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
@@ -689,25 +839,34 @@ func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 }
 
 func TestHandleSessionPatchImmutableField(t *testing.T) {
+	// Fix 3f(remnant): PATCH body is now a typed struct with
+	// additionalProperties:false on the schema, so unknown fields like
+	// "template" are rejected by Huma's validation layer (422) rather
+	// than the handler-side 403. This is a stricter error class for the
+	// same underlying constraint.
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
 
 	body := `{"template":"hacked"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
+	req := httptest.NewRequest("PATCH", cityURL(fs, "/session/")+info.ID, strings.NewReader(body))
 	req.Header.Set("X-GC-Request", "true")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
 	}
 }
 
 func TestHandleSessionListIncludesReason(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Held")
 
@@ -717,8 +876,8 @@ func TestHandleSessionListIncludesReason(t *testing.T) {
 	})
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
@@ -746,13 +905,15 @@ func TestHandleSessionListIncludesReason(t *testing.T) {
 func TestHandleSessionRename(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 
 	body := `{"title":"Renamed"}`
-	req := newPostRequest("/v0/session/"+info.ID+"/rename", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/rename", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -768,24 +929,31 @@ func TestHandleSessionRename(t *testing.T) {
 }
 
 func TestHandleSessionRenameEmptyTitle(t *testing.T) {
+	// Fix 3k(remnant): title now has minLength:"1"; empty-string bodies
+	// are rejected by Huma's validation layer (422) rather than the
+	// handler-side 400.
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
 
 	body := `{"title":""}`
-	req := newPostRequest("/v0/session/"+info.ID+"/rename", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/rename", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusUnprocessableEntity, w.Body.String())
 	}
 }
 
 func TestHandleSessionAmbiguousAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Create two sessions with the same public alias.
 	info1 := createTestSession(t, fs.cityBeadStore, fs.sp, "Worker 1")
@@ -794,8 +962,8 @@ func TestHandleSessionAmbiguousAlias(t *testing.T) {
 	_ = fs.cityBeadStore.SetMetadataBatch(info2.ID, map[string]string{"alias": "worker"})
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/worker", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/worker"), nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d (ambiguous); body: %s", w.Code, http.StatusConflict, w.Body.String())
@@ -805,12 +973,14 @@ func TestHandleSessionAmbiguousAlias(t *testing.T) {
 func TestHandleSessionGetEnrichment(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Enriched Session")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
@@ -832,12 +1002,14 @@ func TestHandleSessionGetEnrichment(t *testing.T) {
 func TestHandleSessionListPeek(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Peek Session")
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	h.ServeHTTP(w, r)
 
 	var resp struct {
 		Items []sessionResponse `json:"items"`
@@ -854,12 +1026,14 @@ func TestHandleSessionListPeek(t *testing.T) {
 func TestHandleSessionCreate(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	req.Header.Set("Idempotency-Key", "sess-create-1")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -888,11 +1062,13 @@ func TestHandleSessionCreate(t *testing.T) {
 func TestHandleSessionCreateAsync(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","alias":"sky","async":true}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -919,27 +1095,130 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 func TestHandleSessionCreateAsyncAcceptsInlineMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Agent sessions are always async; messages are stored as initial_message
 	// in template_overrides for the reconciler to pick up.
 	body := `{"kind":"agent","name":"myrig/worker","async":true,"message":"hello"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
 }
 
+func TestHandleSessionCreateAsync_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:              "ant",
+		Dir:               "myrig",
+		Provider:          "test-agent",
+		WorkDir:           ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(4),
+	}}
+	fs.cfg.NamedSessions = nil
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	for i := 0; i < 2; i++ {
+		req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/ant"}`))
+		req.Header.Set("Idempotency-Key", "pool-create-"+string(rune('a'+i)))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("create #%d status = %d, want %d; body: %s", i+1, rec.Code, http.StatusAccepted, rec.Body.String())
+		}
+	}
+
+	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("session bead count = %d, want 2", len(items))
+	}
+	seenWorkDir := make(map[string]bool, len(items))
+	for _, bead := range items {
+		if got := bead.Metadata["alias"]; got != "" {
+			t.Fatalf("alias = %q, want empty", got)
+		}
+		sessionName := bead.Metadata["session_name"]
+		if got := bead.Metadata["session_name_explicit"]; got != "true" {
+			t.Fatalf("session_name_explicit = %q, want %q", got, "true")
+		}
+		if !strings.HasPrefix(sessionName, "ant-adhoc-") {
+			t.Fatalf("session_name = %q, want ant-adhoc-*", sessionName)
+		}
+		workDir := bead.Metadata["work_dir"]
+		if filepath.Dir(workDir) != filepath.Join(fs.cityPath, ".gc", "worktrees", "myrig", "ants") {
+			t.Fatalf("work_dir parent = %q, want %q", filepath.Dir(workDir), filepath.Join(fs.cityPath, ".gc", "worktrees", "myrig", "ants"))
+		}
+		base := filepath.Base(workDir)
+		if !strings.HasPrefix(base, "ant-adhoc-") {
+			t.Fatalf("work_dir base = %q, want ant-adhoc-*", base)
+		}
+		if seenWorkDir[workDir] {
+			t.Fatalf("duplicate work_dir %q", workDir)
+		}
+		seenWorkDir[workDir] = true
+		if got := bead.Metadata["agent_name"]; got != "myrig/"+sessionName {
+			t.Fatalf("agent_name(%q) = %q, want %q", sessionName, got, "myrig/"+sessionName)
+		}
+	}
+}
+
+func TestHandleSessionCreateAsync_PoolTemplateCanonicalizesAliasCollisions(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:              "ant",
+		Dir:               "myrig",
+		Provider:          "test-agent",
+		WorkDir:           ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(4),
+	}}
+	fs.cfg.NamedSessions = nil
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"ant-fenrir"}`))
+	req.Header.Set("Idempotency-Key", "pool-alias-1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first create status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Alias != "myrig/ant-fenrir" {
+		t.Fatalf("Alias = %q, want canonical qualified alias", resp.Alias)
+	}
+
+	req = newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/ant","alias":"myrig/ant-fenrir"}`))
+	req.Header.Set("Idempotency-Key", "pool-alias-2")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("second create status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
 func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"provider","name":"test-agent","async":true}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
@@ -952,14 +1231,53 @@ func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 	}
 }
 
+func TestMaterializeNamedSession_RebrandedSingletonKeepsTemplateWorkDirIdentity(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents = []config.Agent{{
+		Name:              "witness",
+		Dir:               "myrig",
+		Provider:          "test-agent",
+		WorkDir:           ".gc/worktrees/{{.Rig}}/{{.AgentBase}}",
+		MaxActiveSessions: intPtr(1),
+	}}
+	fs.cfg.NamedSessions = []config.NamedSession{{
+		Name:     "boot",
+		Template: "witness",
+		Dir:      "myrig",
+	}}
+	srv := New(fs)
+
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/boot")
+	if err != nil {
+		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected named session spec")
+	}
+	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	if err != nil {
+		t.Fatalf("materializeNamedSession: %v", err)
+	}
+	bead, err := fs.cityBeadStore.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	wantWorkDir := filepath.Join(fs.cityPath, ".gc", "worktrees", "myrig", "witness")
+	if got := bead.Metadata["work_dir"]; got != wantWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, wantWorkDir)
+	}
+}
+
 func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"provider","name":"test-agent","message":"hello"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
@@ -990,14 +1308,70 @@ func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testi
 	}
 }
 
+func TestHandleProviderSessionCreateWithMessageRollsBackOnDeliveryFailure(t *testing.T) {
+	fs := newSessionFakeState(t)
+	provider := &failNudgeProvider{Fake: runtime.NewFake(), err: errors.New("nudge failed")}
+	wrappedState := &stateWithSessionProvider{fakeState: fs, provider: provider}
+	srv := New(wrappedState)
+	h := newTestCityHandlerWith(t, wrappedState, srv)
+
+	body := `{"kind":"provider","name":"test-agent","message":"hello","title":"Retryable"}`
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
+	req.Header.Set("Idempotency-Key", "provider-create-rollback")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("first create status = %d, want %d; body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "initial message delivery failed") {
+		t.Fatalf("first create body = %q, want initial message delivery failure detail", rec.Body.String())
+	}
+
+	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("session bead count after rollback = %d, want 0", len(items))
+	}
+	running, err := provider.ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	if len(running) != 0 {
+		t.Fatalf("running sessions after rollback = %v, want none", running)
+	}
+
+	provider.err = nil
+	req = newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
+	req.Header.Set("Idempotency-Key", "provider-create-rollback")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("retry create status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	items, err = fs.cityBeadStore.ListByLabel(session.LabelSession, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByLabel after retry: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("session bead count after retry = %d, want 1", len(items))
+	}
+}
+
 func TestHandleSessionCreatePersistsAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","alias":"sky"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -1018,11 +1392,13 @@ func TestHandleSessionCreatePersistsAlias(t *testing.T) {
 func TestHandleSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","alias":"myrig/worker"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
@@ -1032,11 +1408,13 @@ func TestHandleSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 func TestHandleProviderSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"provider","name":"test-agent","alias":"myrig/worker"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
@@ -1046,11 +1424,13 @@ func TestHandleProviderSessionCreateRejectsReservedQualifiedAlias(t *testing.T) 
 func TestHandleSessionCreateRejectsInvalidAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","alias":"bad:name"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
@@ -1060,11 +1440,13 @@ func TestHandleSessionCreateRejectsInvalidAlias(t *testing.T) {
 func TestHandleSessionCreateRejectsLegacySessionNameField(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","session_name":"mayor"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
@@ -1077,11 +1459,13 @@ func TestHandleSessionCreateRejectsLegacySessionNameField(t *testing.T) {
 func TestHandleSessionCreateRejectsEmptyLegacySessionNameField(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker","session_name":""}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
@@ -1094,17 +1478,19 @@ func TestHandleSessionCreateRejectsEmptyLegacySessionNameField(t *testing.T) {
 func TestHandleSessionCreateRejectsDuplicateAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	first := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
+	first := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
 	firstW := httptest.NewRecorder()
-	srv.ServeHTTP(firstW, first)
+	h.ServeHTTP(firstW, first)
 	if firstW.Code != http.StatusAccepted {
 		t.Fatalf("first create status %d, want %d; body: %s", firstW.Code, http.StatusAccepted, firstW.Body.String())
 	}
 
-	second := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
+	second := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
 	secondW := httptest.NewRecorder()
-	srv.ServeHTTP(secondW, second)
+	h.ServeHTTP(secondW, second)
 
 	if secondW.Code != http.StatusConflict {
 		t.Fatalf("got status %d, want %d; body: %s", secondW.Code, http.StatusConflict, secondW.Body.String())
@@ -1114,10 +1500,12 @@ func TestHandleSessionCreateRejectsDuplicateAlias(t *testing.T) {
 func TestHandleSessionCreateCanonicalizesBareTemplate(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"worker"}`))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"worker"}`))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -1175,14 +1563,16 @@ func newSessionFakeStateWithOptions(t *testing.T) *fakeState {
 	return fs
 }
 
-func TestHandleSessionCreateAppliesProviderDefaults(t *testing.T) {
+func TestHandleSessionCreateDoesNotApplyProviderDefaultsToAgentCommand(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	body := `{"kind":"agent","name":"myrig/worker"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -1198,56 +1588,24 @@ func TestHandleSessionCreateAppliesProviderDefaults(t *testing.T) {
 		t.Fatalf("get bead: %v", err)
 	}
 	cmd := b.Metadata["command"]
-	if !strings.Contains(cmd, "--skip-permissions") {
-		t.Errorf("command %q should contain --skip-permissions from provider default permission_mode=unrestricted", cmd)
-	}
-	if !strings.Contains(cmd, "--effort max") {
-		t.Errorf("command %q should contain --effort max from provider default effort=max", cmd)
-	}
-}
-
-func TestHandleSessionCreateMergesPartialOptionsWithDefaults(t *testing.T) {
-	fs := newSessionFakeStateWithOptions(t)
-	srv := New(fs)
-
-	body := `{"kind":"agent","name":"myrig/worker","options":{"effort":"high"}}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
-	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	b, err := fs.cityBeadStore.Get(resp.ID)
-	if err != nil {
-		t.Fatalf("get bead: %v", err)
-	}
-	cmd := b.Metadata["command"]
-	if !strings.Contains(cmd, "--skip-permissions") {
-		t.Errorf("command %q should contain --skip-permissions from unspecified default permission_mode=unrestricted", cmd)
-	}
-	if !strings.Contains(cmd, "--effort high") {
-		t.Errorf("command %q should contain --effort high from explicit option", cmd)
+	if strings.Contains(cmd, "--skip-permissions") {
+		t.Errorf("command %q should not contain provider default flags for deferred agent create", cmd)
 	}
 	if strings.Contains(cmd, "--effort max") {
-		t.Errorf("command %q should NOT contain --effort max — user specified high", cmd)
+		t.Errorf("command %q should not contain provider default effort=max for deferred agent create", cmd)
 	}
 }
 
-func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
+func TestHandleSessionCreateStoresExplicitOverridesWithoutCommandRewrite(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	body := `{"kind":"agent","name":"myrig/worker","options":{"permission_mode":"plan","effort":"low"}}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	body := `{"kind":"agent","name":"myrig/worker","options":{"effort":"high"}}`
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -1263,28 +1621,82 @@ func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
 		t.Fatalf("get bead: %v", err)
 	}
 	cmd := b.Metadata["command"]
-	if !strings.Contains(cmd, "--permission-mode plan") {
-		t.Errorf("command %q should contain --permission-mode plan from explicit option", cmd)
+	if strings.Contains(cmd, "--skip-permissions") || strings.Contains(cmd, "--effort high") || strings.Contains(cmd, "--effort max") {
+		t.Errorf("command %q should not be rewritten from provider defaults or explicit overrides", cmd)
 	}
-	if strings.Contains(cmd, "--skip-permissions") {
-		t.Errorf("command %q should NOT contain --skip-permissions — user specified plan", cmd)
+	ovr := b.Metadata["template_overrides"]
+	if ovr == "" {
+		t.Fatal("template_overrides not set")
 	}
-	if !strings.Contains(cmd, "--effort low") {
-		t.Errorf("command %q should contain --effort low from explicit option", cmd)
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(ovr), &parsed); err != nil {
+		t.Fatalf("parse template_overrides: %v", err)
+	}
+	if parsed["effort"] != "high" {
+		t.Errorf("effort = %q, want %q", parsed["effort"], "high")
+	}
+	if _, ok := parsed["permission_mode"]; ok {
+		t.Errorf("permission_mode override unexpectedly present: %#v", parsed)
+	}
+}
+
+func TestHandleSessionCreatePersistsExplicitOptionsInTemplateOverrides(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
+
+	body := `{"kind":"agent","name":"myrig/worker","options":{"permission_mode":"plan","effort":"low"}}`
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	b, err := fs.cityBeadStore.Get(resp.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	cmd := b.Metadata["command"]
+	if strings.Contains(cmd, "--permission-mode plan") || strings.Contains(cmd, "--skip-permissions") || strings.Contains(cmd, "--effort low") {
+		t.Errorf("command %q should not be rewritten from explicit overrides", cmd)
+	}
+	ovr := b.Metadata["template_overrides"]
+	if ovr == "" {
+		t.Fatal("template_overrides not set")
+	}
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(ovr), &parsed); err != nil {
+		t.Fatalf("parse template_overrides: %v", err)
+	}
+	if parsed["permission_mode"] != "plan" {
+		t.Errorf("permission_mode = %q, want %q", parsed["permission_mode"], "plan")
+	}
+	if parsed["effort"] != "low" {
+		t.Errorf("effort = %q, want %q", parsed["effort"], "low")
 	}
 }
 
 func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	// Create session with BOTH options AND a message.
 	// Regression: the old code overwrote template_overrides with just the
 	// options, clobbering the initial_message that was set at creation time.
 	body := `{"kind":"agent","name":"myrig/worker","message":"Hello from Discord!","options":{"effort":"high"}}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
+	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -1318,6 +1730,8 @@ func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
 func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Resume Me")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -1325,10 +1739,10 @@ func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t 
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	req := newPostRequest("/v0/session/"+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
 	req.Header.Set("Idempotency-Key", "sess-msg-1")
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
@@ -1351,10 +1765,12 @@ func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t 
 func TestHandleSessionMessageMaterializesNamedSessionUsingProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	req := newPostRequest("/v0/session/worker/messages", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/worker/messages"), strings.NewReader(`{"message":"hello"}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
@@ -1423,6 +1839,8 @@ func TestResolveSessionIDMaterializingNamedWithContext_RollsBackCanceledCreate(t
 func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
@@ -1437,8 +1855,8 @@ func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v0/session/"+id, nil)
-	srv.ServeHTTP(rec, req)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+id, nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -1454,15 +1872,20 @@ func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
 }
 
 func TestHandleSessionMessageInvalidNamedTargetDoesNotMaterialize(t *testing.T) {
+	// Fix 3k(remnant): whitespace-only messages are rejected by the
+	// pattern:"\\S" validation on the body; Huma returns 422 before
+	// the handler runs, so no session materializes.
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
-	req := newPostRequest("/v0/session/worker/messages", strings.NewReader(`{"message":"   "}`))
+	req := newPostRequest(cityURL(fs, "/session/worker/messages"), strings.NewReader(`{"message":"   "}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
 	}
 	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
 	if err != nil {
@@ -1476,6 +1899,8 @@ func TestHandleSessionMessageInvalidNamedTargetDoesNotMaterialize(t *testing.T) 
 func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.CreateAliasedNamedWithTransport(
@@ -1500,8 +1925,8 @@ func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testi
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v0/session/worker", nil)
-	srv.ServeHTTP(rec, req)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/worker"), nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("get status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
@@ -1512,6 +1937,8 @@ func TestHandleSessionCloseRejectsAlwaysNamedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	fs.cfg.NamedSessions[0].Mode = "always"
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
@@ -1526,8 +1953,8 @@ func TestHandleSessionCloseRejectsAlwaysNamedSession(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/"+id+"/close", nil)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/")+id+"/close", nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("close status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
@@ -1545,6 +1972,8 @@ func TestFindNamedSessionSpecForTarget_RequiresFullyQualifiedWhenAmbiguous(t *te
 		{Template: "worker", Dir: "rig-b"},
 	}
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	if _, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker"); err == nil || ok {
 		t.Fatalf("findNamedSessionSpecForTarget(worker) = ok=%v err=%v, want ambiguous error", ok, err)
@@ -1565,6 +1994,8 @@ func TestFindNamedSessionSpecForTarget_RequiresFullyQualifiedWhenAmbiguous(t *te
 func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNamedTarget(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	ordinary, err := fs.cityBeadStore.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -1600,6 +2031,8 @@ func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNa
 func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBead(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
@@ -1634,6 +2067,8 @@ func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBea
 func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSameTemplate(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	ordinary, err := fs.cityBeadStore.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -1683,6 +2118,8 @@ func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSa
 func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConflicts(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
 	if err != nil {
@@ -1713,10 +2150,12 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 func TestHandleSessionWakeMaterializesNamedSessionAndStartsRuntime(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/worker/wake", nil)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/worker/wake"), nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("wake status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -1752,14 +2191,16 @@ func TestHandleSessionWakeMaterializesNamedSessionAndStartsRuntime(t *testing.T)
 func TestHandleSessionWakeCanceledNamedCreateRollsBack(t *testing.T) {
 	fs := newSessionFakeState(t)
 	provider := &cancelStartProvider{Fake: runtime.NewFake()}
-	srv := New(&stateWithSessionProvider{fakeState: fs, provider: provider})
+	wrappedState := &stateWithSessionProvider{fakeState: fs, provider: provider}
+	srv := New(wrappedState)
+	h := newTestCityHandlerWith(t, wrappedState, srv)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/worker/wake", nil).WithContext(ctx)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/worker/wake"), nil).WithContext(ctx)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("wake status = %d, want %d; body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
@@ -1780,6 +2221,8 @@ func TestHandleSessionTranscriptUsesSessionKey(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -1803,14 +2246,14 @@ func TestHandleSessionTranscriptUsesSessionKey(t *testing.T) {
 	)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/transcript", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
 	}
 
-	var resp sessionTranscriptResponse
+	var resp SessionStreamMessageEvent
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -1826,6 +2269,8 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -1848,14 +2293,14 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/transcript?tail=0", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?tail=0", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
 	}
 
-	var resp sessionTranscriptResponse
+	var resp SessionStreamMessageEvent
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -1867,6 +2312,8 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 func TestHandleSessionPendingAndRespond(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
@@ -1876,8 +2323,8 @@ func TestHandleSessionPendingAndRespond(t *testing.T) {
 	})
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/pending", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/pending", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("pending status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -1891,10 +2338,10 @@ func TestHandleSessionPendingAndRespond(t *testing.T) {
 		t.Fatalf("pending response = %#v, want req-1", pendingResp)
 	}
 
-	respondReq := newPostRequest("/v0/session/"+info.ID+"/respond", strings.NewReader(`{"action":"approve"}`))
+	respondReq := newPostRequest(cityURL(fs, "/session/")+info.ID+"/respond", strings.NewReader(`{"action":"approve"}`))
 	respondReq.Header.Set("Idempotency-Key", "sess-respond-1")
 	respondRec := httptest.NewRecorder()
-	srv.ServeHTTP(respondRec, respondReq)
+	h.ServeHTTP(respondRec, respondReq)
 
 	if respondRec.Code != http.StatusAccepted {
 		t.Fatalf("respond status = %d, want %d; body: %s", respondRec.Code, http.StatusAccepted, respondRec.Body.String())
@@ -1907,6 +2354,8 @@ func TestHandleSessionPendingAndRespond(t *testing.T) {
 func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
@@ -1916,8 +2365,8 @@ func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/"+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
@@ -1935,6 +2384,8 @@ func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "myrig/worker", "Sky", "claude", t.TempDir(), "claude", "", nil, session.ProviderResume{}, runtime.Config{})
@@ -1946,8 +2397,8 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/sky/messages", strings.NewReader(`{"message":"hello"}`))
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/sky/messages"), strings.NewReader(`{"message":"hello"}`))
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
@@ -1960,6 +2411,8 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 func TestHandleSessionRespondMismatchedRequest(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
@@ -1968,9 +2421,9 @@ func TestHandleSessionRespondMismatchedRequest(t *testing.T) {
 		Prompt:    "approve?",
 	})
 
-	respondReq := newPostRequest("/v0/session/"+info.ID+"/respond", strings.NewReader(`{"request_id":"req-2","action":"approve"}`))
+	respondReq := newPostRequest(cityURL(fs, "/session/")+info.ID+"/respond", strings.NewReader(`{"request_id":"req-2","action":"approve"}`))
 	respondRec := httptest.NewRecorder()
-	srv.ServeHTTP(respondRec, respondReq)
+	h.ServeHTTP(respondRec, respondReq)
 
 	if respondRec.Code != http.StatusConflict {
 		t.Fatalf("respond status = %d, want %d; body: %s", respondRec.Code, http.StatusConflict, respondRec.Body.String())
@@ -1981,6 +2434,8 @@ func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2002,12 +2457,12 @@ func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 	<-done
@@ -2023,6 +2478,8 @@ func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2035,8 +2492,8 @@ func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil)
-	srv.ServeHTTP(rec, req)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("got status %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
@@ -2047,6 +2504,8 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2068,11 +2527,11 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil)
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 
@@ -2085,12 +2544,19 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") || !strings.Contains(rec.Body.String(), "world") {
 		t.Errorf("stream body missing closed-session snapshot: %s", rec.Body.String())
 	}
+	for _, event := range fs.eventProv.(*events.Fake).Events {
+		if event.Type == events.WorkerOperation {
+			t.Fatalf("closed session stream emitted worker operation event: %#v", event)
+		}
+	}
 }
 
 func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2112,11 +2578,11 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/v0/session/sky/stream", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/sky/stream"), nil)
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 
@@ -2131,45 +2597,60 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 	}
 }
 
-func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t *testing.T) {
+func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundaries(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-
 	searchBase := t.TempDir()
-	workDir := t.TempDir()
-	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
 	}
-	logPath := filepath.Join(logDir, "session.jsonl")
-	initial := strings.Join([]string{
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"a","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"before compaction\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"cb0","parentUuid":"a","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:01Z"}`,
 		`{"uuid":"b","parentUuid":"cb0","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after first boundary\"}","timestamp":"2025-01-01T00:00:02Z"}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(logPath, []byte(initial), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+	)
+
+	handle, err := srv.workerHandleForSession(fs.cityBeadStore, info.ID)
+	if err != nil {
+		t.Fatalf("workerHandleForSession: %v", err)
 	}
 
-	info := session.Info{ID: "sess-1", Template: "default"}
 	ctx, cancel := context.WithTimeout(context.Background(), 3500*time.Millisecond)
 	defer cancel()
 
-	rec := httptest.NewRecorder()
+	rec := newSyncResponseRecorder()
 	done := make(chan struct{})
 	go func() {
-		srv.streamSessionTranscriptLog(ctx, rec, info, logPath)
+		initial, histErr := handle.History(ctx, worker.HistoryRequest{})
+		if histErr != nil {
+			t.Errorf("History(initial): %v", histErr)
+			close(done)
+			return
+		}
+		srv.streamSessionTranscriptHistory(ctx, rec, info, handle, initial)
 		close(done)
 	}()
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if strings.Contains(rec.Body.String(), "after first boundary") {
+		if strings.Contains(rec.BodyString(), "after first boundary") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	logPath := filepath.Join(logDir, info.SessionKey+".jsonl")
 	appendFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatalf("OpenFile: %v", err)
@@ -2188,7 +2669,7 @@ func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t 
 
 	<-done
 
-	body := rec.Body.String()
+	body := rec.BodyString()
 	if !strings.Contains(body, "bridge turn") {
 		t.Fatalf("stream body missing turn written before new compact boundary: %s", body)
 	}
@@ -2197,10 +2678,566 @@ func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t 
 	}
 }
 
+func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	base := t.TempDir()
+	workDir := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+
+	searchRoot := filepath.Join(base, ".gemini", "tmp")
+	srv.sessionLogSearchPaths = []string{searchRoot}
+	projectDir := filepath.Join(searchRoot, "project-a")
+	chatsDir := filepath.Join(projectDir, "chats")
+	for _, dir := range []string{searchRoot, projectDir, chatsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatalf("write .project_root: %v", err)
+	}
+
+	firstTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-12-before.json")
+	writeGeminiHistoryFixtureForAPI(t, firstTranscript, "before-session",
+		`{"id":"u1","timestamp":"2026-04-17T03:12:00Z","type":"user","content":"first-remembered-input"}`,
+		`{"id":"a1","timestamp":"2026-04-17T03:12:01Z","type":"gemini","content":"first-remembered-output"}`,
+	)
+	firstTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(firstTranscript, firstTime, firstTime); err != nil {
+		t.Fatalf("chtimes(first transcript): %v", err)
+	}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "gemini", workDir, "gemini", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "first-remembered-output", time.Second); !strings.Contains(body, "first-remembered-output") {
+		t.Fatalf("stream body missing initial transcript turn: %s", body)
+	}
+
+	secondTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-15-after.json")
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-continued-input"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-continued-output"}`,
+	)
+	secondTime := time.Now().Add(-1 * time.Minute)
+	if err := os.Chtimes(secondTranscript, secondTime, secondTime); err != nil {
+		t.Fatalf("chtimes(second transcript): %v", err)
+	}
+
+	fs.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: info.ID,
+	})
+
+	body := waitForRecorderSubstring(t, rec, "second-continued-output", 1500*time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "second-continued-input") || !strings.Contains(body, "second-continued-output") {
+		t.Fatalf("city-scoped stream body missing rotated transcript turns after wake: %s", body)
+	}
+}
+
+func TestCityScopedSessionStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+
+	base := t.TempDir()
+	workDir := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+
+	searchRoot := filepath.Join(base, ".gemini", "tmp")
+	srv.sessionLogSearchPaths = []string{searchRoot}
+	projectDir := filepath.Join(searchRoot, "project-a")
+	chatsDir := filepath.Join(projectDir, "chats")
+	for _, dir := range []string{searchRoot, projectDir, chatsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatalf("write .project_root: %v", err)
+	}
+
+	firstTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-12-before.json")
+	writeGeminiHistoryFixtureForAPI(t, firstTranscript, "before-session",
+		`{"id":"u1","timestamp":"2026-04-17T03:12:00Z","type":"user","content":"first-input"}`,
+		`{"id":"a1","timestamp":"2026-04-17T03:12:01Z","type":"gemini","content":"first-output"}`,
+	)
+	firstTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(firstTranscript, firstTime, firstTime); err != nil {
+		t.Fatalf("chtimes(first transcript): %v", err)
+	}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "gemini", workDir, "gemini", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "first-output", 3*time.Second); !strings.Contains(body, "first-output") {
+		t.Fatalf("stream body missing initial transcript turn: %s", body)
+	}
+
+	secondTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-15-after.json")
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-input"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-output"}`,
+	)
+	secondTime := time.Now().Add(-1 * time.Minute)
+	if err := os.Chtimes(secondTranscript, secondTime, secondTime); err != nil {
+		t.Fatalf("chtimes(second transcript): %v", err)
+	}
+
+	fs.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: info.ID,
+	})
+
+	if body := waitForRecorderSubstring(t, rec, "second-output", 5*time.Second); !strings.Contains(body, "second-output") {
+		t.Fatalf("stream body missing rotated transcript after wake: %s", body)
+	}
+
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u2","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-input"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-output"}`,
+		`{"id":"u3","timestamp":"2026-04-17T03:15:02Z","type":"user","content":"third-input"}`,
+		`{"id":"a3","timestamp":"2026-04-17T03:15:03Z","type":"gemini","content":"third-output"}`,
+	)
+	currentTime := time.Now()
+	if err := os.Chtimes(secondTranscript, currentTime, currentTime); err != nil {
+		t.Fatalf("chtimes(updated second transcript): %v", err)
+	}
+
+	body := waitForRecorderSubstring(t, rec, "third-output", 5*time.Second)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "third-input") || !strings.Contains(body, "third-output") {
+		t.Fatalf("city-scoped stream body missing writes to rotated transcript after wake: %s", body)
+	}
+}
+
+func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "hello", time.Second); !strings.Contains(body, "hello") {
+		t.Fatalf("stream body missing initial turn: %s", body)
+	}
+
+	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	logPath := filepath.Join(logDir, info.SessionKey+".jsonl")
+	appendFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	_, err = appendFile.WriteString(strings.Join([]string{
+		`{"uuid":"3","parentUuid":"2","type":"user","message":"{\"role\":\"user\",\"content\":\"wake now\"}","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"4","parentUuid":"3","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"event wake turn\"}","timestamp":"2025-01-01T00:00:03Z"}`,
+	}, "\n") + "\n")
+	if closeErr := appendFile.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("append transcript: %v", err)
+	}
+
+	fs.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: info.ID,
+	})
+
+	body := waitForRecorderSubstring(t, rec, "event wake turn", 1500*time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "event wake turn") {
+		t.Fatalf("stream body missing turn after worker operation wakeup: %s", body)
+	}
+}
+
+func TestHandleSessionStreamRawWorkerOperationEventWakesTranscriptReload(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=raw", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "hello", time.Second); !strings.Contains(body, "hello") {
+		t.Fatalf("raw stream body missing initial transcript: %s", body)
+	}
+
+	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	logPath := filepath.Join(logDir, info.SessionKey+".jsonl")
+	appendFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	_, err = appendFile.WriteString(`{"uuid":"3","parentUuid":"2","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"raw event wake\"}","timestamp":"2025-01-01T00:00:02Z"}` + "\n")
+	if closeErr := appendFile.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("append transcript: %v", err)
+	}
+
+	fs.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: info.ID,
+	})
+
+	body := waitForRecorderSubstring(t, rec, "raw event wake", 1500*time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "raw event wake") {
+		t.Fatalf("raw stream body missing message after worker operation wakeup: %s", body)
+	}
+}
+
+func TestHandleSessionStreamRawStallEmitsPendingWithoutTranscriptGrowth(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	prevStallTimeout := sessionStreamPendingStallTimeout
+	sessionStreamPendingStallTimeout = 50 * time.Millisecond
+	defer func() {
+		sessionStreamPendingStallTimeout = prevStallTimeout
+	}()
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=raw", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "hello", time.Second); !strings.Contains(body, "hello") {
+		t.Fatalf("raw stream body missing initial transcript: %s", body)
+	}
+
+	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1",
+		Kind:      "approval",
+		Prompt:    "Proceed?",
+	})
+
+	body := waitForRecorderSubstring(t, rec, "req-1", time.Second)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "req-1") {
+		t.Fatalf("raw stream body missing pending interaction after idle stall: %s", body)
+	}
+}
+
+func TestHandleSessionStreamTranscriptWriteWakesWithoutPolling(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "hello", time.Second); !strings.Contains(body, "hello") {
+		t.Fatalf("stream body missing initial turn: %s", body)
+	}
+
+	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	logPath := filepath.Join(logDir, info.SessionKey+".jsonl")
+	appendFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	_, err = appendFile.WriteString(strings.Join([]string{
+		`{"uuid":"3","parentUuid":"2","type":"user","message":"{\"role\":\"user\",\"content\":\"file wake\"}","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"4","parentUuid":"3","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"fsnotify wake turn\"}","timestamp":"2025-01-01T00:00:03Z"}`,
+	}, "\n") + "\n")
+	if closeErr := appendFile.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("append transcript: %v", err)
+	}
+
+	body := waitForRecorderSubstring(t, rec, "fsnotify wake turn", 1500*time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "fsnotify wake turn") {
+		t.Fatalf("stream body missing turn after transcript write wakeup: %s", body)
+	}
+}
+
+func TestHandleSessionStreamConversationFiltersNonDisplayEntries(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"3","parentUuid":"2","type":"tool_use","message":"{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"name\":\"debugtool\"}]}","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"4","parentUuid":"3","type":"tool_result","message":"{\"role\":\"tool\",\"content\":\"internal raw detail\"}","timestamp":"2025-01-01T00:00:03Z"}`,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "hello") || !strings.Contains(body, "world") {
+		t.Fatalf("conversation stream body missing display turns: %s", body)
+	}
+	if strings.Contains(body, "debugtool") || strings.Contains(body, "internal raw detail") {
+		t.Fatalf("conversation stream leaked non-display transcript entries: %s", body)
+	}
+}
+
+func TestHandleSessionStreamConversationRedactsThinkingText(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"private chain of thought\"},{\"type\":\"text\",\"text\":\"visible answer\"}]}","timestamp":"2025-01-01T00:00:01Z"}`,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "visible answer") {
+		t.Fatalf("conversation stream body missing visible assistant answer: %s", body)
+	}
+	if strings.Contains(body, "private chain of thought") {
+		t.Fatalf("conversation stream leaked thinking text: %s", body)
+	}
+}
+
+func TestHandleSessionStreamRawUsesLatestCompactionTail(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"uuid":"a","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"before compaction\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"cb0","parentUuid":"a","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:01Z"}`,
+		`{"uuid":"b","parentUuid":"cb0","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after first boundary\"}","timestamp":"2025-01-01T00:00:02Z"}`,
+		`{"uuid":"cb1","parentUuid":"b","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:03Z"}`,
+		`{"uuid":"c","parentUuid":"cb1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after second boundary\"}","timestamp":"2025-01-01T00:00:04Z"}`,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=raw", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "after second boundary") {
+		t.Fatalf("raw stream body missing latest compaction tail: %s", body)
+	}
+	if strings.Contains(body, "before compaction") || strings.Contains(body, "after first boundary") {
+		t.Fatalf("raw stream replayed full transcript instead of latest compaction tail: %s", body)
+	}
+}
+
 func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2224,14 +3261,14 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/transcript?format=raw&tail=0", nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/transcript?format=raw&tail=0", nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
 	}
 
-	var resp sessionRawTranscriptResponse
+	var resp SessionStreamRawMessageEvent
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -2248,6 +3285,8 @@ func TestHandleSessionGetActivity(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2269,8 +3308,8 @@ func TestHandleSessionGetActivity(t *testing.T) {
 	)
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
@@ -2338,6 +3377,8 @@ func TestFilterMetadataAllowlistsMCPrefix(t *testing.T) {
 func TestHandleSessionGetMetadataFiltered(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	_ = h
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
 
@@ -2354,8 +3395,8 @@ func TestHandleSessionGetMetadataFiltered(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(w, r)
+	r := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())

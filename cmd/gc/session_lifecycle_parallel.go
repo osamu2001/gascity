@@ -67,6 +67,7 @@ type startResult struct {
 }
 
 type stopTarget struct {
+	sessionID   string
 	name        string
 	template    string
 	subject     string
@@ -197,15 +198,15 @@ func dependencyTemplateAlive(
 			if tp.TemplateName != template {
 				continue
 			}
-			if sp.IsRunning(name) && sp.ProcessAlive(name, tp.Hints.ProcessNames) {
+			if alive, err := workerSessionTargetAliveWithConfig(store, sp, cfg, name, tp.Hints.ProcessNames); err == nil && alive {
 				return true
 			}
 		}
-		return false
 	}
 	sessionName := lookupSessionNameOrLegacy(store, cityName, template, cfg.Workspace.SessionTemplate)
 	depTP := desiredState[sessionName]
-	return sp.IsRunning(sessionName) && sp.ProcessAlive(sessionName, depTP.Hints.ProcessNames)
+	alive, err := workerSessionTargetAliveWithConfig(store, sp, cfg, sessionName, depTP.Hints.ProcessNames)
+	return err == nil && alive
 }
 
 func candidateWaveOrder(
@@ -269,10 +270,19 @@ func prepareStartCandidate(
 	clk clock.Clock,
 ) (*preparedStart, error) {
 	session := candidate.session
-	tp := candidate.tp
 	if _, _, err := preWakeCommit(session, store, clk); err != nil {
 		return nil, err
 	}
+	return buildPreparedStart(candidate, cfg, store)
+}
+
+func buildPreparedStart(
+	candidate startCandidate,
+	cfg *config.City,
+	store beads.Store,
+) (*preparedStart, error) {
+	session := candidate.session
+	tp := candidate.tp
 	agentCfg := templateParamsToConfig(tp)
 
 	// Apply template_overrides from bead metadata. These are per-session
@@ -310,7 +320,7 @@ func prepareStartCandidate(
 	coreHash := runtime.CoreFingerprint(agentCfg)
 	coreBreakdown := runtime.CoreFingerprintBreakdown(agentCfg)
 	liveHash := runtime.LiveFingerprint(agentCfg)
-	if wd := resolveTaskWorkDir(store, candidate.logicalTemplate(cfg)); wd != "" {
+	if wd := resolveTaskWorkDir(store, session.ID, candidate.name(), strings.TrimSpace(session.Metadata["alias"]), candidate.logicalTemplate(cfg)); wd != "" {
 		agentCfg.WorkDir = wd
 	} else if wd := session.Metadata["work_dir"]; wd != "" {
 		agentCfg.WorkDir = wd
@@ -384,14 +394,28 @@ func prepareStartCandidate(
 		}
 		session.Metadata["instance_token"] = instanceToken
 	}
-	agentCfg.Env = mergeEnv(agentCfg.Env, sessionpkg.RuntimeEnvWithAlias(
+	beadAlias := strings.TrimSpace(session.Metadata["alias"])
+	runtimeEnv := sessionpkg.RuntimeEnvWithSessionContext(
 		session.ID,
 		candidate.name(),
-		strings.TrimSpace(session.Metadata["alias"]),
+		beadAlias,
+		strings.TrimSpace(session.Metadata["template"]),
+		strings.TrimSpace(session.Metadata["session_origin"]),
 		generation,
 		continuationEpoch,
 		instanceToken,
-	))
+	)
+	// When the bead has no alias but the template was identity-stamped
+	// (pool workers and dependency floors via setTemplateEnvIdentity),
+	// don't let mergeEnv's override-wins semantics clobber the stamped
+	// GC_ALIAS with the runtime's empty value. For ordinary sessions the
+	// resolver-stamped GC_ALIAS is left to be overwritten by the empty
+	// runtime value so the tmux runtime emits `env -u GC_ALIAS` and scrubs
+	// any inherited GC_ALIAS from the tmux server.
+	if beadAlias == "" && tp.EnvIdentityStamped {
+		delete(runtimeEnv, "GC_ALIAS")
+	}
+	agentCfg.Env = mergeEnv(agentCfg.Env, runtimeEnv)
 	if gcProvider := strings.TrimSpace(session.Metadata["provider_kind"]); gcProvider != "" {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	} else if gcProvider := strings.TrimSpace(session.Metadata["provider"]); gcProvider != "" {
@@ -411,12 +435,15 @@ func executePreparedStartWave(
 	ctx context.Context,
 	prepared []preparedStart,
 	sp runtime.Provider,
+	store beads.Store,
+	cfg *config.City,
 	startupTimeout time.Duration,
 	maxParallel int,
 ) []startResult {
 	if len(prepared) == 0 {
 		return nil
 	}
+	cityPath := ""
 	if maxParallel <= 0 {
 		maxParallel = 1
 	}
@@ -448,15 +475,27 @@ func executePreparedStartWave(
 				startCtx, cancel = context.WithTimeout(ctx, startupTimeout)
 			}
 			defer cancel()
-			err := sp.Start(startCtx, item.candidate.name(), item.cfg)
+			_, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg)
+			if err != nil && errors.Is(err, sessionpkg.ErrStateSync) {
+				running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+				if runningErr == nil && running {
+					err = nil
+				}
+			}
 			// Stale session key detection: if the session was started
 			// with a resume flag but dies immediately, the session key
 			// likely references a conversation that no longer exists
 			// (e.g., "No conversation found"). Report as a failure so
 			// recordWakeFailure clears the key for the next attempt.
-			if err == nil && item.candidate.session.Metadata["session_key"] != "" {
+			if err == nil && item.candidate.session != nil && item.candidate.session.Metadata["session_key"] != "" {
 				time.Sleep(staleKeyDetectDelay)
-				if !sp.IsRunning(item.candidate.name()) {
+				running := false
+				if store == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
+					running = sp != nil && sp.IsRunning(item.candidate.name())
+				} else {
+					running, err = workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+				}
+				if err != nil || !running {
 					err = fmt.Errorf("session %q died during startup", item.candidate.name())
 				}
 			}
@@ -484,12 +523,16 @@ func executePreparedStartWave(
 			case errors.Is(err, runtime.ErrSessionInitializing):
 				outcome = "session_initializing"
 				err = nil
-			case errors.Is(err, runtime.ErrSessionExists) && sp.IsRunning(item.candidate.name()):
-				if rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp) {
+			case errors.Is(err, runtime.ErrSessionExists):
+				running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
+				switch {
+				case runningErr != nil || !running:
+					outcome = "provider_error"
+				case rollbackPending && runningSessionMatchesPendingCreate(item.candidate.session, item.candidate.name(), sp):
 					outcome = "session_exists_converged"
 					err = nil
 					rollbackPending = false
-				} else {
+				default:
 					outcome = "session_exists"
 				}
 			default:
@@ -509,6 +552,37 @@ func executePreparedStartWave(
 		<-done
 	}
 	return results
+}
+
+func startPreparedStartCandidate(
+	ctx context.Context,
+	item preparedStart,
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+) (bool, error) {
+	if store == nil || item.candidate.session == nil || strings.TrimSpace(item.candidate.session.ID) == "" {
+		handle, err := runtimeWorkerHandleWithConfig(
+			cityPath,
+			store,
+			sp,
+			cfg,
+			item.candidate.name(),
+			item.candidate.name(),
+			"",
+			nil,
+		)
+		if err != nil {
+			return false, err
+		}
+		return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, item.candidate.session.ID)
+	if err != nil {
+		return true, err
+	}
+	return true, handle.StartResolved(ctx, item.cfg.Command, item.cfg)
 }
 
 func commitStartResult(
@@ -585,28 +659,26 @@ func commitStartResultTraced(
 		Actor:   "gc",
 		Subject: tp.DisplayName(),
 	})
-	if err := clearPendingCreateClaim(session, store); err != nil {
-		fmt.Fprintf(stderr, "session reconciler: clearing pending create claim for %s: %v\n", name, err) //nolint:errcheck
-	}
-	metadata := map[string]string{
-		"started_config_hash": result.prepared.coreHash,
-		"live_hash":           result.prepared.liveHash,
-		"started_live_hash":   result.prepared.liveHash,
-	}
+	coreBreakdown := ""
 	if bdj, err := json.Marshal(result.prepared.coreBreakdown); err == nil {
-		metadata["core_hash_breakdown"] = string(bdj)
+		coreBreakdown = string(bdj)
 	}
 	// Transition creating/asleep/drained beads to active once the runtime
 	// spawn has confirmed. Folded into this metadata batch so the state
-	// write is atomic with the hash writes and avoids a second round-trip
-	// per spawn. See confirmPendingStart for the state gate.
-	if confirmPendingStart(session.Metadata["state"]) {
-		metadata["state"] = string(sessionpkg.StateActive)
-		metadata["state_reason"] = "creation_complete"
-	}
-	if session.Metadata["sleep_reason"] != "" {
-		metadata["sleep_reason"] = ""
-	}
+	// write is atomic with the hash writes, the pending_create_claim
+	// clear, and the creation_complete_at marker. This prevents the sweep
+	// from observing a transient state where the claim is gone but the
+	// post-create marker hasn't landed yet. See confirmPendingStart for
+	// the state gate.
+	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
+		CoreHash:                result.prepared.coreHash,
+		LiveHash:                result.prepared.liveHash,
+		CoreBreakdown:           coreBreakdown,
+		ConfirmState:            confirmPendingStart(session.Metadata["state"]),
+		ClearSleepReason:        session.Metadata["sleep_reason"] != "",
+		ClearPendingCreateClaim: shouldRollbackPendingCreate(session),
+		Now:                     clk.Now(),
+	})
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: storing hashes for %s: %v\n", name, err) //nolint:errcheck
 		if trace != nil {
@@ -637,18 +709,71 @@ func commitStartResultTraced(
 	return true
 }
 
-func clearPendingCreateClaim(session *beads.Bead, store beads.Store) error {
-	if !shouldRollbackPendingCreate(session) || store == nil {
-		return nil
+func recoverRunningPendingCreate(
+	session *beads.Bead,
+	tp TemplateParams,
+	cfg *config.City,
+	store beads.Store,
+	clk clock.Clock,
+	trace *sessionReconcilerTraceCycle,
+) bool {
+	if session == nil || store == nil {
+		return false
 	}
-	if err := store.SetMetadata(session.ID, "pending_create_claim", ""); err != nil {
-		return err
+	prepared, err := buildPreparedStart(startCandidate{session: session, tp: tp}, cfg, store)
+	if err != nil {
+		if trace != nil {
+			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_rebuild_failed", "failed", traceRecordPayload{
+				"error": err.Error(),
+			}, nil, "")
+		}
+		return false
+	}
+	coreBreakdown := ""
+	if bdj, err := json.Marshal(prepared.coreBreakdown); err == nil {
+		coreBreakdown = string(bdj)
+	}
+	// Fall back to wall clock if the caller didn't inject one — the marker
+	// is load-bearing for the post-create sweep guard, so leaving it unset
+	// would re-open the crash/recovery spin-loop window.
+	var now time.Time
+	if clk != nil {
+		now = clk.Now()
+	} else {
+		now = time.Now()
+	}
+	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
+		CoreHash:      prepared.coreHash,
+		LiveHash:      prepared.liveHash,
+		CoreBreakdown: coreBreakdown,
+		ConfirmState: confirmPendingStart(session.Metadata["state"]) ||
+			sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) == sessionpkg.StateAwake,
+		ClearSleepReason: session.Metadata["sleep_reason"] != "",
+		// recoverRunningPendingCreate's caller (session_reconciler.go)
+		// already gates entry on shouldRollbackPendingCreate(session), so
+		// at this point the claim is guaranteed to be set — hard-code the
+		// clear rather than re-evaluating the same predicate.
+		ClearPendingCreateClaim: true,
+		Now:                     now,
+	})
+	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+		if trace != nil {
+			trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_commit_failed", "failed", traceRecordPayload{
+				"error": err.Error(),
+			}, nil, "")
+		}
+		return false
 	}
 	if session.Metadata == nil {
-		session.Metadata = make(map[string]string)
+		session.Metadata = make(map[string]string, len(metadata))
 	}
-	session.Metadata["pending_create_claim"] = ""
-	return nil
+	for key, value := range metadata {
+		session.Metadata[key] = value
+	}
+	if trace != nil {
+		trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, tp.SessionName, "pending_create_healed", "healed", nil, nil, "")
+	}
+	return true
 }
 
 func shouldRollbackPendingCreate(session *beads.Bead) bool {
@@ -727,6 +852,7 @@ func executePlannedStartsTraced(
 	if len(candidates) == 0 {
 		return 0
 	}
+	maxWakes := cfg.Daemon.MaxWakesPerTickOrDefault()
 	waveByCandidate, ok := candidateWaveOrder(candidates, cfg, desiredState, sp, cityName, store)
 	if !ok {
 		fmt.Fprintln(stderr, "session reconciler: dependency graph fallback to serial start order") //nolint:errcheck
@@ -749,7 +875,7 @@ func executePlannedStartsTraced(
 		if len(waveCandidates) == 0 {
 			continue
 		}
-		if wakeCount >= defaultMaxWakesPerTick {
+		if wakeCount >= maxWakes {
 			for _, candidate := range waveCandidates {
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
 			}
@@ -764,13 +890,13 @@ func executePlannedStartsTraced(
 			ready = append(ready, candidate)
 		}
 		for offset := 0; offset < len(ready); {
-			if wakeCount >= defaultMaxWakesPerTick {
+			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
 				}
 				break
 			}
-			batchSize := min(defaultMaxParallelStartsPerWave, defaultMaxWakesPerTick-wakeCount)
+			batchSize := min(defaultMaxParallelStartsPerWave, maxWakes-wakeCount)
 			end := min(offset+batchSize, len(ready))
 			var prepared []preparedStart
 			for _, candidate := range ready[offset:end] {
@@ -787,13 +913,16 @@ func executePlannedStartsTraced(
 				prepared = append(prepared, *item)
 			}
 			offset = end
-			results := executePreparedStartWave(ctx, prepared, sp, startupTimeout, defaultMaxParallelStartsPerWave)
+			results := executePreparedStartWave(ctx, prepared, sp, store, cfg, startupTimeout, defaultMaxParallelStartsPerWave)
 			for _, result := range results {
 				if trace != nil {
 					trace.recordOperation("reconciler.start.execute", result.prepared.candidate.tp.TemplateName, result.prepared.candidate.name(), "", "start", result.outcome, traceRecordPayload{
 						"rollback_pending": result.rollbackPending,
 						"duration_ms":      result.finished.Sub(result.started).Milliseconds(),
 					}, "")
+				}
+				if result.err == nil && result.outcome != "session_initializing" {
+					clearReconcilerDrainAckMetadata(sp, result.prepared.candidate.name())
 				}
 				if commitStartResultTraced(result, store, clk, rec, wave, stdout, stderr, trace) {
 					wakeCount++
@@ -928,6 +1057,7 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 	sessionTemplates := make(map[string]string)
 	sessionSubjects := make(map[string]string)
 	sessionPoolManaged := make(map[string]bool)
+	sessionIDs := make(map[string]string)
 	if store != nil {
 		if sessionBeads, err := loadSessionBeads(store); err == nil {
 			for _, bead := range sessionBeads {
@@ -937,6 +1067,7 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 					sessionTemplates[name] = template
 				}
 				if name != "" {
+					sessionIDs[name] = bead.ID
 					subject := sessionBeadAgentName(bead)
 					if subject == "" && template != "" && bead.Metadata["pool_slot"] != "" {
 						subject = template + "-" + bead.Metadata["pool_slot"]
@@ -979,6 +1110,7 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 			}
 		}
 		targets = append(targets, stopTarget{
+			sessionID:   sessionIDs[name],
 			name:        name,
 			template:    template,
 			subject:     subject,
@@ -1014,7 +1146,59 @@ func filterStopTargets(targets []stopTarget, names []string) []stopTarget {
 	return filtered
 }
 
-func interruptTargetsBounded(targets []stopTarget, sp runtime.Provider, stderr io.Writer) int {
+func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Store, stderr io.Writer) []stopTarget {
+	if store == nil || len(targets) == 0 {
+		return targets
+	}
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if strings.TrimSpace(target.name) == "" {
+			continue
+		}
+		names = append(names, target.name)
+	}
+	if len(names) == 0 {
+		return targets
+	}
+	hydrated := stopTargetsForNames(names, cfg, store, stderr)
+	byName := make(map[string]stopTarget, len(hydrated))
+	for _, target := range hydrated {
+		byName[target.name] = target
+	}
+	merged := make([]stopTarget, 0, len(targets))
+	for _, target := range targets {
+		if hydratedTarget, ok := byName[target.name]; ok {
+			if strings.TrimSpace(target.sessionID) == "" {
+				target.sessionID = hydratedTarget.sessionID
+			}
+			if strings.TrimSpace(target.template) == "" {
+				target.template = hydratedTarget.template
+			}
+			if strings.TrimSpace(target.subject) == "" {
+				target.subject = hydratedTarget.subject
+			}
+			if !target.resolved {
+				target.resolved = hydratedTarget.resolved
+			}
+			if !target.poolManaged {
+				target.poolManaged = hydratedTarget.poolManaged
+			}
+		}
+		merged = append(merged, target)
+	}
+	return merged
+}
+
+func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp runtime.Provider, cfg *config.City) error {
+	targetID := strings.TrimSpace(target.sessionID)
+	if targetID == "" {
+		targetID = strings.TrimSpace(target.name)
+	}
+	return workerStopSessionTargetWithConfig("", store, sp, cfg, targetID)
+}
+
+func interruptTargetsBounded(targets []stopTarget, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
+	targets = hydrateStopTargets(targets, cfg, store, stderr)
 	// Pool-managed sessions have no human user, so Claude Code's
 	// interactive "What should Claude do instead?" prompt would hang
 	// them forever. Stop them immediately instead of interrupting —
@@ -1023,7 +1207,7 @@ func interruptTargetsBounded(targets []stopTarget, sp runtime.Provider, stderr i
 	for _, t := range targets {
 		if t.poolManaged {
 			started := time.Now()
-			err := sp.Stop(t.name)
+			err := stopTargetThroughWorkerBoundary(t, store, sp, cfg)
 			outcome := "stopped_pool_managed"
 			if err != nil {
 				outcome = "stop_failed"
@@ -1037,7 +1221,11 @@ func interruptTargetsBounded(targets []stopTarget, sp runtime.Provider, stderr i
 	sent := 0
 	waveStarted := time.Now()
 	results := executeTargetWave(interruptable, min(len(interruptable), defaultMaxParallelInterrupts), func(target stopTarget) error {
-		return sp.Interrupt(target.name)
+		targetID := strings.TrimSpace(target.sessionID)
+		if targetID == "" {
+			targetID = strings.TrimSpace(target.name)
+		}
+		return workerInterruptSessionTargetWithConfig("", store, sp, cfg, targetID)
 	})
 	for _, result := range results {
 		logLifecycleOutcome(stderr, "interrupt", 0, result.target.name, result.target.template, result.outcome, result.started, result.finished, result.err)
@@ -1050,17 +1238,19 @@ func interruptTargetsBounded(targets []stopTarget, sp runtime.Provider, stderr i
 }
 
 func interruptSessionsBounded(names []string, cfg *config.City, store beads.Store, sp runtime.Provider, stderr io.Writer) int {
-	return interruptTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), sp, stderr)
+	return interruptTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, stderr)
 }
 
 func stopTargetsBounded(
 	targets []stopTarget,
 	cfg *config.City,
+	store beads.Store,
 	sp runtime.Provider,
 	rec events.Recorder,
 	actor string,
 	stdout, stderr io.Writer,
 ) int {
+	targets = hydrateStopTargets(targets, cfg, store, stderr)
 	for _, target := range targets {
 		if !target.resolved {
 			if cfg != nil {
@@ -1070,7 +1260,7 @@ func stopTargetsBounded(
 			for wave, target := range targets {
 				waveStarted := time.Now()
 				results := executeTargetWave([]stopTarget{target}, 1, func(target stopTarget) error {
-					return sp.Stop(target.name)
+					return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
 				})
 				for _, result := range results {
 					if shouldLogStopOutcome(result.target, cfg) {
@@ -1112,7 +1302,7 @@ func stopTargetsBounded(
 			}
 		}
 		results := executeTargetWave(waveTargets, defaultMaxParallelStopsPerWave, func(target stopTarget) error {
-			return sp.Stop(target.name)
+			return stopTargetThroughWorkerBoundary(target, store, sp, cfg)
 		})
 		for _, result := range results {
 			if shouldLogStopOutcome(result.target, cfg) {
@@ -1142,5 +1332,5 @@ func stopSessionsBounded(
 	actor string,
 	stdout, stderr io.Writer,
 ) int {
-	return stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, sp, rec, actor, stdout, stderr)
+	return stopTargetsBounded(stopTargetsForNames(names, cfg, store, stderr), cfg, store, sp, rec, actor, stdout, stderr)
 }

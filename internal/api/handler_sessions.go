@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // sessionResponse is the JSON representation of a chat session.
@@ -63,6 +64,11 @@ type sessionResponse struct {
 
 	// Metadata exposes mc_-prefixed bead metadata for external consumers.
 	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+type sessionResponseHandle interface {
+	worker.StateHandle
+	worker.PeekHandle
 }
 
 func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
@@ -132,17 +138,7 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 	if k := b.Metadata["mc_session_kind"]; k != "" {
 		r.Kind = k
 	}
-	// Surface bead-persisted sleep/hold/quarantine reason.
-	switch {
-	case b.Metadata["sleep_reason"] != "":
-		r.Reason = b.Metadata["sleep_reason"]
-	case b.Metadata["quarantined_until"] != "":
-		r.Reason = "quarantine"
-	case b.Metadata["wait_hold"] != "":
-		r.Reason = "wait-hold"
-	case b.Metadata["held_until"] != "":
-		r.Reason = "user-hold"
-	}
+	r.Reason = session.LifecycleDisplayReason(b.Status, b.Metadata, time.Now().UTC())
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
 	r.SubmissionCapabilities = session.SubmissionCapabilitiesForMetadata(b.Metadata, hasDeferredQueue)
 	// Expose only mc_* prefixed metadata keys to API consumers.
@@ -193,16 +189,19 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
 	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
 
 	q := r.URL.Query()
 	stateFilter := q.Get("state")
 	templateFilter := q.Get("template")
 	wantPeek := q.Get("peek") == "true"
 
-	sessions, err := mgr.List(stateFilter, templateFilter)
+	sessions, err := catalog.List(stateFilter, templateFilter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -220,7 +219,10 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	for i, sess := range sessions {
 		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, sp, wantPeek)
+		handle, err := s.workerHandleForSession(store, sess.ID)
+		if err == nil {
+			s.enrichSessionResponse(&items[i], sess, cfg, handle, wantPeek)
+		}
 	}
 
 	pp := parsePagination(r, maxPaginationLimit)
@@ -244,16 +246,19 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
 	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
 
 	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
-	info, err := mgr.Get(id)
+	info, err := catalog.Get(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -261,7 +266,10 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	b, _ := store.Get(id)
 	wantPeek := r.URL.Query().Get("peek") == "true"
 	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
-	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek)
+	handle, err := s.workerHandleForSession(store, id)
+	if err == nil {
+		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek)
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -271,14 +279,18 @@ func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store)
 
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
-	if err := mgr.Suspend(id); err != nil {
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	if err := handle.Stop(r.Context()); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
@@ -291,15 +303,14 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store)
-
 	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
-	if b, getErr := store.Get(id); getErr == nil && strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true" && strings.TrimSpace(b.Metadata[apiNamedSessionModeKey]) == "always" {
-		writeError(w, http.StatusConflict, "conflict", "configured always-on named sessions cannot be closed while config-managed")
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		writeSessionManagerError(w, err)
 		return
 	}
 	nudgeIDs, err := session.WaitNudgeIDs(store, id)
@@ -307,7 +318,7 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	if err := mgr.Close(id); err != nil {
+	if err := handle.Close(r.Context()); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
@@ -351,13 +362,12 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session.RepairEmptyType(store, &b)
-	if b.Status == "closed" {
-		writeError(w, http.StatusConflict, "conflict", "session "+id+" is closed")
-		return
-	}
-
 	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
 	if err != nil {
+		if state, conflict := session.WakeConflictState(err); conflict {
+			writeError(w, http.StatusConflict, "conflict", "session "+id+" is "+state)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
@@ -411,14 +421,23 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 	}
 	session.RepairEmptyType(store, &b)
 
-	mgr := s.sessionManager(store)
-	if err := mgr.Rename(id, body.Title); err != nil {
+	handle, err := s.workerHandleForSession(store, id)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	if err := handle.Rename(r.Context(), body.Title); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
 
 	// Re-fetch to return the updated session, consistent with PATCH.
-	info, err := mgr.Get(id)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
+	info, err := catalog.Get(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -430,19 +449,60 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 
 // enrichSessionResponse populates runtime fields on a session response:
 // running state, active bead, peek output, and model/context metadata.
-func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, cfg *config.City, sp runtime.Provider, wantPeek bool) {
+func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info, _ *config.City, runtimeHandle any, wantPeek bool) {
 	if info.State != session.StateActive {
 		return
 	}
+	var (
+		stateHandle worker.StateHandle
+		peekHandle  worker.PeekHandle
+	)
+	switch v := runtimeHandle.(type) {
+	case worker.Handle:
+		stateHandle = v
+		peekHandle = v
+	case sessionResponseHandle:
+		stateHandle = v
+		peekHandle = v
+	case runtime.Provider:
+		store := s.state.CityBeadStore()
+		if store == nil {
+			return
+		}
+		resolved, err := s.workerHandleForSession(store, info.ID)
+		if err != nil {
+			return
+		}
+		stateHandle = resolved
+		peekHandle = resolved
+	default:
+		return
+	}
+	if stateHandle == nil {
+		return
+	}
+	state, err := stateHandle.State(context.Background())
+	if err != nil {
+		return
+	}
+	resp.Running = workerPhaseHasLiveOutput(state.Phase)
 
-	resp.Running = sp.IsRunning(info.SessionName)
-
-	// Active bead: search rig stores for in_progress work assigned to this template.
-	resp.ActiveBead = s.findActiveBead(info.Template, "")
+	// Active bead: search rig stores for in_progress work assigned to the
+	// concrete session first, then fall back to alias/runtime/session names.
+	// Alias inclusion preserves compatibility with role flows that assign
+	// by alias (e.g., mayor, sky, wolf) until all assigners migrate to the
+	// concrete session ID.
+	//
+	// Signature is findActiveBeadForAssignees(rig string, assignees ...string);
+	// pass "" for rig (search all rigs) and put info.Alias in the variadic.
+	// A previous fix accidentally passed info.Alias as the first positional
+	// (rig) argument, which silently narrowed the search to a rig named after
+	// the alias — so alias-assigned work still disappeared from ActiveBead.
+	resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
 
 	// Peek preview (opt-in, only when running).
-	if wantPeek && resp.Running {
-		if output, err := sp.Peek(info.SessionName, 5); err == nil {
+	if wantPeek && resp.Running && peekHandle != nil {
+		if output, err := peekHandle.Peek(context.Background(), 5); err == nil {
 			resp.LastOutput = output
 		}
 	}
@@ -453,23 +513,15 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		if abs, err := filepath.Abs(workDir); err == nil {
 			workDir = abs
 		}
-		searchPaths := s.sessionLogSearchPaths
-		if searchPaths == nil && cfg != nil {
-			searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
-		}
-		if searchPaths == nil {
-			searchPaths = sessionlog.DefaultSearchPaths()
+		factory, err := s.workerFactory(s.state.CityBeadStore())
+		if err != nil {
+			return
 		}
 		// Prefer session-key lookup to avoid cross-reading another session's transcript.
 		// Cache the resolved file path — session files don't move once created.
-		var sessionFile string
-		if info.SessionKey != "" {
-			sessionFile = sessionlog.FindSessionFileByID(searchPaths, workDir, info.SessionKey)
-		} else {
-			sessionFile = sessionlog.FindSessionFileForProvider(searchPaths, info.Provider, workDir)
-		}
+		sessionFile := factory.DiscoverTranscript(info.Provider, workDir, info.SessionKey)
 		if sessionFile != "" {
-			if meta, err := sessionlog.ExtractTailMeta(sessionFile); err == nil && meta != nil {
+			if meta, err := factory.TailMeta(sessionFile); err == nil && meta != nil {
 				resp.Model = meta.Model
 				if meta.ContextUsage != nil {
 					resp.ContextPct = &meta.ContextUsage.Percentage
@@ -545,9 +597,13 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	session.RepairEmptyType(store, &b)
 
-	mgr := s.sessionManager(store)
+	catalog, err := s.workerSessionCatalog(store)
+	if err != nil {
+		writeSessionManagerError(w, err)
+		return
+	}
 	updateFn := func() error {
-		return mgr.UpdatePresentation(id, titlePtr, aliasPtr)
+		return catalog.UpdatePresentation(id, titlePtr, aliasPtr)
 	}
 	if aliasPtr != nil {
 		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
@@ -569,7 +625,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to get updated state.
-	info, err := mgr.Get(id)
+	info, err := catalog.Get(id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return

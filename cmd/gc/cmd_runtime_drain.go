@@ -1,12 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strconv"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/spf13/cobra"
@@ -39,6 +39,9 @@ func (o *providerDrainOps) setDrain(sessionName string) error {
 
 func (o *providerDrainOps) clearDrain(sessionName string) error {
 	_ = o.sp.RemoveMeta(sessionName, "GC_DRAIN_ACK")
+	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckSourceKey)
+	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey)
+	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey)
 	return o.sp.RemoveMeta(sessionName, "GC_DRAIN")
 }
 
@@ -66,6 +69,11 @@ func (o *providerDrainOps) drainStartTime(sessionName string) (time.Time, error)
 }
 
 func (o *providerDrainOps) setDrainAck(sessionName string) error {
+	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey)
+	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey)
+	if err := o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue); err != nil {
+		return err
+	}
 	return o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1")
 }
 
@@ -158,7 +166,12 @@ func cmdRuntimeDrain(args []string, stdout, stderr io.Writer) int {
 func doRuntimeDrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 	targetName, sn string, stdout, stderr io.Writer,
 ) int {
-	if !sp.IsRunning(sn) {
+	running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain: observing %q: %v\n", targetName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !running {
 		fmt.Fprintf(stderr, "gc runtime drain: session %q is not running\n", targetName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -217,7 +230,12 @@ func cmdRuntimeUndrain(args []string, stdout, stderr io.Writer) int {
 func doRuntimeUndrain(dops drainOps, sp runtime.Provider, rec events.Recorder,
 	targetName, sn string, stdout, stderr io.Writer,
 ) int {
-	if !sp.IsRunning(sn) {
+	running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime undrain: observing %q: %v\n", targetName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !running {
 		fmt.Fprintf(stderr, "gc runtime undrain: session %q is not running\n", targetName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -368,7 +386,6 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	readDoltPort(current.cityPath)
 	store, storeErr := openCityStoreAt(current.cityPath)
 	if storeErr != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: opening store: %v\n", storeErr) //nolint:errcheck // best-effort stderr
@@ -376,23 +393,34 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 	sp := newSessionProvider()
 	dops := newDrainOps(sp)
 	rec := openCityRecorderAt(current.cityPath, stderr)
-	return doRuntimeRequestRestart(dops, store, rec, current.display, current.sessionName, stdout, stderr)
+	cfg, _ := loadCityConfig(current.cityPath)
+	var persistRestart func() error
+	if store != nil {
+		persistRestart = func() error {
+			handle, err := workerHandleForSessionTargetWithConfig(current.cityPath, store, sp, cfg, current.sessionName)
+			if err != nil {
+				return err
+			}
+			return handle.Reset(context.Background())
+		}
+	}
+	return doRuntimeRequestRestart(dops, persistRestart, rec, current.display, current.sessionName, stdout, stderr)
 }
 
 // doRuntimeRequestRestart sets the restart-requested flag and blocks forever.
 // The controller will kill and restart the session on its next tick.
-func doRuntimeRequestRestart(dops drainOps, store beads.Store, rec events.Recorder,
+func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, rec events.Recorder,
 	targetName, sn string, stdout, stderr io.Writer,
 ) int {
 	if err := dops.setRestartRequested(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Also persist the flag in bead metadata so it survives tmux session death.
-	if store != nil {
-		if err := setBeadRestartRequested(store, sn); err != nil {
+	// Also persist the request through the worker boundary so it survives
+	// tmux session death. Non-fatal: the runtime flag above is primary.
+	if persistRestart != nil {
+		if err := persistRestart(); err != nil {
 			fmt.Fprintf(stderr, "gc runtime request-restart: setting bead restart flag: %v\n", err) //nolint:errcheck // best-effort stderr
-			// Non-fatal: the tmux flag is already set as primary.
 		}
 	}
 	rec.Record(events.Event{

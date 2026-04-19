@@ -35,6 +35,32 @@ var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 
+// ErrSessionNotFound reports that an operation targeted a session the
+// runtime does not know about. Benign for Stop() — the session was
+// already gone — but fatal for Attach/Send. Providers wrap their own
+// internal "not found" conditions with this sentinel so callers can
+// dispatch with errors.Is.
+var ErrSessionNotFound = errors.New("session not found")
+
+// IsSessionGone reports whether err represents a "the session is not
+// there" condition — either ErrSessionNotFound or the legacy provider
+// phrasings that predate the sentinel (tmux/subprocess providers may
+// still return raw strings). Callers that treat a missing session as
+// benign (e.g. bulk Stop) use this helper so the semantics live in one
+// place.
+func IsSessionGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrSessionNotFound) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "session not found") ||
+		strings.Contains(msg, "not running") ||
+		strings.Contains(msg, "not found")
+}
+
 // ContentBlock represents a content element in a message.
 // Type is "text" or "file_path".
 type ContentBlock struct {
@@ -202,10 +228,39 @@ type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// DialogProvider is an optional extension for runtimes that can detect and
+// dismiss known startup-style dialogs (workspace trust, bypass permissions,
+// rate-limit prompts) on an already-running session.
+type DialogProvider interface {
+	DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error
+}
+
 // ImmediateNudgeProvider is an optional extension for runtimes that can inject
 // input immediately without performing their own wait-idle heuristic first.
 type ImmediateNudgeProvider interface {
 	NudgeNow(name string, content []ContentBlock) error
+}
+
+// InterruptedTurnResetProvider is an optional extension for runtimes that can
+// discard the just-interrupted user turn from the provider's active
+// conversation state without restarting the session.
+//
+// Gemini CLI needs this after Ctrl-C: canceling generation alone does not
+// remove the interrupted user turn, so the next reply can otherwise answer both
+// the canceled request and the replacement request in one combined turn.
+type InterruptedTurnResetProvider interface {
+	ResetInterruptedTurn(ctx context.Context, name string) error
+}
+
+// InterruptBoundaryWaitProvider is an optional extension for runtimes that can
+// confirm a provider-native interrupt boundary before the next user turn is
+// injected.
+//
+// Codex CLI emits a durable "<turn_aborted>" marker when an in-flight turn has
+// actually been canceled. Waiting for that marker avoids racing a replacement
+// prompt into a session that still intends to finish the interrupted turn.
+type InterruptBoundaryWaitProvider interface {
+	WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error
 }
 
 // CopyEntry describes a file or directory to stage in the session's
@@ -224,7 +279,7 @@ type CopyEntry struct {
 	// ContentHash is a hex-encoded hash of the entry's content at discovery
 	// time. Set for filesystem-probed entries (hook files, skills dirs) so
 	// the config fingerprint is stable when content hasn't changed, even if
-	// the file is recreated (e.g., by materializeSkillStubs on every tick).
+	// the file is recreated on every tick.
 	// Empty for config-derived entries — those use Src/RelDst paths in the
 	// fingerprint instead. When Probed is true but ContentHash is empty
 	// (transient I/O error), the fingerprint uses a stable sentinel rather
@@ -332,6 +387,19 @@ type Config struct {
 	// Typical use: tmux theming, keybindings, status bars.
 	SessionLive []string
 
+	// ProviderName is the resolved provider name (e.g., "claude", "codex").
+	// Used for per-provider overlay filtering: files from
+	// overlay/per-provider/<ProviderName>/ are copied alongside any extras
+	// listed in InstallAgentHooks.
+	ProviderName string
+
+	// InstallAgentHooks lists additional provider hook slots whose
+	// overlay/per-provider/<name>/ content should be staged alongside
+	// ProviderName's. Populated from the agent's install_agent_hooks
+	// config, so an agent running Claude can still get a materialized
+	// .gemini/settings.json for parallel tooling.
+	InstallAgentHooks []string
+
 	// PackOverlayDirs lists overlay directories from packs. Contents are
 	// copied to the session workdir before the agent's own OverlayDir,
 	// providing additive pack-level file staging with lower priority.
@@ -379,7 +447,7 @@ func SyncWorkDirEnv(cfg Config) Config {
 	if cfg.Env != nil && cfg.Env["GC_DIR"] == cfg.WorkDir {
 		return cfg
 	}
-	env := make(map[string]string, len(cfg.Env)+1)
+	env := make(map[string]string)
 	for k, v := range cfg.Env {
 		env[k] = v
 	}
