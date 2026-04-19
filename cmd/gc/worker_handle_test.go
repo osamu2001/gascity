@@ -2,14 +2,29 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
+
+type failingSessionLookupStore struct {
+	beads.Store
+	err error
+}
+
+func (s *failingSessionLookupStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, s.err
+}
+
+func (s *failingSessionLookupStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
 
 func TestWorkerHandleForSessionWithConfigUsesResolvedProviderOnFirstStart(t *testing.T) {
 	cityDir := t.TempDir()
@@ -215,6 +230,53 @@ session_id_flag = "--session-id"
 	}
 	if stop := sp.Calls[len(sp.Calls)-1]; stop.Method != "Stop" || stop.Name != info.SessionName {
 		t.Fatalf("last runtime call = %#v, want Stop %q", stop, info.SessionName)
+	}
+}
+
+func TestWorkerObserveSessionTargetWithConfigFallsBackToRunningRuntimeHandle(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	target := cliSessionName("/home/user/city", cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
+	obs, err := workerObserveSessionTargetWithConfig("/home/user/city", nil, sp, cfg, target)
+	if err != nil {
+		t.Fatalf("workerObserveSessionTargetWithConfig: %v", err)
+	}
+	if !obs.Running {
+		t.Fatalf("obs.Running = false, want true for %q", target)
+	}
+}
+
+func TestWorkerObserveSessionTargetWithConfigIgnoresStoreLookupFailuresForRuntimeFallback(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	target := cliSessionName("/home/user/city", cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
+	store := &failingSessionLookupStore{err: fmt.Errorf("store lookup failed")}
+	obs, err := workerObserveSessionTargetWithConfig("/home/user/city", store, sp, cfg, target)
+	if err != nil {
+		t.Fatalf("workerObserveSessionTargetWithConfig: %v", err)
+	}
+	if !obs.Running {
+		t.Fatalf("obs.Running = false, want true for %q when runtime session is live", target)
 	}
 }
 

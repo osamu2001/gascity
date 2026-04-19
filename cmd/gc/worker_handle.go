@@ -171,11 +171,35 @@ func workerHandleForSessionTargetWithConfig(cityPath string, store beads.Store, 
 }
 
 func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string, processNames []string) (worker.Handle, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, session.ErrSessionNotFound
+	}
 	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return factory.HandleForTarget(target, processNames)
+	if store != nil {
+		if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
+			return factory.SessionByID(id)
+		}
+		if id, err := session.ResolveSessionID(store, target); err == nil {
+			return factory.SessionByID(id)
+		}
+		if sp != nil {
+			if sessionID, metaErr := sp.GetMeta(target, "GC_SESSION_ID"); metaErr == nil && strings.TrimSpace(sessionID) != "" {
+				return factory.SessionByID(strings.TrimSpace(sessionID))
+			}
+		}
+	}
+	if sp == nil {
+		return nil, session.ErrSessionNotFound
+	}
+	providerName := target
+	if liveProvider, err := sp.GetMeta(target, "GC_PROVIDER"); err == nil && strings.TrimSpace(liveProvider) != "" {
+		providerName = strings.TrimSpace(liveProvider)
+	}
+	return factory.RuntimeHandle(target, providerName, "", processNames)
 }
 
 func runtimeWorkerHandleWithConfig(
