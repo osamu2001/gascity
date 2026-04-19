@@ -172,18 +172,6 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 	return stores
 }
 
-// beadsProviderFor returns the bead store provider name from the given config.
-// Pure function — does not read controllerState fields.
-func beadsProviderFor(cfg *config.City) string {
-	if v := os.Getenv("GC_BEADS"); v != "" {
-		return v
-	}
-	if cfg.Beads.Provider != "" {
-		return cfg.Beads.Provider
-	}
-	return "bd"
-}
-
 // openRigStore creates a bead store for a rig path using the given provider.
 func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix string) beads.Store {
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
