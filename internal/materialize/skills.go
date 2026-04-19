@@ -196,9 +196,22 @@ func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCat
 		cat.OwnedRoots = append(cat.OwnedRoots, abs)
 	}
 
-	// City pack first — wins precedence over bootstrap entries.
 	if packSkillsDir != "" {
 		addRoot(packSkillsDir)
+	}
+	for _, catalog := range imported {
+		addRoot(catalog.SourceDir)
+	}
+	bootstrapDirs, err := bootstrapSkillDirs()
+	if err != nil {
+		return cat, err
+	}
+	for _, bd := range bootstrapDirs {
+		addRoot(bd.Dir)
+	}
+
+	// City pack first — wins precedence over bootstrap entries.
+	if packSkillsDir != "" {
 		entries, err := readSkillDir(packSkillsDir, "city")
 		if err != nil {
 			return cat, fmt.Errorf("reading city pack skills %q: %w", packSkillsDir, err)
@@ -216,7 +229,6 @@ func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCat
 		if origin == "" {
 			origin = "import"
 		}
-		addRoot(catalog.SourceDir)
 		entries, err := readSkillDir(catalog.SourceDir, origin)
 		if err != nil {
 			return cat, fmt.Errorf("reading imported pack %q skills %q: %w", origin, catalog.SourceDir, err)
@@ -230,12 +242,7 @@ func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCat
 		}
 	}
 
-	bootstrapDirs, err := bootstrapSkillDirs()
-	if err != nil {
-		return CityCatalog{}, err
-	}
 	for _, bd := range bootstrapDirs {
-		addRoot(bd.Dir)
 		entries, err := readSkillDir(bd.Dir, bd.Name)
 		if err != nil {
 			return cat, fmt.Errorf("reading bootstrap pack %q skills %q: %w", bd.Name, bd.Dir, err)

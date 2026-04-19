@@ -205,7 +205,7 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				}
 				cfg.RigPackSkills[rig.Name] = appendDiscoveredSkills(
 					cfg.RigPackSkills[rig.Name],
-					stampSkillBinding(skills, bindingName)...,
+					stampImportedSkillBinding(skills, bindingName, imp.Export)...,
 				)
 
 				// Stamp binding name on agents and named sessions.
@@ -617,7 +617,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
 			if !slices.Contains(BootstrapManagedImportNames(), bindingName) {
-				cfg.PackSkills = appendDiscoveredSkills(cfg.PackSkills, stampSkillBinding(skills, bindingName)...)
+				cfg.PackSkills = appendDiscoveredSkills(cfg.PackSkills, stampImportedSkillBinding(skills, bindingName, imp.Export)...)
 			}
 			allPackDirs = appendUnique(allPackDirs, topoDirs...)
 
@@ -1102,9 +1102,7 @@ func loadPackWithCache(fs fsys.FS, topoPath, topoDir, cityRoot, rigName string, 
 				impDoctors[i].BindingName = bindingName
 			}
 		}
-		for i := range impSkills {
-			impSkills[i].BindingName = bindingName
-		}
+		impSkills = stampImportedSkillBinding(impSkills, bindingName, imp.Export)
 
 		// Read the imported pack name for provenance tracking.
 		impData, readErr := fs.ReadFile(impPath)
@@ -1620,7 +1618,19 @@ func stampDefaultBinding(commands []DiscoveredCommand, defaultBinding string) []
 func stampSkillBinding(skills []DiscoveredSkillCatalog, bindingName string) []DiscoveredSkillCatalog {
 	out := deepCopySkills(skills)
 	for i := range out {
-		out[i].BindingName = bindingName
+		if out[i].BindingName == "" {
+			out[i].BindingName = bindingName
+		}
+	}
+	return out
+}
+
+func stampImportedSkillBinding(skills []DiscoveredSkillCatalog, bindingName string, export bool) []DiscoveredSkillCatalog {
+	out := deepCopySkills(skills)
+	for i := range out {
+		if out[i].BindingName == "" || export {
+			out[i].BindingName = bindingName
+		}
 	}
 	return out
 }

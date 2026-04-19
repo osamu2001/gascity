@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -313,6 +314,35 @@ func TestLoadCityCatalogPreservesOwnedRootsOnReadError(t *testing.T) {
 	}
 	if cat.OwnedRoots[0] != wantRoot {
 		t.Fatalf("owned root = %q, want %q", cat.OwnedRoots[0], wantRoot)
+	}
+}
+
+func TestLoadCityCatalogPreservesLaterImportedOwnedRootsOnEarlyReadError(t *testing.T) {
+	t.Setenv("GC_HOME", "")
+	laterDir := filepath.Join(t.TempDir(), "later", "skills")
+	mkSkill(t, laterDir, "beta")
+
+	tooLongDir := filepath.Join(t.TempDir(), strings.Repeat("x", 5000))
+	cat, err := LoadCityCatalog("",
+		config.DiscoveredSkillCatalog{
+			SourceDir:   tooLongDir,
+			BindingName: "broken",
+		},
+		config.DiscoveredSkillCatalog{
+			SourceDir:   laterDir,
+			BindingName: "later",
+		},
+	)
+	if err == nil {
+		t.Fatal("LoadCityCatalog should fail when an imported skills dir cannot be stated")
+	}
+
+	wantLater, absErr := filepath.Abs(laterDir)
+	if absErr != nil {
+		t.Fatal(absErr)
+	}
+	if !slices.Contains(cat.OwnedRoots, wantLater) {
+		t.Fatalf("owned roots = %v, want later imported root %q preserved", cat.OwnedRoots, wantLater)
 	}
 }
 

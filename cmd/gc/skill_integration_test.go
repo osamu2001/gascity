@@ -361,7 +361,7 @@ func TestBuildAssignedSkillsPromptFragmentPartitions(t *testing.T) {
 		"### Assigned to you",
 		"`mayor-planning` — Mayor-only strategy",
 		"`planning` — Mayor's planning override",
-		"### Shared (visible to every agent in this city)",
+		"### Shared in this scope",
 		"`code-review` — Review pull requests *(city)*",
 		"`gc-work` — Working with beads *(core)*",
 	}
