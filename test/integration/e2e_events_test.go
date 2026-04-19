@@ -116,7 +116,7 @@ func TestE2E_AgentLifecycleEvents(t *testing.T) {
 	// Give the event log a moment.
 	time.Sleep(500 * time.Millisecond)
 
-	// Verify session.stopped event exists.
+	// The city API is gone after gc stop, but the event log is persistent.
 	verifyEventLog(t, cityDir, "session.stopped")
 }
 

@@ -107,7 +107,14 @@ func TestHumaBinary_SupervisorBootsAndServesSpec(t *testing.T) {
 
 	// 3) Create a city the supervisor can see, then exercise per-city commands.
 	cityRoot := filepath.Join(gcHome, "city")
-	runCLI(t, bin, env, "gc init", "init", "--skip-provider-readiness", cityRoot, "--provider", "claude", "--name", "humatest")
+	if err := os.MkdirAll(cityRoot, 0o755); err != nil {
+		t.Fatalf("create city root: %v", err)
+	}
+	cityConfig := "[workspace]\nname = \"humatest\"\n\n[beads]\nprovider = \"file\"\n"
+	if err := os.WriteFile(filepath.Join(cityRoot, "city.toml"), []byte(cityConfig), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	runCLI(t, bin, env, "gc register", "register", cityRoot, "--name", "humatest")
 
 	// Give the supervisor a moment to pick up the registered city.
 	cityListURL := baseURL + "/v0/cities"
