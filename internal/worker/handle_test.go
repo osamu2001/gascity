@@ -1314,10 +1314,10 @@ func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	go func() {
 		<-started
 		cancel()
-		close(gate)
 	}()
 
 	result, err := handle.Nudge(ctx, NudgeRequest{
