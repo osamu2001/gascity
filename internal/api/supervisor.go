@@ -259,44 +259,6 @@ func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 	return mux
 }
 
-func (sm *SupervisorMux) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	cities := sm.resolver.ListCities()
-	var running int
-	// Use the first city for startup info (single-city deployments).
-	var startup map[string]any
-	for _, c := range cities {
-		if c.Running {
-			running++
-		}
-		if startup == nil {
-			if c.Running {
-				startup = map[string]any{
-					"ready":            true,
-					"phase":            "running",
-					"phases_completed": allStartupPhases(),
-				}
-			} else {
-				startup = map[string]any{
-					"ready":            false,
-					"phase":            c.Status,
-					"phases_completed": c.PhasesCompleted,
-				}
-			}
-		}
-	}
-	resp := map[string]any{
-		"status":         "ok",
-		"version":        sm.version,
-		"uptime_sec":     int(time.Since(sm.startedAt).Seconds()),
-		"cities_total":   len(cities),
-		"cities_running": running,
-	}
-	if startup != nil {
-		resp["startup"] = startup
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
 // allStartupPhases returns the ordered list of all startup phases.
 func allStartupPhases() []string {
 	return []string{
