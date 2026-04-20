@@ -17,10 +17,6 @@ import (
 // and symlinks for scripts no longer in any layer are removed. Real files
 // (non-symlinks) in the target directory are never overwritten.
 func ResolveScripts(targetDir string, layers []string) error {
-	if len(layers) == 0 {
-		return nil
-	}
-
 	// Build winner map: relative path → absolute source path.
 	// Later layers overwrite earlier ones (higher priority).
 	winners := make(map[string]string)

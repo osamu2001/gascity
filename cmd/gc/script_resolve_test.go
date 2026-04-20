@@ -238,6 +238,29 @@ func TestResolveScripts_EmptyLayers(t *testing.T) {
 	}
 }
 
+func TestResolveScripts_EmptyLayersCleanStaleSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	layer := filepath.Join(dir, "pack", "scripts")
+	writeScriptFile(t, layer, "setup.sh", "setup")
+
+	target := filepath.Join(dir, "city")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("MkdirAll target: %v", err)
+	}
+
+	if err := ResolveScripts(target, []string{layer}); err != nil {
+		t.Fatalf("first ResolveScripts: %v", err)
+	}
+
+	if err := ResolveScripts(target, nil); err != nil {
+		t.Fatalf("second ResolveScripts: %v", err)
+	}
+
+	if _, err := os.Lstat(filepath.Join(target, "scripts", "setup.sh")); !os.IsNotExist(err) {
+		t.Fatalf("setup.sh should have been removed after empty-layer cleanup, err=%v", err)
+	}
+}
+
 func TestResolveScripts_MissingLayerDir(t *testing.T) {
 	dir := t.TempDir()
 	layer := filepath.Join(dir, "pack", "scripts")
