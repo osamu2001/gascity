@@ -13,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/spf13/cobra"
 )
 
@@ -55,7 +54,7 @@ func doctorSkipsDoltChecks(cityPath string) bool {
 	if os.Getenv("GC_DOLT") == "skip" {
 		return true
 	}
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return !cityUsesBdStoreContract(cityPath)
 	}
@@ -131,7 +130,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 
 	// Load config for deeper checks. If it fails, we still run the core
 	// checks above (which will report the parse error).
-	cfg, cfgErr := loadCityConfig(cityPath)
+	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
 		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
@@ -145,6 +144,9 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		d.Register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 		d.Register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		d.Register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
+	}
+	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
+		d.Register(newImportStateDoctorCheck(cityPath))
 	}
 
 	// System formulas/orders now ship via the core bootstrap pack; pack
@@ -167,10 +169,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	d.Register(doctor.NewControllerCheck(cityPath, controllerRunning))
 
 	if cfgErr == nil && !controllerRunning {
-		cityName := cfg.Workspace.Name
-		if cityName == "" {
-			cityName = filepath.Base(cityPath)
-		}
+		cityName := loadedCityName(cfg, cityPath)
 		st := cfg.Workspace.SessionTemplate
 		sp := newSessionProvider()
 
@@ -215,13 +214,6 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 		}
 	}
 
-	// Global rig index check + backfill.
-	if cfgErr == nil {
-		d.Register(&doctor.RigIndexCheck{
-			FixFn: backfillRigIndex,
-		})
-	}
-
 	// Worktree integrity check.
 	d.Register(&doctor.WorktreeCheck{})
 
@@ -231,6 +223,7 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 			d.Register(&doctor.PackScriptCheck{
 				CheckName: entry.PackName + ":" + entry.Name,
 				Script:    entry.RunScript,
+				FixScript: entry.FixScript,
 				PackDir:   entry.PackDir,
 				PackName:  entry.PackName,
 			})
@@ -278,35 +271,6 @@ func collectPackDirs(cfg *config.City) []string {
 		}
 	}
 	return result
-}
-
-// backfillRigIndex registers all rigs from the given city in the global
-// rig index and writes GT_ROOT to each rig's .beads/.env.
-func backfillRigIndex(cityPath string) error {
-	cfg, err := loadCityConfig(cityPath)
-	if err != nil {
-		return err
-	}
-
-	resolveRigPaths(cityPath, cfg.Rigs)
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	for _, rig := range cfg.Rigs {
-		rigPath := rig.Path
-		// Unbound rigs (no .gc/site.toml binding) have an empty path;
-		// registering that would pollute the supervisor registry with
-		// an entry pointing at the city root.
-		if strings.TrimSpace(rigPath) == "" {
-			continue
-		}
-
-		if err := reg.RegisterRig(rigPath, rig.Name, cityPath); err != nil {
-			// Non-fatal — may be a name conflict with another city's rig.
-			continue
-		}
-		// Write GT_ROOT to .beads/.env.
-		_ = writeBeadsEnvGTRoot(fsys.OSFS{}, rigPath, cityPath)
-	}
-	return nil
 }
 
 // openStoreForCity creates a beads.Store factory rooted in the given city.

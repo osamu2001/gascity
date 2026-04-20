@@ -87,6 +87,9 @@ func ApplyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 		if err != nil {
 			return nil, fmt.Errorf("expand %q: %w", rule.Target, err)
 		}
+		if err := validateExpandedStepTimeouts(expandedSteps, fmt.Sprintf("expand %q", rule.Target)); err != nil {
+			return nil, err
+		}
 
 		// Propagate target step's dependencies to root steps of the expansion.
 		// Root steps are those whose needs/dependsOn only reference IDs within
@@ -142,6 +145,9 @@ func ApplyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 			expandedSteps, err := expandStep(targetStep, expFormula.Template, 0, vars)
 			if err != nil {
 				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)
+			}
+			if err := validateExpandedStepTimeouts(expandedSteps, fmt.Sprintf("map %q -> %q", rule.Select, targetStep.ID)); err != nil {
+				return nil, err
 			}
 
 			// Propagate target step's dependencies to root steps of the expansion
@@ -235,6 +241,7 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 		expanded.Condition = substituteTargetPlaceholders(tmpl.Condition, target)
 		expanded.Expand = substituteVars(substituteTargetPlaceholders(tmpl.Expand, target), vars)
 		expanded.WaitsFor = substituteVars(substituteTargetPlaceholders(tmpl.WaitsFor, target), vars)
+		expanded.Timeout = substituteVars(substituteTargetPlaceholders(tmpl.Timeout, target), vars)
 
 		// Substitute placeholders in labels
 		if len(expanded.Labels) > 0 {
@@ -316,6 +323,15 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 	}
 
 	return result, nil
+}
+
+func validateExpandedStepTimeouts(steps []*Step, context string) error {
+	var errs []string
+	validateNestedStepTimeoutsWithOptions(steps, &errs, context, nil, true)
+	if len(errs) > 0 {
+		return fmt.Errorf("%s: timeout validation failed:\n  - %s", context, strings.Join(errs, "\n  - "))
+	}
+	return nil
 }
 
 // substituteTargetPlaceholders replaces {target} and {target.*} placeholders.
@@ -499,6 +515,9 @@ func MaterializeExpansion(f *Formula, targetID string, vars map[string]string) e
 	if err != nil {
 		return fmt.Errorf("materializing expansion %q: %w", f.Formula, err)
 	}
+	if err := validateExpandedStepTimeouts(expandedSteps, fmt.Sprintf("materializing expansion %q", f.Formula)); err != nil {
+		return err
+	}
 
 	f.Steps = expandedSteps
 	return nil
@@ -518,6 +537,9 @@ func MaterializeExpansionForTarget(f *Formula, target *Step, vars map[string]str
 	expandedSteps, err := expandStep(target, f.Template, 0, vars)
 	if err != nil {
 		return fmt.Errorf("materializing expansion %q: %w", f.Formula, err)
+	}
+	if err := validateExpandedStepTimeouts(expandedSteps, fmt.Sprintf("materializing expansion %q", f.Formula)); err != nil {
+		return err
 	}
 
 	f.Steps = expandedSteps
@@ -575,6 +597,9 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			expandedSteps, err := expandStep(step, expFormula.Template, 0, vars)
 			if err != nil {
 				return nil, fmt.Errorf("inline expand on step %q: %w", step.ID, err)
+			}
+			if err := validateExpandedStepTimeouts(expandedSteps, fmt.Sprintf("inline expand on step %q", step.ID)); err != nil {
+				return nil, err
 			}
 
 			// Propagate the original step's dependencies to root steps of the expansion

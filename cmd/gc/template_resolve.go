@@ -17,6 +17,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -31,6 +32,11 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+)
+
+const (
+	startupPromptDeliveredEnv = "GC_STARTUP_PROMPT_DELIVERED"
+	managedSessionHookEnv     = "GC_MANAGED_SESSION_HOOK"
 )
 
 // TemplateParams holds all resolved values needed to start a session.
@@ -73,9 +79,10 @@ type TemplateParams struct {
 	// IsACP is true if session = "acp".
 	IsACP bool
 	// HookEnabled reports whether provider hooks are installed for this agent.
-	// Hook-enabled providers receive startup context via their hook path
-	// (for example gc prime --hook), so PromptMode=none should not also
-	// fall back to a delayed startup nudge.
+	// Hooks complement startup delivery but do not replace the initial
+	// user-turn prompt. SessionStart hooks can add context, persist session
+	// metadata, and start background helpers, but they do not initiate the
+	// first model turn on their own.
 	HookEnabled bool
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
@@ -146,7 +153,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 		command = command + " " + shellquote.Join(defaultArgs)
 	}
-	sa, err := ensureClaudeSettingsArgs(p.fs, p.cityPath, resolved.Name, p.stderr)
+	providerFamily := resolvedProviderLaunchFamily(resolved)
+	sa, err := ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
@@ -247,11 +255,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 9: Render prompt with beacon.
 	var prompt string
 	// Merge fragment sources: V1 global_fragments + inject_fragments,
-	// plus V2 append_fragments from agent defaults.
-	fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
-	if len(p.appendFragments) > 0 {
-		fragments = mergeFragmentLists(fragments, p.appendFragments)
-	}
+	// imported-pack [agent_defaults].append_fragments, then city-level
+	// [agent_defaults].append_fragments.
+	fragments := effectivePromptFragments(
+		p.globalFragments,
+		cfgAgent.InjectFragments,
+		cfgAgent.InheritedAppendFragments,
+		p.appendFragments,
+	)
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:      p.cityPath,
 		AgentName:     qualifiedName,
@@ -265,7 +276,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		SlingQuery:    expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		Env:           cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
-	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)
+	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	if prompt != "" {
 		prompt = beacon + "\n\n" + prompt
@@ -296,7 +307,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		if p.workspace != nil {
 			wsProvider = p.workspace.Provider
 		}
-		provider := effectiveAgentProvider(cfgAgent, wsProvider)
+		provider := effectiveAgentProviderFamily(cfgAgent, wsProvider, p.providers)
 		if _, ok := materialize.VendorSink(provider); ok {
 			scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 			canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
@@ -365,7 +376,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		if p.workspace != nil {
 			wsProvider = p.workspace.Provider
 		}
-		desired := effectiveSkillsForAgent(p.sharedSkillCatalogForAgent(cfgAgent), cfgAgent, wsProvider, p.stderr)
+		sharedCatalog := p.sharedSkillCatalogSnapshotForAgent(cfgAgent)
+		desired := effectiveSkillsForAgent(sharedCatalog, cfgAgent, wsProvider, p.providers, p.stderr)
 		if len(desired) > 0 {
 			fpExtra = mergeSkillFingerprintEntries(fpExtra, desired)
 			if canonWorkDir != scopeRoot {
@@ -376,6 +388,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				// templateNameFor returns cfgAgent.PoolName for pool
 				// instances and qualifiedName for singletons.
 				materializeAgent := templateNameFor(cfgAgent, qualifiedName)
+				if sharedCatalog != nil {
+					if snapshot, err := encodeSharedCatalogSnapshot(*sharedCatalog); err == nil {
+						if env == nil {
+							env = map[string]string{}
+						}
+						env[sharedSkillCatalogSnapshotEnvVar] = snapshot
+					}
+				}
 				expandedPreStart = appendMaterializeSkillsPreStart(expandedPreStart, materializeAgent, workDir)
 			}
 		}
@@ -391,14 +411,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	mcpCity := p.city
 	mcpCityIsSynthetic := false
 	if mcpCity == nil {
-		// Tests sometimes construct agentBuildParams directly without
-		// setting `city`. Build a minimal synthetic config.City so
-		// non-MCP resolution still works — but mark the result and
-		// hard-error downstream if the synthetic city resolves any
-		// effective MCP. The synthetic city cannot see
-		// ExplicitImportPackDirs/ImplicitImportPackDirs/BootstrapImportPackDirs
-		// or rig import bindings, so silently returning a degraded MCP
-		// catalog would hide production divergence behind "green" tests.
+		// Tests sometimes construct agentBuildParams directly without setting
+		// city. Build a minimal synthetic config.City so non-MCP resolution still
+		// works, but hard-error if that synthetic city resolves any effective MCP.
 		mcpCityIsSynthetic = true
 		mcpCity = &config.City{
 			Providers:         p.providers,
@@ -419,25 +434,19 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		cfgAgent,
 		qualifiedName,
 		workDir,
-		resolved.Kind,
+		resolvedProviderLaunchFamily(resolved),
 	)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
 	if mcpCityIsSynthetic && len(mcpCatalog.Servers) > 0 {
 		return TemplateParams{}, fmt.Errorf(
-			"agent %q: resolveTemplate invoked without config.City but resolved %d MCP server(s) — "+
+			"agent %q: resolveTemplate invoked without config.City but resolved %d MCP server(s) - "+
 				"tests exercising MCP must construct a real config.City (the synthetic fallback "+
 				"cannot see import/implicit/bootstrap layers and would diverge from production)",
 			qualifiedName, len(mcpCatalog.Servers),
 		)
 	}
-	// MCP delivery only fires when there's an actual catalog to project.
-	// An empty catalog with a supported provider kind still produces a
-	// non-empty projection shell (Provider+Target populated) but has no
-	// servers — skipping it here avoids spurious fingerprint churn and
-	// redundant `gc internal project-mcp` PreStart entries (which is what
-	// TestPhase2StartupMaterialization/WC-START-002 guards against).
 	if mcpProjection.Provider != "" && len(mcpCatalog.Servers) > 0 {
 		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
 		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
@@ -467,7 +476,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		SessionSetup:           expandedSetup,
 		SessionSetupScript:     resolvedScript,
 		SessionLive:            expandedLive,
-		ProviderName:           resolved.Kind,
+		ProviderName:           resolvedProviderLaunchFamily(resolved),
 		InstallAgentHooks:      config.ResolveInstallHooks(cfgAgent, p.workspace),
 		PackOverlayDirs:        effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName),
 		OverlayDir:             overlayDir,
@@ -522,38 +531,49 @@ func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]stri
 }
 
 // templateParamsToConfig converts TemplateParams to the runtime.Config
-// needed by Provider.Start. This mirrors managed.SessionConfig() at
-// internal/agent/agent.go:292-315 — for the same inputs, both must
-// produce identical output.
+// needed by Provider.Start. When it materializes the rendered prompt into the
+// launch or nudge path, it marks the runtime env so SessionStart hooks can add
+// context without repeating the full startup prompt.
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
 	var promptSuffix string
 	var promptFlag string
 	nudge := tp.Hints.Nudge
-	deliverStartupViaHooks := tp.HookEnabled && tp.ResolvedProvider != nil && tp.ResolvedProvider.SupportsHooks
+	env := maps.Clone(tp.Env)
+	startupPromptDelivered := false
 	if tp.Prompt != "" {
-		// Hook-enabled providers prime themselves on SessionStart via
-		// gc prime --hook, so the rendered role prompt must not also be
-		// replayed as argv or a delayed startup nudge.
-		if !deliverStartupViaHooks {
-			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
-				if nudge != "" {
-					nudge = tp.Prompt + "\n\n---\n\n" + nudge
-				} else {
-					nudge = tp.Prompt
-				}
+		// SessionStart hooks can enrich context, but the startup prompt still
+		// needs a first-turn delivery mechanism. Without argv/flag/nudge
+		// delivery, freshly spawned workers sit idle at the provider prompt.
+		if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none" {
+			if nudge != "" {
+				nudge = tp.Prompt + "\n\n---\n\n" + nudge
 			} else {
-				promptSuffix = shellquote.Quote(tp.Prompt)
-				if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" && tp.ResolvedProvider.PromptFlag != "" {
+				nudge = tp.Prompt
+			}
+			startupPromptDelivered = true
+		} else {
+			promptSuffix = shellquote.Quote(tp.Prompt)
+			startupPromptDelivered = promptSuffix != ""
+			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" {
+				if tp.ResolvedProvider.PromptFlag != "" {
 					promptFlag = tp.ResolvedProvider.PromptFlag
+				} else {
+					startupPromptDelivered = false
 				}
 			}
 		}
+	}
+	if startupPromptDelivered {
+		if env == nil {
+			env = map[string]string{}
+		}
+		env[startupPromptDeliveredEnv] = "1"
 	}
 	return runtime.Config{
 		Command:                tp.Command,
 		PromptSuffix:           promptSuffix,
 		PromptFlag:             promptFlag,
-		Env:                    tp.Env,
+		Env:                    env,
 		WorkDir:                tp.WorkDir,
 		ReadyPromptPrefix:      tp.Hints.ReadyPromptPrefix,
 		ReadyDelayMs:           tp.Hints.ReadyDelayMs,

@@ -319,17 +319,23 @@ gc config
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc config explain](#gc-config-explain) | Show resolved agent config with provenance annotations |
+| [gc config explain](#gc-config-explain) | Show resolved config with provenance annotations |
 | [gc config show](#gc-config-show) | Dump the resolved city configuration as TOML |
 
 ## gc config explain
 
-Show the resolved configuration for each agent with provenance.
+Show the resolved configuration with provenance.
 
-Displays every resolved field with an annotation showing which config
-file provided the value. Use --rig and --agent to filter the output.
-Useful for debugging config composition and understanding override
-resolution.
+For agents (default): displays every resolved field with an annotation
+showing which config file provided the value. Use --rig and --agent to
+filter.
+
+For providers (--provider): displays the resolved ProviderSpec along
+with per-field and per-map-key attribution — which chain layer
+(builtin:X or providers.Y) contributed each value. Useful for
+debugging base-chain inheritance.
+
+Use --json to emit machine-readable output (providers only).
 
 ```
 gc config explain [flags]
@@ -341,6 +347,8 @@ gc config explain [flags]
 gc config explain
   gc config explain --agent mayor
   gc config explain --rig my-project
+  gc config explain --provider codex-max
+  gc config explain --provider codex-max --json
   gc config explain -f overlay.toml --agent polecat
 ```
 
@@ -348,6 +356,8 @@ gc config explain
 |------|------|---------|-------------|
 | `--agent` | string |  | filter to a specific agent name |
 | `-f`, `--file` | stringArray |  | additional config files to layer (can be repeated) |
+| `--json` | bool |  | emit JSON (requires --provider) |
+| `--provider` | string |  | explain a provider's resolved chain instead of agents |
 | `--rig` | string |  | filter to agents in this rig |
 
 ## gc config show
@@ -423,7 +433,7 @@ gc converge create [flags]
 | `--formula` | string |  | Formula to use (required) |
 | `--gate` | string | `manual` | Gate mode: manual, condition, hybrid |
 | `--gate-condition` | string |  | Path to gate condition script |
-| `--gate-timeout` | string | `30s` | Gate execution timeout |
+| `--gate-timeout` | string | `5m0s` | Gate execution timeout |
 | `--gate-timeout-action` | string | `iterate` | Action on gate timeout: iterate, retry, manual, terminate |
 | `--max-iterations` | int | `5` | Maximum iterations |
 | `--target` | string |  | Target agent (required) |
@@ -1038,11 +1048,13 @@ gc import
 | Subcommand | Description |
 |------------|-------------|
 | [gc import add](#gc-import-add) | Add a pack import |
-| [gc import install](#gc-import-install) | Install imports from packs.lock |
+| [gc import check](#gc-import-check) | Validate installed pack import state |
+| [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
 | [gc import migrate](#gc-import-migrate) | Migrate a V1 city layout to the V2 pack shape |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
 | [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
+| [gc import why](#gc-import-why) | Explain why an import is present |
 
 ## gc import add
 
@@ -1057,9 +1069,17 @@ gc import add <source> [flags]
 | `--name` | string |  | Local binding name override |
 | `--version` | string |  | Version constraint for git-backed imports |
 
+## gc import check
+
+Validate installed pack import state
+
+```
+gc import check
+```
+
 ## gc import install
 
-Install imports from packs.lock
+Install imports from pack.toml and packs.lock
 
 ```
 gc import install
@@ -1109,6 +1129,14 @@ Upgrade imported packs within their constraints
 gc import upgrade [name]
 ```
 
+## gc import why
+
+Explain why an import is present
+
+```
+gc import why <name-or-source>
+```
+
 ## gc init
 
 Create a new Gas City workspace in the given directory (or cwd).
@@ -1140,7 +1168,7 @@ gc init
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--file` | string |  | path to a TOML file to use as city.toml |
 | `--from` | string |  | path to an example city directory to copy |
-| `--name` | string |  | workspace name (default: source template's workspace.name if set, else target directory basename) |
+| `--name` | string |  | workspace name (default: target directory basename) |
 | `--provider` | string |  | built-in workspace provider to use for the default mayor config |
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 
@@ -1188,8 +1216,8 @@ Check for unread mail addressed to a session alias or mailbox.
 
 Without --inject: prints the count and exits 0 if mail exists, 1 if
 empty. With --inject: outputs a &lt;system-reminder&gt; block suitable for
-hook injection (always exits 0). The recipient defaults to $GC_ALIAS,
-$GC_SESSION_ID, or "human".
+hook injection (always exits 0). The recipient defaults to $GC_SESSION_ID,
+$GC_ALIAS, $GC_AGENT, or "human".
 
 ```
 gc mail check [session] [flags]
@@ -1211,7 +1239,7 @@ gc mail check
 ## gc mail count
 
 Show total and unread message counts for a session alias or human.
-The recipient defaults to $GC_ALIAS, $GC_SESSION_ID, or "human".
+The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".
 
 ```
 gc mail count [session]
@@ -1230,7 +1258,7 @@ gc mail delete <id>
 List all unread messages for a session alias or human.
 
 Shows message ID, sender, subject, and body in a table. The recipient defaults
-to $GC_ALIAS, $GC_SESSION_ID, or "human". Pass a session alias to view another inbox.
+to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Pass a session alias to view another inbox.
 
 ```
 gc mail inbox [session]
@@ -1296,7 +1324,7 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_ALIAS or $GC_SESSION_ID (in sessions) or "human". Use --notify to nudge
+to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to nudge
 the recipient after sending. Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
@@ -1321,7 +1349,7 @@ gc mail send mayor "Build is green"
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
-| `--from` | string |  | sender identity (default: $GC_ALIAS, $GC_SESSION_ID, or "human") |
+| `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
 | `-m`, `--message` | string |  | message body text |
 | `--notify` | bool |  | nudge the recipient after sending |
 | `-s`, `--subject` | string |  | message subject line |
@@ -1393,10 +1421,10 @@ gc nudge status [session]
 
 Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in flat orders/*.toml files. Each order pairs a gate
+Orders live in flat orders/&lt;name&gt;.toml files. Each order pairs a trigger
 condition (cooldown, cron, condition, event, or manual) with an action
-(a formula or an exec script). The controller evaluates gates on each
-tick and dispatches work when a gate opens.
+(a formula or an exec script). The controller evaluates triggers on each
+tick and dispatches work when a trigger opens.
 
 ```
 gc order
@@ -1412,9 +1440,9 @@ gc order
 
 ## gc order check
 
-Evaluate gate conditions for all orders and show which are due.
+Evaluate trigger conditions for all orders and show which are due.
 
-Prints a table with each order's gate, due status, and reason. Returns
+Prints a table with each order's trigger, due status, and reason. Returns
 exit code 0 if any order is due, 1 if none are due.
 
 ```
@@ -1438,9 +1466,9 @@ gc order history [name] [flags]
 
 ## gc order list
 
-List all available orders with their gate type, schedule, and target.
+List all available orders with their trigger type, schedule, and target.
 
-Scans orders/ directories for flat .toml files defining gate conditions,
+Scans orders/ directories for flat .toml files defining trigger conditions,
 scheduling parameters, and target pools.
 
 ```
@@ -1449,7 +1477,7 @@ gc order list
 
 ## gc order run
 
-Execute an order manually, bypassing its gate conditions.
+Execute an order manually, bypassing its trigger conditions.
 
 Instantiates a wisp from the order's formula and routes it to the
 configured target (if any). Useful for testing orders or triggering
@@ -1468,7 +1496,7 @@ gc order run <name> [flags]
 
 Display detailed information about a named order.
 
-Shows the order name, description, formula reference, gate type,
+Shows the order name, description, formula reference, trigger type,
 scheduling parameters, check command, target, and source file.
 Use --rig to disambiguate same-name orders in different rigs.
 
@@ -1534,6 +1562,20 @@ When agent-name is omitted, `GC_ALIAS` is used (falling back to `GC_AGENT`).
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
 
+Pass --strict to fail on debugging mistakes instead of silently falling
+back to the default prompt. Strict errors on:
+
+  - no city config found
+  - city config fails to load
+  - no agent name given (from args, GC_ALIAS, or GC_AGENT)
+  - agent name not in city config (typo detection — the main use case)
+  - agent's prompt_template points at a file that cannot be read
+
+Strict does NOT error on agents whose config intentionally lacks a
+prompt_template (a supported minimal config), on templates that render
+to empty output from valid conditional logic, or on suspended states
+(city or agent) — those are legitimate quiet states, not mistakes.
+
 ```
 gc prime [agent-name] [flags]
 ```
@@ -1542,6 +1584,7 @@ gc prime [agent-name] [flags]
 |------|------|---------|-------------|
 | `--hook` | bool |  | compatibility mode for runtime hook invocations |
 | `--hook-format` | string |  | format hook output for a provider |
+| `--strict` | bool |  | fail on missing city, missing or unknown agent, or unreadable prompt_template instead of falling back to the default prompt |
 
 ## gc register
 
@@ -1550,8 +1593,9 @@ Register a city directory with the machine-wide supervisor.
 If no path is given, registers the current city (discovered from cwd).
 Use --name to set the machine-local registration alias. The alias is stored
 in the machine-local supervisor registry and never written back to city.toml.
-When --name is omitted, workspace.name is used if present, otherwise
-[pack].name is used — in either case city.toml is not modified.
+When --name is omitted, the current effective city identity is used
+(site-bound workspace name if present, otherwise legacy workspace.name,
+otherwise the directory basename) — in every case city.toml is not modified.
 Registration is idempotent — registering the same city twice is a no-op.
 The supervisor is started if needed and immediately reconciles the city.
 
@@ -1622,7 +1666,6 @@ gc rig
 | Subcommand | Description |
 |------------|-------------|
 | [gc rig add](#gc-rig-add) | Register a project as a rig |
-| [gc rig default](#gc-rig-default) | Set the default city for a rig |
 | [gc rig list](#gc-rig-list) | List registered rigs |
 | [gc rig remove](#gc-rig-remove) | Remove a rig from the city |
 | [gc rig restart](#gc-rig-restart) | Restart all agents in a rig |
@@ -1674,30 +1717,6 @@ gc rig add /path/to/project
 | `--prefix` | string |  | bead ID prefix (default: derived from name) |
 | `--start-suspended` | bool |  | add rig in suspended state (dormant-by-default) |
 
-## gc rig default
-
-Set which city a rig resolves to when accessed from outside any city tree.
-
-When a rig belongs to multiple cities, gc commands run from the rig
-directory need to know which city to use. This command sets that default.
-It also updates the rig's .beads/.env with GT_ROOT and rewrites
-routes.jsonl from the new default city's rig set.
-
-```
-gc rig default <rig-name> [flags]
-```
-
-**Example:**
-
-```
-gc rig default myrig --city alpha
-  gc rig default /path/to/myrig --city beta
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--city` | string |  | city name or path to set as default (required) |
-
 ## gc rig list
 
 List all registered rigs with their paths, prefixes, and beads status.
@@ -1717,10 +1736,8 @@ gc rig list [flags]
 
 Remove a rig from the current city's configuration.
 
-Removes the rig entry from city.toml and updates the global rig index
-in cities.toml. If the rig no longer belongs to any city, it is removed
-from the global index entirely. If this city was the rig's default,
-the default is cleared.
+Removes the rig entry from city.toml and removes its machine-local path
+binding from .gc/site.toml.
 
 ```
 gc rig remove <name>
@@ -2027,7 +2044,16 @@ Reads the session log, resolves the conversation DAG, and prints
 messages in chronological order. Searches default paths (~/.claude/projects/)
 and any extra paths from [daemon] observe_paths in city.toml.
 
-Use --tail to control how many compaction segments to show (0 = all).
+Use --tail to print only the last N transcript entries (0 = all).
+Semantics match Unix 'tail -n': '--tail 5' prints the final 5 entries,
+not the first 5. A single assistant turn with multiple tool-use blocks
+still counts as one entry. Compact-boundary dividers count as entries
+when they fall inside the final window.
+
+Compatibility note: before 1.0, --tail mapped to compaction segments.
+As of 1.0, --tail trims the displayed transcript entry window instead.
+The HTTP API's tail query parameter still uses compaction-segment
+semantics.
 Use -f to follow new messages as they arrive.
 
 ```
@@ -2038,6 +2064,8 @@ gc session logs <session> [flags]
 
 ```
 gc session logs mayor
+  gc session logs mayor --tail 2
+  gc session logs gc-123 --tail 20
   gc session logs gc-123 --tail 0
   gc session logs s-gc-123 -f
 ```
@@ -2045,7 +2073,7 @@ gc session logs mayor
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `-f`, `--follow` | bool |  | Follow new messages as they arrive |
-| `--tail` | int | `1` | Number of compaction segments to show (0 = all) |
+| `--tail` | int | `10` | Number of most recent transcript entries to show (0 = all; compact dividers count as entries) |
 
 ## gc session new
 
@@ -2250,7 +2278,7 @@ List skills visible to the current city.
 Output includes:
   - City pack skills (skills/&lt;name&gt;/SKILL.md under the city root)
   - Imported pack shared skills (binding-qualified, e.g. ops.code-review)
-  - Bootstrap implicit-import pack skills (e.g. core)
+  - Compatibility bootstrap skills, when legacy implicit imports still exist
   - With --agent/--session: that agent's agents/&lt;name&gt;/skills/ catalog
 
 The listing is a diagnostic view of what's *available*. It does not

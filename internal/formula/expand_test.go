@@ -116,6 +116,48 @@ func TestExpandStep(t *testing.T) {
 	}
 }
 
+func TestExpandStepSubstitutesStepTimeout(t *testing.T) {
+	target := &Step{
+		ID:    "build",
+		Title: "Build",
+	}
+	template := []*Step{
+		{
+			ID:      "{target}.check",
+			Title:   "Check {target.title}",
+			Timeout: "{step_timeout}",
+			Ralph: &RalphSpec{
+				MaxAttempts: 2,
+				Check: &RalphCheckSpec{
+					Mode:    "exec",
+					Path:    "checks/{target.id}.sh",
+					Timeout: "{check_timeout}",
+				},
+			},
+		},
+	}
+
+	result, err := expandStep(target, template, 0, map[string]string{
+		"step_timeout":  "10m",
+		"check_timeout": "30s",
+	})
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if result[0].Timeout != "10m" {
+		t.Fatalf("Timeout = %q, want 10m", result[0].Timeout)
+	}
+	if result[0].Ralph == nil || result[0].Ralph.Check == nil {
+		t.Fatal("expanded Ralph check is nil")
+	}
+	if result[0].Ralph.Check.Timeout != "30s" {
+		t.Fatalf("Ralph.Check.Timeout = %q, want 30s", result[0].Ralph.Check.Timeout)
+	}
+}
+
 func TestExpandStepDepthLimit(t *testing.T) {
 	target := &Step{
 		ID:          "root",
@@ -1264,6 +1306,76 @@ func TestMaterializeExpansion(t *testing.T) {
 		}
 		if f.Steps[0].Description != "Build {{feature}} with brief: {{brief}}" {
 			t.Errorf("Description = %q, want double-brace vars preserved", f.Steps[0].Description)
+		}
+	})
+
+	t.Run("invalid template timeout rejected", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			timeout string
+		}{
+			{name: "invalid format", timeout: "bogus"},
+			{name: "zero duration", timeout: "0s"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				f := &Formula{
+					Formula: "exp-timeout",
+					Type:    TypeExpansion,
+					Template: []*Step{
+						{
+							ID:      "{target}.check",
+							Title:   "Check",
+							Timeout: tt.timeout,
+							Ralph: &RalphSpec{
+								MaxAttempts: 1,
+								Check: &RalphCheckSpec{
+									Mode: "exec",
+									Path: "checks/pass.sh",
+								},
+							},
+						},
+					},
+				}
+
+				err := MaterializeExpansion(f, "main", nil)
+				if err == nil {
+					t.Fatal("MaterializeExpansion succeeded, want timeout validation error")
+				}
+				if !strings.Contains(err.Error(), "timeout") {
+					t.Fatalf("MaterializeExpansion error = %v, want timeout validation error", err)
+				}
+			})
+		}
+	})
+
+	t.Run("invalid template ralph check timeout rejected", func(t *testing.T) {
+		f := &Formula{
+			Formula: "exp-check-timeout",
+			Type:    TypeExpansion,
+			Template: []*Step{
+				{
+					ID:    "{target}.check",
+					Title: "Check",
+					Ralph: &RalphSpec{
+						MaxAttempts: 1,
+						Check: &RalphCheckSpec{
+							Mode:    "exec",
+							Path:    "checks/pass.sh",
+							Timeout: "{check_timeout}",
+						},
+					},
+				},
+			},
+		}
+
+		err := MaterializeExpansion(f, "main", map[string]string{"check_timeout": "0s"})
+		if err == nil {
+			t.Fatal("MaterializeExpansion succeeded, want check timeout validation error")
+		}
+		if !strings.Contains(err.Error(), "timeout") {
+			t.Fatalf("MaterializeExpansion error = %v, want timeout validation error", err)
 		}
 	})
 }

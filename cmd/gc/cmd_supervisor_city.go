@@ -32,7 +32,7 @@ var (
 
 func supervisorCityStartTimeout(cityPath string) time.Duration {
 	timeout := supervisorCityReadyTimeout
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return timeout
 	}
@@ -44,7 +44,7 @@ func supervisorCityStartTimeout(cityPath string) time.Duration {
 
 func supervisorCityStopTimeout(cityPath string) time.Duration {
 	timeout := supervisorCityReadyTimeout
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return timeout
 	}
@@ -54,27 +54,13 @@ func supervisorCityStopTimeout(cityPath string) time.Duration {
 	return timeout
 }
 
-func fetchCityPacksIfNeeded(cityPath string) error {
-	tomlPath := filepath.Join(cityPath, "city.toml")
-	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
-		if err := config.FetchPacks(quickCfg.Packs, cityPath); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func effectiveCityName(cityPath string) (string, error) {
-	name := filepath.Base(cityPath)
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
 	if err != nil {
 		return "", err
 	}
-	if cfg.Workspace.Name != "" {
-		name = cfg.Workspace.Name
-	}
-	return name, nil
+	return config.EffectiveCityName(cfg, filepath.Base(filepath.Clean(cityPath))), nil
 }
 
 func registeredCityName(cityPath, nameOverride string) (string, error) {
@@ -157,15 +143,22 @@ func registerCityWithSupervisor(cityPath string, stdout, stderr io.Writer, comma
 	return registerCityWithSupervisorNamed(cityPath, "", stdout, stderr, commandName, showProgress)
 }
 
+func supervisorAlreadyManagesCity(cityPath string) bool {
+	running, _, known := supervisorCityRunningHook(cityPath)
+	return known && running
+}
+
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
-	if pid, err := ensureNoStandaloneController(cityPath); err != nil {
-		if errors.Is(err, errControllerAlreadyRunning) {
-			writeStandaloneControllerConflict(stderr, commandName, cityPath, pid)
-		} else {
-			fmt.Fprintf(stderr, "%s: probing standalone controller: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
+	if !supervisorAlreadyManagesCity(cityPath) {
+		if pid, err := ensureNoStandaloneController(cityPath); err != nil {
+			if errors.Is(err, errControllerAlreadyRunning) {
+				writeStandaloneControllerConflict(stderr, commandName, cityPath, pid)
+			} else {
+				fmt.Fprintf(stderr, "%s: probing standalone controller: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
+			}
+			return 1
 		}
-		return 1
 	}
 	// Materialize gastown packs before config load if the city references them.
 	// This must succeed — without packs, config.LoadWithIncludes will fail
@@ -176,7 +169,7 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 			return 1
 		}
 	}
-	if err := fetchCityPacksIfNeeded(cityPath); err != nil {
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
 		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -232,7 +225,7 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 	}
 	if supervisorAliveHook() != 0 {
 		if showProgress {
-			logInitProgress(stdout, 8, "Waiting for supervisor to start city")
+			logInitProgress(stdout, 9, "Waiting for supervisor to start city")
 		} else if stdout != nil {
 			fmt.Fprintln(stdout, "Waiting for supervisor to start city...") //nolint:errcheck // best-effort stdout
 		}
@@ -409,6 +402,18 @@ func unregisterCityFromSupervisor(cityPath string, stdout, stderr io.Writer, com
 	}
 
 	fmt.Fprintf(stdout, "Unregistered city '%s' (%s)\n", entry.EffectiveName(), entry.Path) //nolint:errcheck // best-effort stdout
+
+	// If the city directory is gone, there's nothing to wait on or restore.
+	// Skip the supervisor-side probes that would otherwise spew
+	// "probing standalone controller" + "restore failed" on a missing path
+	// (the unregister itself already succeeded; the supervisor's next
+	// reconcile will drop the dead city).
+	if _, statErr := os.Stat(cityPath); errors.Is(statErr, os.ErrNotExist) {
+		if supervisorAliveHook() != 0 && reloadSupervisorHook(stdout, stderr) != 0 {
+			return true, 1
+		}
+		return true, 0
+	}
 
 	if supervisorAliveHook() != 0 {
 		if reloadSupervisorHook(stdout, stderr) != 0 {

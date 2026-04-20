@@ -119,7 +119,9 @@ type AgentPatch struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
-	// ScaleCheck overrides the shell command whose output determines desired session count.
+	// ScaleCheck overrides the command template whose output determines desired
+	// session count. Supports the same Go template placeholders as
+	// Agent.scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
@@ -134,13 +136,16 @@ type PoolOverride struct {
 	Min *int `toml:"min,omitempty" jsonschema:"minimum=0"`
 	// Max overrides the maximum number of sessions. 0 means no sessions can claim routed work.
 	Max *int `toml:"max,omitempty" jsonschema:"minimum=0"`
-	// Check overrides the session scale check command.
+	// Check overrides the session scale check command template. Supports the
+	// same Go template placeholders as Agent.scale_check.
 	Check *string `toml:"check,omitempty"`
 	// DrainTimeout overrides the drain timeout. Duration string (e.g., "5m", "30m", "1h").
 	DrainTimeout *string `toml:"drain_timeout,omitempty"`
-	// OnDeath overrides the on_death command.
+	// OnDeath overrides the on_death command template. Supports the same Go
+	// template placeholders as Agent.on_death.
 	OnDeath *string `toml:"on_death,omitempty"`
-	// OnBoot overrides the on_boot command.
+	// OnBoot overrides the on_boot command template. Supports the same Go
+	// template placeholders as Agent.on_boot.
 	OnBoot *string `toml:"on_boot,omitempty"`
 }
 
@@ -160,10 +165,24 @@ type RigPatch struct {
 type ProviderPatch struct {
 	// Name is the targeting key (required). Must match an existing provider's name.
 	Name string `toml:"name" jsonschema:"required"`
+	// Base overrides the provider's inheritance parent (presence-aware).
+	// Pointer to a pointer so the patch can distinguish "no change"
+	// (double-nil) from "clear to inherit default" (single-nil value in
+	// outer pointer) from "set to explicit empty opt-out" (value "" in
+	// inner pointer) from "set to <name>". Callers use:
+	//   nil          = patch does not touch Base
+	//   &(*string)(nil) = patch clears Base to absent
+	//   &(&"")       = patch sets Base = "" (explicit opt-out)
+	//   &(&"builtin:codex") = patch sets Base to that value
+	Base **string `toml:"base,omitempty"`
 	// Command overrides the provider command.
 	Command *string `toml:"command,omitempty"`
 	// Args overrides the provider args.
 	Args []string `toml:"args,omitempty"`
+	// ArgsAppend overrides the provider args_append list.
+	ArgsAppend []string `toml:"args_append,omitempty"`
+	// OptionsSchemaMerge overrides the options_schema merge mode.
+	OptionsSchemaMerge *string `toml:"options_schema_merge,omitempty"`
 	// PromptMode overrides prompt delivery mode.
 	PromptMode *string `toml:"prompt_mode,omitempty" jsonschema:"enum=arg,enum=flag,enum=none"`
 	// PromptFlag overrides the prompt flag.
@@ -420,12 +439,22 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 	if patch.Replace {
 		// Full replacement — build a new spec from patch fields only.
 		var newSpec ProviderSpec
+		if patch.Base != nil {
+			newSpec.Base = *patch.Base
+		}
 		if patch.Command != nil {
 			newSpec.Command = *patch.Command
 		}
 		if len(patch.Args) > 0 {
 			newSpec.Args = make([]string, len(patch.Args))
 			copy(newSpec.Args, patch.Args)
+		}
+		if len(patch.ArgsAppend) > 0 {
+			newSpec.ArgsAppend = make([]string, len(patch.ArgsAppend))
+			copy(newSpec.ArgsAppend, patch.ArgsAppend)
+		}
+		if patch.OptionsSchemaMerge != nil {
+			newSpec.OptionsSchemaMerge = *patch.OptionsSchemaMerge
 		}
 		if patch.PromptMode != nil {
 			newSpec.PromptMode = *patch.PromptMode
@@ -446,12 +475,22 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 		return nil
 	}
 	// Deep merge: only set fields override.
+	if patch.Base != nil {
+		spec.Base = *patch.Base // outer nil handled above; *patch.Base may be nil (clear) or valid
+	}
 	if patch.Command != nil {
 		spec.Command = *patch.Command
 	}
 	if len(patch.Args) > 0 {
 		spec.Args = make([]string, len(patch.Args))
 		copy(spec.Args, patch.Args)
+	}
+	if len(patch.ArgsAppend) > 0 {
+		spec.ArgsAppend = make([]string, len(patch.ArgsAppend))
+		copy(spec.ArgsAppend, patch.ArgsAppend)
+	}
+	if patch.OptionsSchemaMerge != nil {
+		spec.OptionsSchemaMerge = *patch.OptionsSchemaMerge
 	}
 	if patch.PromptMode != nil {
 		spec.PromptMode = *patch.PromptMode

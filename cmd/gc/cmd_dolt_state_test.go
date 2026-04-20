@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 func parseDoltStateOutput(t *testing.T, out string) map[string]string {
@@ -156,6 +157,31 @@ func TestDoltStateAllocatePortCmdReusesLiveProviderState(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); got != strconv.Itoa(port) {
 		t.Fatalf("allocate-port = %q, want %d", got, port)
+	}
+}
+
+func TestStartTCPListenerProcessInDirRegistersCleanup(t *testing.T) {
+	port := reserveRandomTCPPort(t)
+	dir := t.TempDir()
+	var proc *exec.Cmd
+
+	t.Run("listener", func(t *testing.T) {
+		proc = startTCPListenerProcessInDir(t, port, dir)
+		if !pidutil.Alive(proc.Process.Pid) {
+			t.Fatalf("listener pid %d is not alive after start", proc.Process.Pid)
+		}
+	})
+
+	if proc == nil {
+		t.Fatal("listener process handle was not captured")
+	}
+	if proc.ProcessState == nil {
+		t.Fatal("listener cleanup did not wait for process exit")
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("listener port is still reachable after cleanup")
 	}
 }
 
@@ -1081,6 +1107,12 @@ while True:
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start listener process in %s: %v", dir, err)
 	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	})
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
@@ -1374,6 +1406,12 @@ exit 1
 	if code != 0 {
 		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
 	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	assertNoManagedDoltProbeDrop(t, "read-only-check invocation", string(invocation))
+	assertManagedDoltProbeWrites(t, "read-only-check invocation", string(invocation))
 }
 
 func TestDoltStateReadOnlyCheckCmdReturnsErrExitWhenWritable(t *testing.T) {
@@ -1394,6 +1432,82 @@ exit 0
 	}
 }
 
+func TestDoltStateResetProbeCmdDropsManagedProbeDatabase(t *testing.T) {
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+exit 0
+`)
+	t.Setenv("INVOCATION_FILE", invocationFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "reset-probe", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--force"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	invocation, err := os.ReadFile(invocationFile)
+	if err != nil {
+		t.Fatalf("ReadFile(invocation): %v", err)
+	}
+	text := string(invocation)
+	if !strings.Contains(text, "DROP DATABASE IF EXISTS "+managedDoltProbeDatabase) {
+		t.Fatalf("reset-probe invocation = %s, want managed probe drop", text)
+	}
+}
+
+func TestDoltStateResetProbeCmdRequiresForce(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "reset-probe", "--host", "127.0.0.1", "--port", "3311", "--user", "root"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1; stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing to drop "+managedDoltProbeDatabase+" without --force") ||
+		!strings.Contains(stderr.String(), "legacy bead store") {
+		t.Fatalf("stderr = %q, want force warning with legacy bead store context", stderr.String())
+	}
+}
+
+func TestDoltStateResetProbeCmdUsesDirectConnectionWithPassword(t *testing.T) {
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+exit 42
+`)
+	t.Setenv("GC_DOLT_PASSWORD", "secret")
+	t.Setenv("INVOCATION_FILE", invocationFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	oldResetDirect := managedDoltResetProbeDirectFn
+	called := false
+	managedDoltResetProbeDirectFn = func(host, port, user string) error {
+		called = true
+		if host != "127.0.0.1" || port != "3311" || user != "root" {
+			t.Fatalf("managedDoltResetProbeDirectFn(%q, %q, %q), want requested connection", host, port, user)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		managedDoltResetProbeDirectFn = oldResetDirect
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "reset-probe", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--force"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	if !called {
+		t.Fatalf("managedDoltResetProbeDirectFn was not called")
+	}
+	if _, err := os.Stat(invocationFile); !os.IsNotExist(err) {
+		t.Fatalf("dolt CLI invocation file exists after password reset path: err=%v", err)
+	}
+}
+
 func TestDoltStateHealthCheckCmdReportsReadOnlyAndConnectionCount(t *testing.T) {
 	binDir := t.TempDir()
 	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
@@ -1404,7 +1518,7 @@ case "$*" in
   *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
-  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; USE __gc_probe; CREATE TABLE IF NOT EXISTS __probe (k INT PRIMARY KEY); REPLACE INTO __probe VALUES (1); DROP TABLE __probe; DROP DATABASE __gc_probe;"*)
+  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);"*)
     echo 'database is read only' >&2
     exit 1
     ;;
@@ -1441,6 +1555,8 @@ esac
 		t.Fatalf("ReadFile(invocation): %v", err)
 	}
 	text := string(invocation)
+	assertNoManagedDoltProbeDrop(t, "health-check read-only probe", text)
+	assertManagedDoltProbeWrites(t, "health-check read-only probe", text)
 	for _, want := range []string{"--host 127.0.0.1", "--port 3311", "--user root", "SELECT active_branch()", "information_schema.PROCESSLIST"} {
 		if strings.Contains(text, want) == false {
 			t.Fatalf("dolt invocation missing %q: %s", want, text)
@@ -1526,7 +1642,7 @@ case "$*" in
   *"sql -q SELECT active_branch()"*)
     exit 0
     ;;
-  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; USE __gc_probe; CREATE TABLE IF NOT EXISTS __probe (k INT PRIMARY KEY); REPLACE INTO __probe VALUES (1); DROP TABLE __probe; DROP DATABASE __gc_probe;"*)
+  *"sql -q CREATE DATABASE IF NOT EXISTS __gc_probe; CREATE TABLE IF NOT EXISTS __gc_probe.__probe (k INT PRIMARY KEY); REPLACE INTO __gc_probe.__probe VALUES (1);"*)
     echo 'probe exploded' >&2
     exit 1
     ;;

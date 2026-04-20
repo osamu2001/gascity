@@ -66,8 +66,8 @@ scope = "city"
 	if !strings.Contains(out, "gc doctor --fix") || !strings.Contains(out, "gc doctor") {
 		t.Fatalf("doctor output missing doctor migration guidance:\n%s", out)
 	}
-	if !strings.Contains(out, "[rig_defaults] imports = [...]") {
-		t.Fatalf("doctor output missing rig_defaults guidance:\n%s", out)
+	if !strings.Contains(out, "[defaults.rig.imports.<binding>]") {
+		t.Fatalf("doctor output missing rig defaults guidance:\n%s", out)
 	}
 	if !strings.Contains(out, ".template.md") {
 		t.Fatalf("doctor output missing .template.md guidance:\n%s", out)
@@ -159,6 +159,56 @@ path = "/tmp/frontend"
 	}
 }
 
+func TestV2DeprecationChecksWarnAndFixLegacyWorkspaceIdentity(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+prefix = "lc"
+`)
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	registerV2DeprecationChecks(d)
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
+
+	out := buf.String()
+	if !strings.Contains(out, "v2-workspace-name") {
+		t.Fatalf("doctor output missing workspace identity warning:\n%s", out)
+	}
+	if !strings.Contains(out, ".gc/site.toml") {
+		t.Fatalf("doctor output missing site binding guidance:\n%s", out)
+	}
+
+	buf.Reset()
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, true)
+
+	rawData, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(city.toml): %v", err)
+	}
+	if strings.Contains(string(rawData), `name = "legacy-city"`) || strings.Contains(string(rawData), `prefix = "lc"`) {
+		t.Fatalf("city.toml should no longer store workspace identity:\n%s", rawData)
+	}
+
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if binding.WorkspaceName != "legacy-city" || binding.WorkspacePrefix != "lc" {
+		t.Fatalf("binding = %+v, want workspace_name=legacy-city workspace_prefix=lc", binding)
+	}
+
+	buf.Reset()
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
+	out = buf.String()
+	if strings.Contains(out, "⚠ v2-workspace-name") {
+		t.Fatalf("workspace identity warning should clear after fix:\n%s", out)
+	}
+}
+
 func TestV2DeprecationChecksWarnOnLegacyTemplateSuffix(t *testing.T) {
 	t.Parallel()
 
@@ -198,6 +248,9 @@ name = "modern-city"
 schema = 1
 
 [imports.gastown]
+source = "./assets/imports/gastown"
+
+[defaults.rig.imports.gastown]
 source = "./assets/imports/gastown"
 `)
 	writeDoctorFile(t, cityDir, "agents/mayor/prompt.md", "Hello world\n")

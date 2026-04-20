@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -375,6 +376,98 @@ func TestProviderDrainOpsRoundTrip(t *testing.T) {
 	acked, _ = dops.isDrainAcked("worker")
 	if acked {
 		t.Error("ack should be cleared after clearDrain")
+	}
+}
+
+func TestProviderDrainOpsReportsMetadataErrors(t *testing.T) {
+	sp := runtime.NewFailFake()
+	dops := newDrainOps(sp)
+
+	if _, err := dops.isDraining("worker"); err == nil {
+		t.Fatal("isDraining should return an error when metadata lookup fails")
+	}
+	if _, err := dops.isDrainAcked("worker"); err == nil {
+		t.Fatal("isDrainAcked should return an error when metadata lookup fails")
+	}
+	if _, err := dops.isRestartRequested("worker"); err == nil {
+		t.Fatal("isRestartRequested should return an error when metadata lookup fails")
+	}
+	if _, err := dops.isDriftRestart("worker"); err == nil {
+		t.Fatal("isDriftRestart should return an error when metadata lookup fails")
+	}
+	if err := dops.clearDrain("worker"); err == nil {
+		t.Fatal("clearDrain should return an error when metadata removal fails")
+	}
+	if err := dops.setDrainAck("worker"); err == nil {
+		t.Fatal("setDrainAck should return an error when metadata removal fails")
+	}
+}
+
+type recordingMetaProvider struct {
+	*runtime.Fake
+	removeErr  error
+	removeKeys []string
+	setKeys    []string
+}
+
+func (p *recordingMetaProvider) RemoveMeta(name, key string) error {
+	p.removeKeys = append(p.removeKeys, key)
+	if p.removeErr != nil {
+		return p.removeErr
+	}
+	return p.Fake.RemoveMeta(name, key)
+}
+
+func (p *recordingMetaProvider) SetMeta(name, key, value string) error {
+	p.setKeys = append(p.setKeys, key)
+	return p.Fake.SetMeta(name, key, value)
+}
+
+func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
+	sp := &recordingMetaProvider{
+		Fake:      runtime.NewFake(),
+		removeErr: errors.New("metadata removal unavailable"),
+	}
+	dops := newDrainOps(sp)
+
+	if err := dops.clearDrain("worker"); err == nil {
+		t.Fatal("clearDrain should report metadata removal errors")
+	}
+	want := []string{
+		"GC_DRAIN_ACK",
+		reconcilerDrainAckSourceKey,
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+		"GC_DRAIN",
+	}
+	if !slices.Equal(sp.removeKeys, want) {
+		t.Fatalf("removed keys = %v, want %v", sp.removeKeys, want)
+	}
+}
+
+func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) {
+	sp := &recordingMetaProvider{
+		Fake:      runtime.NewFake(),
+		removeErr: errors.New("metadata removal unavailable"),
+	}
+	dops := newDrainOps(sp)
+
+	if err := dops.setDrainAck("worker"); err == nil {
+		t.Fatal("setDrainAck should report metadata cleanup errors")
+	}
+	wantRemove := []string{
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+	}
+	if !slices.Equal(sp.removeKeys, wantRemove) {
+		t.Fatalf("removed keys = %v, want %v", sp.removeKeys, wantRemove)
+	}
+	wantSet := []string{
+		reconcilerDrainAckSourceKey,
+		"GC_DRAIN_ACK",
+	}
+	if !slices.Equal(sp.setKeys, wantSet) {
+		t.Fatalf("set keys = %v, want %v", sp.setKeys, wantSet)
 	}
 }
 

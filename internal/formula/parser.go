@@ -422,12 +422,52 @@ func CheckResidualVars(s string) []string {
 	return names
 }
 
+// CheckResidualTimeoutVars returns unresolved {{var}} and {var} placeholders
+// in timeout strings after all available substitutions have been applied.
+func CheckResidualTimeoutVars(s string) []string {
+	seen := make(map[string]bool)
+	var names []string
+	add := func(name string) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+
+	for _, name := range CheckResidualVars(s) {
+		add(name)
+	}
+	for _, match := range rangeVarPattern.FindAllStringSubmatchIndex(s, -1) {
+		start, end := match[0], match[1]
+		if start > 0 && s[start-1] == '{' {
+			continue
+		}
+		if end < len(s) && s[end] == '}' {
+			continue
+		}
+		add(s[match[2]:match[3]])
+	}
+	return names
+}
+
 // ValidateVars checks that all required variables are provided
 // and all values pass their constraints.
 func ValidateVars(formula *Formula, values map[string]string) error {
+	return validateVarDefs(formula.Vars, values)
+}
+
+// ValidateVarDefs validates explicit var definitions against provided values.
+// This is the recipe-level equivalent of ValidateVars, used after formula
+// compilation when only the remaining VarDef map is available.
+func ValidateVarDefs(defs map[string]*VarDef, values map[string]string) error {
+	return validateVarDefs(defs, values)
+}
+
+func validateVarDefs(defs map[string]*VarDef, values map[string]string) error {
 	var errs []string
 
-	for name, def := range formula.Vars {
+	for name, def := range defs {
 		val, provided := values[name]
 
 		// Check required

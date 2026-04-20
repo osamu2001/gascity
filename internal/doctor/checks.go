@@ -22,7 +22,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -60,13 +59,14 @@ func (c *CityStructureCheck) CanFix() bool { return false }
 // Fix is a no-op.
 func (c *CityStructureCheck) Fix(_ *CheckContext) error { return nil }
 
-// CityConfigCheck verifies city.toml parses and workspace.name is set.
+// CityConfigCheck verifies city.toml parses and an effective workspace name can
+// be resolved.
 type CityConfigCheck struct{}
 
 // Name returns the check identifier.
 func (c *CityConfigCheck) Name() string { return "city-config" }
 
-// Run parses city.toml and checks workspace.name.
+// Run parses city.toml and checks effective workspace identity.
 func (c *CityConfigCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(ctx.CityPath, "city.toml"))
@@ -80,12 +80,7 @@ func (c *CityConfigCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = "workspace.name not set (and could not derive from path)"
 		return r
 	}
-	summary := fmt.Sprintf("city.toml loaded (%d agents, %d rigs)", len(cfg.Agents), len(cfg.Rigs))
-	if cfg.Workspace.Name == "" {
-		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("workspace.name not set (using derived name %q); %s", cfg.ResolvedWorkspaceName, summary)
-		return r
-	}
+	summary := fmt.Sprintf("city.toml loaded (%d agents, %d rigs); effective city name %q", len(cfg.Agents), len(cfg.Rigs), cfg.ResolvedWorkspaceName)
 	r.Status = StatusOK
 	r.Message = summary
 	return r
@@ -558,7 +553,8 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	prefix := "" // per-city socket isolation: all sessions belong to this city
 	running, err := c.sp.ListRunning(prefix)
-	if err != nil {
+	partialList := runtime.IsPartialListError(err)
+	if err != nil && !partialList {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("listing sessions: %v", err)
 		return r
@@ -579,12 +575,21 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	if len(orphans) == 0 {
+		if partialList {
+			r.Status = StatusWarning
+			r.Message = fmt.Sprintf("listing sessions partially failed: %v", err)
+			return r
+		}
 		r.Status = StatusOK
 		r.Message = "no orphaned sessions"
 		return r
 	}
 	r.Status = StatusWarning
-	r.Message = fmt.Sprintf("%d orphaned session(s)", len(orphans))
+	if partialList {
+		r.Message = fmt.Sprintf("listing sessions partially failed: %v (%d visible orphaned session(s))", err, len(orphans))
+	} else {
+		r.Message = fmt.Sprintf("%d orphaned session(s)", len(orphans))
+	}
 	r.Details = orphans
 	return r
 }
@@ -596,6 +601,9 @@ func (c *OrphanSessionsCheck) CanFix() bool { return true }
 func (c *OrphanSessionsCheck) Fix(_ *CheckContext) error {
 	prefix := "" // per-city socket isolation: all sessions belong to this city
 	running, err := c.sp.ListRunning(prefix)
+	if runtime.IsPartialListError(err) {
+		return fmt.Errorf("listing sessions partially failed: %w", err)
+	}
 	if err != nil {
 		return err
 	}
@@ -1566,131 +1574,4 @@ func IsControllerRunning(cityPath string) bool {
 	// We got the lock, release immediately — no controller running.
 	syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
 	return false
-}
-
-// --- Global rig index checks ---
-
-// RigIndexCheck verifies that all rigs in the current city's city.toml
-// are registered in the global cities.toml rig index, and that each rig's
-// .beads/.env has the correct GT_ROOT.
-type RigIndexCheck struct {
-	// RegistryPath is the path to cities.toml. If empty, uses the default.
-	RegistryPath string
-	// FixFn is called during Fix to backfill entries. If nil, fix is unavailable.
-	FixFn func(cityPath string) error
-	// missing is populated by Run for use by Fix.
-	missing []rigIndexIssue
-}
-
-type rigIndexIssue struct {
-	rigName  string
-	rigPath  string
-	issue    string // "not_registered", "wrong_default", "missing_gt_root", "wrong_gt_root"
-	cityPath string
-}
-
-// Name returns the check identifier.
-func (c *RigIndexCheck) Name() string { return "rig-index" }
-
-// Run checks global rig index consistency.
-func (c *RigIndexCheck) Run(ctx *CheckContext) *CheckResult {
-	r := &CheckResult{Name: c.Name()}
-	c.missing = nil
-
-	regPath := c.RegistryPath
-	if regPath == "" {
-		regPath = supervisor.RegistryPath()
-	}
-
-	reg := supervisor.NewRegistry(regPath)
-	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(ctx.CityPath, "city.toml"))
-	if err != nil {
-		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("cannot load city config: %v", err)
-		return r
-	}
-
-	for _, rig := range cfg.Rigs {
-		rigPath := rig.Path
-		if !filepath.IsAbs(rigPath) {
-			rigPath = filepath.Join(ctx.CityPath, rigPath)
-		}
-		rigPath = filepath.Clean(rigPath)
-
-		// Check global registry.
-		entry, ok := reg.LookupRigByName(rig.Name)
-		if !ok {
-			c.missing = append(c.missing, rigIndexIssue{
-				rigName: rig.Name, rigPath: rigPath,
-				issue: "not_registered", cityPath: ctx.CityPath,
-			})
-			r.Details = append(r.Details, fmt.Sprintf("rig %q not in global index", rig.Name))
-			continue
-		}
-
-		// Check default_city.
-		if entry.DefaultCity == "" {
-			c.missing = append(c.missing, rigIndexIssue{
-				rigName: rig.Name, rigPath: rigPath,
-				issue: "wrong_default", cityPath: ctx.CityPath,
-			})
-			r.Details = append(r.Details, fmt.Sprintf("rig %q has no default city", rig.Name))
-		}
-
-		// Check .beads/.env GT_ROOT.
-		envPath := filepath.Join(rigPath, ".beads", ".env")
-		envData, envErr := os.ReadFile(envPath)
-		if envErr != nil {
-			c.missing = append(c.missing, rigIndexIssue{
-				rigName: rig.Name, rigPath: rigPath,
-				issue: "missing_gt_root", cityPath: ctx.CityPath,
-			})
-			r.Details = append(r.Details, fmt.Sprintf("rig %q: .beads/.env missing", rig.Name))
-			continue
-		}
-		gtRoot := parseGTRoot(string(envData))
-		expectedCity := entry.DefaultCity
-		if expectedCity == "" {
-			expectedCity = ctx.CityPath
-		}
-		if gtRoot != expectedCity {
-			c.missing = append(c.missing, rigIndexIssue{
-				rigName: rig.Name, rigPath: rigPath,
-				issue: "wrong_gt_root", cityPath: ctx.CityPath,
-			})
-			r.Details = append(r.Details, fmt.Sprintf("rig %q: GT_ROOT=%s, want %s", rig.Name, gtRoot, expectedCity))
-		}
-	}
-
-	if len(c.missing) == 0 {
-		r.Status = StatusOK
-		r.Message = fmt.Sprintf("all %d rigs in global index with correct .beads/.env", len(cfg.Rigs))
-		return r
-	}
-
-	r.Status = StatusWarning
-	r.Message = fmt.Sprintf("%d rig index issues found", len(c.missing))
-	r.FixHint = "run \"gc doctor --fix\" to backfill"
-	return r
-}
-
-// CanFix returns true when a fix function is provided.
-func (c *RigIndexCheck) CanFix() bool { return c.FixFn != nil }
-
-// Fix backfills missing rig index entries and .beads/.env.
-func (c *RigIndexCheck) Fix(ctx *CheckContext) error {
-	if c.FixFn != nil {
-		return c.FixFn(ctx.CityPath)
-	}
-	return fmt.Errorf("no fix function provided")
-}
-
-// parseGTRoot extracts the GT_ROOT value from .env file content.
-func parseGTRoot(content string) string {
-	for _, line := range strings.Split(content, "\n") {
-		if strings.HasPrefix(line, "GT_ROOT=") {
-			return strings.TrimPrefix(line, "GT_ROOT=")
-		}
-	}
-	return ""
 }

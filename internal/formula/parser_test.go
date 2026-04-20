@@ -173,6 +173,230 @@ func TestValidate_InvalidPriority(t *testing.T) {
 	}
 }
 
+func TestValidate_ValidTimeout(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-timeout",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "build", Title: "Build", Timeout: "5m", Ralph: validTestRalphSpec()},
+			{ID: "test", Title: "Test", Timeout: "10m30s", Ralph: validTestRalphSpec()},
+			{ID: "lint", Title: "Lint", Timeout: "300s", Ralph: validTestRalphSpec()},
+		},
+	}
+
+	if err := formula.Validate(); err != nil {
+		t.Errorf("Validate should pass for valid timeouts: %v", err)
+	}
+}
+
+func TestValidate_AllowsUnresolvedTimeoutPlaceholders(t *testing.T) {
+	check := validTestRalphSpec()
+	check.Check.Timeout = "{{check_timeout}}"
+	formula := &Formula{
+		Formula: "mol-placeholder-timeout",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "step1", Title: "Step 1", Timeout: "{step_timeout}", Ralph: check},
+		},
+	}
+
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate should allow unresolved timeout placeholders, got: %v", err)
+	}
+}
+
+func validTestRalphSpec() *RalphSpec {
+	return &RalphSpec{
+		MaxAttempts: 1,
+		Check: &RalphCheckSpec{
+			Mode: "exec",
+			Path: "checks/pass.sh",
+		},
+	}
+}
+
+func TestValidate_TimeoutRequiresRalph(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-timeout-without-ralph",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{ID: "step1", Title: "Step 1", Timeout: "5m"},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Fatal("Validate should fail for timeout on a non-Ralph step")
+	}
+	if !strings.Contains(err.Error(), "timeout requires check") {
+		t.Fatalf("Validate error = %v, want timeout requires check", err)
+	}
+}
+
+func TestValidate_InvalidTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout string
+	}{
+		{name: "invalid format", timeout: "not-a-duration"},
+		{name: "zero duration", timeout: "0s"},
+		{name: "negative duration", timeout: "-5s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			formula := &Formula{
+				Formula: "mol-bad-timeout",
+				Version: 1,
+				Type:    TypeWorkflow,
+				Steps: []*Step{
+					{ID: "step1", Title: "Step 1", Timeout: tt.timeout, Ralph: validTestRalphSpec()},
+				},
+			}
+
+			err := formula.Validate()
+			if err == nil {
+				t.Fatalf("Validate should fail for timeout %q", tt.timeout)
+			}
+		})
+	}
+}
+
+func TestValidate_InvalidRalphCheckTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout string
+	}{
+		{name: "invalid format", timeout: "bogus"},
+		{name: "zero duration", timeout: "0s"},
+		{name: "negative duration", timeout: "-5s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			check := validTestRalphSpec()
+			check.Check.Timeout = tt.timeout
+			formula := &Formula{
+				Formula: "mol-bad-check-timeout",
+				Version: 1,
+				Type:    TypeWorkflow,
+				Steps: []*Step{
+					{ID: "step1", Title: "Step 1", Ralph: check},
+				},
+			}
+
+			err := formula.Validate()
+			if err == nil {
+				t.Fatalf("Validate should fail for ralph check timeout %q", tt.timeout)
+			}
+			if !strings.Contains(err.Error(), "timeout") {
+				t.Fatalf("Validate error = %v, want timeout error", err)
+			}
+		})
+	}
+}
+
+func TestValidate_InvalidTimeoutInChild(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout string
+	}{
+		{name: "invalid format", timeout: "bogus"},
+		{name: "zero duration", timeout: "0s"},
+		{name: "negative duration", timeout: "-5s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			formula := &Formula{
+				Formula: "mol-bad-child-timeout",
+				Version: 1,
+				Type:    TypeWorkflow,
+				Steps: []*Step{
+					{
+						ID:    "epic",
+						Title: "Epic",
+						Children: []*Step{
+							{ID: "child1", Title: "Child 1", Timeout: tt.timeout},
+						},
+					},
+				},
+			}
+
+			err := formula.Validate()
+			if err == nil {
+				t.Fatalf("Validate should fail for child timeout %q", tt.timeout)
+			}
+		})
+	}
+}
+
+func TestValidate_InvalidTimeoutInLoopBody(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-bad-loop-timeout",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "loop",
+				Title: "Loop",
+				Loop: &LoopSpec{
+					Count: 1,
+					Body: []*Step{
+						{
+							ID:      "check",
+							Title:   "Check",
+							Timeout: "bogus",
+							Ralph:   validTestRalphSpec(),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	err := formula.Validate()
+	if err == nil {
+		t.Fatal("Validate should fail for invalid timeout in loop body")
+	}
+	if !strings.Contains(err.Error(), "invalid timeout") {
+		t.Fatalf("Validate error = %v, want invalid timeout", err)
+	}
+}
+
+func TestValidate_LoopBodyTimeoutAllowsLoopVariable(t *testing.T) {
+	formula := &Formula{
+		Formula: "mol-loop-timeout-var",
+		Version: 1,
+		Type:    TypeWorkflow,
+		Steps: []*Step{
+			{
+				ID:    "loop",
+				Title: "Loop",
+				Loop: &LoopSpec{
+					Range: "1..2",
+					Var:   "seconds",
+					Body: []*Step{
+						{
+							ID:      "check",
+							Title:   "Check",
+							Timeout: "{seconds}s",
+							Ralph:   validTestRalphSpec(),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := formula.Validate(); err != nil {
+		t.Fatalf("Validate failed for loop-variable timeout: %v", err)
+	}
+}
+
 func TestValidate_ChildSteps(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-children",
@@ -419,6 +643,34 @@ func TestCheckResidualVars(t *testing.T) {
 			for i := range got {
 				if got[i] != tt.want[i] {
 					t.Errorf("CheckResidualVars(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestCheckResidualTimeoutVars(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{name: "no placeholders", input: "5m", want: nil},
+		{name: "double brace", input: "{{timeout}}", want: []string{"timeout"}},
+		{name: "single brace", input: "{step_timeout}", want: []string{"step_timeout"}},
+		{name: "mixed", input: "{{timeout}}-{fallback}", want: []string{"timeout", "fallback"}},
+		{name: "dedupes across syntaxes", input: "{{timeout}}/{timeout}", want: []string{"timeout"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CheckResidualTimeoutVars(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("CheckResidualTimeoutVars(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("CheckResidualTimeoutVars(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
 				}
 			}
 		})
@@ -1348,6 +1600,7 @@ type = "workflow"
 [[steps]]
 id = "implement"
 title = "Implement"
+timeout = "10m"
 
 [steps.check]
 max_attempts = 2
@@ -1370,6 +1623,9 @@ timeout = "30s"
 	step := formula.Steps[0]
 	if step.Ralph == nil {
 		t.Fatal("Steps[0].Ralph is nil")
+	}
+	if step.Timeout != "10m" {
+		t.Fatalf("Steps[0].Timeout = %q, want 10m", step.Timeout)
 	}
 	if step.Ralph.MaxAttempts != 2 {
 		t.Fatalf("Steps[0].Ralph.MaxAttempts = %d, want 2", step.Ralph.MaxAttempts)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -38,17 +39,19 @@ func (o *providerDrainOps) setDrain(sessionName string) error {
 }
 
 func (o *providerDrainOps) clearDrain(sessionName string) error {
-	_ = o.sp.RemoveMeta(sessionName, "GC_DRAIN_ACK")
-	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckSourceKey)
-	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey)
-	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey)
-	return o.sp.RemoveMeta(sessionName, "GC_DRAIN")
+	return errors.Join(
+		o.sp.RemoveMeta(sessionName, "GC_DRAIN_ACK"),
+		o.sp.RemoveMeta(sessionName, reconcilerDrainAckSourceKey),
+		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
+		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
+		o.sp.RemoveMeta(sessionName, "GC_DRAIN"),
+	)
 }
 
 func (o *providerDrainOps) isDraining(sessionName string) (bool, error) {
 	val, err := o.sp.GetMeta(sessionName, "GC_DRAIN")
 	if err != nil {
-		return false, nil // can't read = not draining
+		return false, fmt.Errorf("reading GC_DRAIN: %w", err)
 	}
 	return val != "", nil
 }
@@ -69,18 +72,18 @@ func (o *providerDrainOps) drainStartTime(sessionName string) (time.Time, error)
 }
 
 func (o *providerDrainOps) setDrainAck(sessionName string) error {
-	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey)
-	_ = o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey)
-	if err := o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue); err != nil {
-		return err
-	}
-	return o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1")
+	return errors.Join(
+		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
+		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
+		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
+		o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1"),
+	)
 }
 
 func (o *providerDrainOps) isDrainAcked(sessionName string) (bool, error) {
 	val, err := o.sp.GetMeta(sessionName, "GC_DRAIN_ACK")
 	if err != nil {
-		return false, nil
+		return false, fmt.Errorf("reading GC_DRAIN_ACK: %w", err)
 	}
 	return val == "1", nil
 }
@@ -92,7 +95,7 @@ func (o *providerDrainOps) setRestartRequested(sessionName string) error {
 func (o *providerDrainOps) isRestartRequested(sessionName string) (bool, error) {
 	val, err := o.sp.GetMeta(sessionName, "GC_RESTART_REQUESTED")
 	if err != nil {
-		return false, nil
+		return false, fmt.Errorf("reading GC_RESTART_REQUESTED: %w", err)
 	}
 	return val != "", nil
 }
@@ -112,7 +115,7 @@ func (o *providerDrainOps) setDriftRestart(sessionName string) error {
 func (o *providerDrainOps) isDriftRestart(sessionName string) (bool, error) {
 	val, err := o.sp.GetMeta(sessionName, "GC_DRIFT_RESTART")
 	if err != nil {
-		return false, nil
+		return false, fmt.Errorf("reading GC_DRIFT_RESTART: %w", err)
 	}
 	return val == "1", nil
 }
@@ -155,7 +158,7 @@ func cmdRuntimeDrain(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "gc runtime drain: missing session alias or ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	target, err := resolveSessionRuntimeTarget(args[0])
+	target, err := resolveSessionRuntimeTarget(args[0], stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -219,7 +222,7 @@ func cmdRuntimeUndrain(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "gc runtime undrain: missing session alias or ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	target, err := resolveSessionRuntimeTarget(args[0])
+	target, err := resolveSessionRuntimeTarget(args[0], stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -282,7 +285,7 @@ arguments, uses the current session context.`,
 
 func cmdRuntimeDrainCheck(args []string, stderr io.Writer) int {
 	if len(args) > 0 {
-		target, err := resolveSessionRuntimeTarget(args[0])
+		target, err := resolveSessionRuntimeTarget(args[0], stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1                                                 // silent — same as current "not draining" behavior
@@ -336,7 +339,7 @@ finished its current work in response to a drain signal.`,
 
 func cmdRuntimeDrainAck(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
-		target, err := resolveSessionRuntimeTarget(args[0])
+		target, err := resolveSessionRuntimeTarget(args[0], stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -417,7 +420,7 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 		}
 	}
 	rec := openCityRecorderAt(current.cityPath, stderr)
-	cfg, _ := loadCityConfig(current.cityPath)
+	cfg, _ := loadCityConfig(current.cityPath, stderr)
 	var persistRestart func() error
 	if store != nil {
 		persistRestart = func() error {

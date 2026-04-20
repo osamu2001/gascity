@@ -34,6 +34,9 @@ func TestHandleConfigGet(t *testing.T) {
 	if resp.Workspace.Name != "test-city" {
 		t.Errorf("workspace.name = %q, want %q", resp.Workspace.Name, "test-city")
 	}
+	if resp.Workspace.Prefix != "tc" {
+		t.Errorf("workspace.prefix = %q, want %q", resp.Workspace.Prefix, "tc")
+	}
 	if resp.Workspace.Provider != "claude" {
 		t.Errorf("workspace.provider = %q, want %q", resp.Workspace.Provider, "claude")
 	}
@@ -48,6 +51,68 @@ func TestHandleConfigGet(t *testing.T) {
 	}
 	if _, ok := resp.Providers["custom"]; !ok {
 		t.Error("expected 'custom' in providers")
+	}
+}
+
+func TestHandleConfigGet_UsesEffectiveWorkspaceIdentity(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityName = "machine-alias"
+	fs.cfg.Workspace.Name = "declared-city"
+	fs.cfg.Workspace.Prefix = "dc"
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp configResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+
+	if resp.Workspace.Name != "machine-alias" {
+		t.Errorf("workspace.name = %q, want %q", resp.Workspace.Name, "machine-alias")
+	}
+	if resp.Workspace.Prefix != "dc" {
+		t.Errorf("workspace.prefix = %q, want %q", resp.Workspace.Prefix, "dc")
+	}
+	if resp.Workspace.DeclaredName != "declared-city" {
+		t.Errorf("workspace.declared_name = %q, want %q", resp.Workspace.DeclaredName, "declared-city")
+	}
+	if resp.Workspace.DeclaredPrefix != "dc" {
+		t.Errorf("workspace.declared_prefix = %q, want %q", resp.Workspace.DeclaredPrefix, "dc")
+	}
+}
+
+func TestHandleConfigGet_DerivesPrefixFromRuntimeAliasWhenNoExplicitPrefix(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityName = "machine-alias"
+	fs.cfg.Workspace.Name = ""
+	fs.cfg.Workspace.Prefix = ""
+	fs.cfg.ResolvedWorkspaceName = "bright-lights"
+	h := newTestCityHandler(t, fs)
+
+	req := httptest.NewRequest("GET", cityURL(fs, "/config"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var resp configResponse
+	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+
+	if resp.Workspace.Name != "machine-alias" {
+		t.Errorf("workspace.name = %q, want %q", resp.Workspace.Name, "machine-alias")
+	}
+	if resp.Workspace.Prefix != "ma" {
+		t.Errorf("workspace.prefix = %q, want %q", resp.Workspace.Prefix, "ma")
+	}
+	if resp.Workspace.DeclaredPrefix != "" {
+		t.Errorf("workspace.declared_prefix = %q, want empty", resp.Workspace.DeclaredPrefix)
 	}
 }
 

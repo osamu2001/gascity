@@ -110,14 +110,27 @@ func TestTutorial01Cities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("cat city.toml: %v\n%s", err, out)
 			}
+			if !strings.Contains(out, `provider = "claude"`) {
+				t.Fatalf("city.toml missing workspace provider:\n%s", out)
+			}
+			if strings.Contains(out, "[[agent]]") {
+				t.Fatalf("city.toml contains legacy [[agent]] block:\n%s", out)
+			}
+		})
+
+		t.Run("cat pack.toml", func(t *testing.T) {
+			out, err := ws.runShell("cat pack.toml", "")
+			if err != nil {
+				t.Fatalf("cat pack.toml: %v\n%s", err, out)
+			}
 			for _, want := range []string{
-				`name = "my-city"`,
-				`provider = "claude"`,
 				`name = "mayor"`,
 				`prompt_template = "agents/mayor/prompt.template.md"`,
+				`template = "mayor"`,
+				`mode = "always"`,
 			} {
 				if !strings.Contains(out, want) {
-					t.Fatalf("city.toml missing %q:\n%s", want, out)
+					t.Fatalf("pack.toml missing %q:\n%s", want, out)
 				}
 			}
 		})
@@ -152,8 +165,25 @@ func TestTutorial01Cities(t *testing.T) {
 			if !strings.Contains(out, `name = "my-project"`) {
 				t.Fatalf("city.toml missing rig entry:\n%s", out)
 			}
+			if strings.Contains(out, myProject) {
+				t.Fatalf("city.toml should not contain machine-local rig path %q:\n%s", myProject, out)
+			}
+		})
+
+		t.Run("read .gc/site.toml (with rig)", func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(myCity, ".gc", "site.toml"))
+			if err != nil {
+				t.Fatalf("read .gc/site.toml: %v", err)
+			}
+			out := string(data)
+			if !strings.Contains(out, `workspace_name = "my-city"`) {
+				t.Fatalf(".gc/site.toml missing workspace binding:\n%s", out)
+			}
+			if !strings.Contains(out, `name = "my-project"`) {
+				t.Fatalf(".gc/site.toml missing rig entry:\n%s", out)
+			}
 			if !strings.Contains(out, myProject) {
-				t.Fatalf("city.toml missing rig path %q:\n%s", myProject, out)
+				t.Fatalf(".gc/site.toml missing rig path %q:\n%s", myProject, out)
 			}
 		})
 

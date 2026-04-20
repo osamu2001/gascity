@@ -15,8 +15,27 @@ func NormalizePathForCompare(path string) string {
 	path = filepath.Clean(path)
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved
+	} else if resolved, ok := normalizeMissingPath(path); ok {
+		path = resolved
 	}
 	return filepath.Clean(path)
+}
+
+func normalizeMissingPath(path string) (string, bool) {
+	var missing []string
+	for current := path; ; current = filepath.Dir(current) {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return resolved, true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", false
+		}
+		missing = append(missing, filepath.Base(current))
+	}
 }
 
 // SamePath reports whether two paths refer to the same location after

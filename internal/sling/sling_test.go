@@ -12,7 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -183,6 +183,28 @@ func TestBuildSlingCommandForAgentParseErrorRedactsTemplate(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), template) {
 		t.Fatalf("stderr should redact raw template, got %q", buf.String())
+	}
+}
+
+func TestBuildSlingCommandForAgentExpandsPathContextPlaceholders(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	rigPath := filepath.Join(cityPath, "frontend")
+	a := config.Agent{Name: "worker", Dir: "frontend"}
+	rigs := []config.Rig{{Name: "frontend", Path: rigPath}}
+
+	got := BuildSlingCommandForAgent(
+		"sling_query",
+		"custom {} --route={{.CityName}}/{{.Rig}}/{{.AgentBase}}",
+		"BL-42",
+		cityPath,
+		"",
+		a,
+		rigs,
+		nil,
+	)
+
+	if want := "custom 'BL-42' --route=demo-city/frontend/worker"; got != want {
+		t.Fatalf("BuildSlingCommandForAgent() = %q, want %q", got, want)
 	}
 }
 
@@ -731,9 +753,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
@@ -790,9 +810,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
@@ -862,9 +880,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
@@ -954,9 +970,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
@@ -1049,9 +1063,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open", Assignee: "mayor"})
@@ -1132,9 +1144,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open", Assignee: "mayor"})
@@ -1233,9 +1243,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open", Assignee: "mayor"})
@@ -1328,9 +1336,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
@@ -1409,9 +1415,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	store := deps.Store
@@ -1505,9 +1509,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	store := deps.Store
@@ -1596,9 +1598,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	store := deps.Store
@@ -1684,9 +1684,7 @@ title = "Do work"
 			City: []string{formulaDir},
 		},
 	}
-	prevFormulaV2 := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prevFormulaV2) })
+	formulatest.EnableV2ForTest(t)
 	config.InjectImplicitAgents(cfg)
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	store := deps.Store

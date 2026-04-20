@@ -12,6 +12,8 @@ import (
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
+const sharedSkillCatalogSnapshotEnvVar = "GC_SHARED_SKILL_CATALOG_SNAPSHOT"
+
 // canStage1Materialize reports whether stage-1 skill materialization
 // (supervisor-tick-level writes into the agent's scope root) should
 // run for this agent. Stage 1 happens in the gc controller process on
@@ -179,6 +181,29 @@ func effectiveAgentProvider(agent *config.Agent, workspaceProvider string) strin
 	return workspaceProvider
 }
 
+// effectiveAgentProviderFamily resolves the agent's effective provider to
+// its built-in family name (e.g. a wrapped custom "my-fast-claude" with
+// base = "builtin:claude" resolves to "claude"). When the effective
+// provider is already a built-in, its name is returned unchanged. When it
+// has no built-in ancestor, the raw name is returned so downstream lookups
+// (e.g. materialize.VendorSink) fail closed on truly-unknown providers
+// rather than silently widening the match.
+//
+// Vendor-sink and hook-family lookups use this helper so wrapped providers
+// behave like their ancestor. cityProviders may be nil (tests, legacy
+// paths with no custom providers) — the helper degrades to identity
+// resolution.
+func effectiveAgentProviderFamily(agent *config.Agent, workspaceProvider string, cityProviders map[string]config.ProviderSpec) string {
+	raw := effectiveAgentProvider(agent, workspaceProvider)
+	if raw == "" {
+		return ""
+	}
+	if family := config.BuiltinFamily(raw, cityProviders); family != "" {
+		return family
+	}
+	return raw
+}
+
 // effectiveSkillsForAgent returns the post-precedence desired skill set
 // for one agent. Returns nil when the agent's effective provider has
 // no vendor sink, when no catalog produced any entries, or when the
@@ -188,11 +213,11 @@ func effectiveAgentProvider(agent *config.Agent, workspaceProvider string) strin
 // city-catalog pattern in newAgentBuildParams) so a permissions
 // glitch on an agent's skills_dir is observable rather than silently
 // dropping agent-local skills.
-func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent, workspaceProvider string, stderr io.Writer) []materialize.SkillEntry {
+func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent, workspaceProvider string, cityProviders map[string]config.ProviderSpec, stderr io.Writer) []materialize.SkillEntry {
 	if agent == nil {
 		return nil
 	}
-	provider := effectiveAgentProvider(agent, workspaceProvider)
+	provider := effectiveAgentProviderFamily(agent, workspaceProvider, cityProviders)
 	if _, ok := materialize.VendorSink(provider); !ok {
 		return nil
 	}
@@ -272,8 +297,8 @@ func effectiveInjectAssignedSkills(agent *config.Agent) bool {
 //
 // The fragment uses the SKILL.md frontmatter description for each
 // entry so agents see both the name and a one-line purpose. Origin
-// tags identify whether a shared skill came from the city pack or a
-// bootstrap implicit-import pack (e.g. `core`).
+// tags identify where a shared skill came from: the city pack, an
+// imported pack binding, or a legacy compatibility bootstrap pack.
 func buildAssignedSkillsPromptFragment(
 	agent *config.Agent,
 	city *materialize.CityCatalog,
@@ -325,8 +350,8 @@ func buildAssignedSkillsPromptFragment(
 
 // writeSkillBullets renders a bullet list of skill entries. When
 // originTag is non-empty, each bullet trails with " *(origin)*" so
-// shared entries can show whether they came from the city pack or a
-// bootstrap pack (e.g. `core`). Descriptions are included when the
+// shared entries can show whether they came from the city pack, an
+// import binding, or a compatibility bootstrap pack. Descriptions are included when the
 // SKILL.md frontmatter provided one.
 func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, originTag string) {
 	for _, e := range entries {
@@ -348,10 +373,11 @@ func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, ori
 
 // appendMaterializeSkillsPreStart appends a PreStart command that
 // invokes `gc internal materialize-skills --agent <name> --workdir
-// <path>` for per-session-worktree materialization. The command is
-// APPENDED to any existing user-configured PreStart so worktree
-// creation and other setup runs first; materialization runs
-// immediately before the agent command.
+// <path>` for per-session-worktree materialization. Shared-catalog
+// snapshots travel via GC_SHARED_SKILL_CATALOG_SNAPSHOT in the session
+// environment instead of via argv so stage-2 stays upgrade-compatible
+// with already-running sessions whose started CoreFingerprint hashed the
+// old pre-start command string.
 //
 // The gc binary path comes from $GC_BIN (populated by the runtime env
 // setup) with "gc" as a fallback if the env var isn't available at

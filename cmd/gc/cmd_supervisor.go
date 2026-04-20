@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -1089,12 +1090,9 @@ func reconcileCities(
 			}
 		}
 
-		// Auto-fetch remote packs before full config load (same as doStart).
-		if qErr == nil && len(quickCfg.Packs) > 0 {
-			if fErr := config.FetchPacks(quickCfg.Packs, path); fErr != nil {
-				recordInitFailure(name, fmt.Sprintf("fetching packs: %v", fErr))
-				continue
-			}
+		if err := ensureLegacyNamedPacksCached(path); err != nil {
+			recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))
+			continue
 		}
 
 		// Load city config with provenance so WatchTargets covers included files.
@@ -1104,6 +1102,7 @@ func reconcileCities(
 			recordInitFailure(name, loadErr.Error())
 			continue
 		}
+		emitSupervisorLoadCityConfigWarnings(stderr, path, prov)
 
 		// Use registered name as authoritative identity. city.toml may keep a
 		// different workspace.name because registration aliases are machine-local.
@@ -1112,6 +1111,7 @@ func reconcileCities(
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': using registered name; city.toml workspace.name is %q\n", //nolint:errcheck
 				cityName, liveName)
 		}
+		applyRuntimeCityIdentity(cfg, cityName)
 
 		// Track initialization progress for the API.
 		cr.BatchUpdate(func(
@@ -1516,55 +1516,28 @@ func reconcileCities(
 		telemetry.RecordControllerLifecycle(context.Background(), "started")
 		fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
 	}
-
-	// Reconcile the global rig index from all registered cities.
-	reconcileRigIndex(reg, stderr)
 }
 
-// reconcileRigIndex rebuilds the [[rigs]] section of cities.toml from the
-// rig definitions in each registered city's city.toml.
-func reconcileRigIndex(reg *supervisor.Registry, stderr io.Writer) {
-	cities, err := reg.List()
-	if err != nil {
+var supervisorLoadWarningSeen sync.Map
+
+func emitSupervisorLoadCityConfigWarnings(w io.Writer, cityPath string, prov *config.Provenance) {
+	if w == nil || prov == nil || len(prov.Warnings) == 0 {
 		return
 	}
-
-	var mappings []supervisor.RigCityMapping
-	var loadFailed bool
-	for _, c := range cities {
-		cfg, err := loadCityConfigSuppressDeprecatedOrderWarnings(c.Path)
-		if err != nil {
-			// Abort reconciliation if any city can't be loaded — a partial
-			// snapshot would cause ReconcileRigs to drop rigs from the
-			// errored city.
-			fmt.Fprintf(stderr, "gc supervisor: skipping rig reconcile: city %q config error: %v\n", c.EffectiveName(), err) //nolint:errcheck
-			loadFailed = true
-			break
+	seen := make(map[string]struct{}, len(prov.Warnings))
+	for _, warning := range prov.Warnings {
+		if !shouldEmitLoadCityConfigWarning(warning) {
+			continue
 		}
-		for _, rig := range cfg.Rigs {
-			// Skip unbound rigs; their empty path would map to the
-			// city root and shadow real rigs in the supervisor index.
-			if strings.TrimSpace(rig.Path) == "" {
-				continue
-			}
-			rigPath := rig.Path
-			if !filepath.IsAbs(rigPath) {
-				rigPath = filepath.Join(c.Path, rigPath)
-			}
-			rigPath = filepath.Clean(rigPath)
-			mappings = append(mappings, supervisor.RigCityMapping{
-				RigPath:  rigPath,
-				RigName:  rig.Name,
-				CityPath: c.Path,
-			})
+		if _, dup := seen[warning]; dup {
+			continue
 		}
-	}
-
-	if loadFailed {
-		return
-	}
-	if err := reg.ReconcileRigs(mappings); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: reconciling rig index: %v\n", err) //nolint:errcheck
+		seen[warning] = struct{}{}
+		key := filepath.Clean(cityPath) + "\x00" + warning
+		if _, loaded := supervisorLoadWarningSeen.LoadOrStore(key, struct{}{}); loaded {
+			continue
+		}
+		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
 	}
 }
 
@@ -1676,6 +1649,14 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 			}
 		}
 	}
+
+	// Resolve script symlinks, including empty layer sets so stale links are pruned.
+	if progress != nil {
+		progress("resolving_scripts")
+	}
+	resolveConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': %s scripts: %v\n", cityName, scope, err) //nolint:errcheck
+	})
 
 	// Validate agents.
 	if err := runStep("validating_agents", func() error {

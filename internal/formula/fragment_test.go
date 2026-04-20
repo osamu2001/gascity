@@ -9,9 +9,7 @@ import (
 )
 
 func TestCompileExpansionFragmentRunsInlineExpansionAndConditionFiltering(t *testing.T) {
-	prev := IsFormulaV2Enabled()
-	SetFormulaV2Enabled(true)
-	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+	enableV2ForTest(t)
 
 	dir := t.TempDir()
 
@@ -120,9 +118,7 @@ func TestApplyFragmentRecipeGraphControlsAddsInheritedScopeChecks(t *testing.T) 
 }
 
 func TestCompileExpansionFragmentValidatesRequiredVars(t *testing.T) {
-	prev := IsFormulaV2Enabled()
-	SetFormulaV2Enabled(true)
-	t.Cleanup(func() { SetFormulaV2Enabled(prev) })
+	enableV2ForTest(t)
 
 	dir := t.TempDir()
 
@@ -182,8 +178,9 @@ func TestExpandStepDoesNotMutateSharedTemplateState(t *testing.T) {
 	t.Parallel()
 
 	template := []*Step{{
-		ID:    "{target}.worker",
-		Title: "Worker {target.title}",
+		ID:      "{target}.worker",
+		Title:   "Worker {target.title}",
+		Timeout: "{target.id}0s",
 		ExpandVars: map[string]string{
 			"who": "{target.id}",
 		},
@@ -200,6 +197,14 @@ func TestExpandStepDoesNotMutateSharedTemplateState(t *testing.T) {
 				ID:    "{target}.loop",
 				Title: "Loop {target.title}",
 			}},
+		},
+		Ralph: &RalphSpec{
+			MaxAttempts: 2,
+			Check: &RalphCheckSpec{
+				Mode:    "exec",
+				Path:    "checks/{target.id}.sh",
+				Timeout: "{target.title}0s",
+			},
 		},
 	}}
 
@@ -227,6 +232,12 @@ func TestExpandStepDoesNotMutateSharedTemplateState(t *testing.T) {
 	if got := second[0].Loop.Body[0].ID; got != "beta.loop" {
 		t.Fatalf("second loop body id = %q, want beta.loop", got)
 	}
+	if got := second[0].Timeout; got != "beta0s" {
+		t.Fatalf("second timeout = %q, want beta0s", got)
+	}
+	if got := second[0].Ralph.Check.Timeout; got != "Beta0s" {
+		t.Fatalf("second ralph check timeout = %q, want Beta0s", got)
+	}
 
 	if got := template[0].ExpandVars["who"]; got != "{target.id}" {
 		t.Fatalf("template ExpandVars mutated to %q", got)
@@ -236,6 +247,12 @@ func TestExpandStepDoesNotMutateSharedTemplateState(t *testing.T) {
 	}
 	if got := template[0].Loop.Body[0].ID; got != "{target}.loop" {
 		t.Fatalf("template loop body id mutated to %q", got)
+	}
+	if got := template[0].Timeout; got != "{target.id}0s" {
+		t.Fatalf("template timeout mutated to %q", got)
+	}
+	if got := template[0].Ralph.Check.Timeout; got != "{target.title}0s" {
+		t.Fatalf("template ralph check timeout mutated to %q", got)
 	}
 }
 

@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/formulatest"
 )
 
 func TestFormulaListReturnsCatalogSummaries(t *testing.T) {
@@ -552,9 +552,7 @@ func (s failPerRootChildLookupStore) List(query beads.ListQuery) ([]beads.Bead, 
 }
 
 func TestFormulaPreviewAcceptsTypedVarsBody(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	state := newFakeState(t)
 	// api.New(state) calls syncFeatureFlags(state.Config()), which pulls
@@ -632,9 +630,7 @@ metadata = { "gc.kind" = "run", "gc.scope_ref" = "body" }
 // curl scripts rendered the default-substituted preview the user thought
 // was customized.
 func TestFormulaDetailRejectsLegacyVarQueryParams(t *testing.T) {
-	prev := formula.IsFormulaV2Enabled()
-	formula.SetFormulaV2Enabled(true)
-	t.Cleanup(func() { formula.SetFormulaV2Enabled(prev) })
+	formulatest.EnableV2ForTest(t)
 
 	state := newFakeState(t)
 	formulaDir := t.TempDir()

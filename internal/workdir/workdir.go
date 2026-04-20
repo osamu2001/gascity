@@ -21,13 +21,9 @@ type PathContext struct {
 	CityName  string
 }
 
-// CityName returns the configured workspace name, or the city directory basename
-// when workspace.name is unset.
+// CityName returns the effective workspace name for workdir/template expansion.
 func CityName(cityPath string, cfg *config.City) string {
-	if cfg != nil && cfg.Workspace.Name != "" {
-		return cfg.Workspace.Name
-	}
-	return filepath.Base(filepath.Clean(cityPath))
+	return config.EffectiveCityName(cfg, filepath.Base(filepath.Clean(cityPath)))
 }
 
 // ResolveDirPath returns an absolute path for dir, resolving relative paths

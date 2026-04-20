@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -16,6 +17,16 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+type partialListDoctorProvider struct {
+	*runtime.Fake
+	listErr error
+}
+
+func (p *partialListDoctorProvider) ListRunning(prefix string) ([]string, error) {
+	names, _ := p.Fake.ListRunning(prefix)
+	return names, p.listErr
+}
 
 // helper creates .gc/ and city.toml in a temp dir.
 func setupCity(t *testing.T, tomlContent string) string {
@@ -91,10 +102,20 @@ func TestCityConfigCheck_NoName(t *testing.T) {
 	dir := setupCity(t, "[workspace]\n")
 	c := &CityConfigCheck{}
 	r := c.Run(&CheckContext{CityPath: dir})
-	// Empty workspace.name with a derived ResolvedWorkspaceName is a warning,
-	// not an error — EffectiveHQPrefix falls back to the derived name.
-	if r.Status != StatusWarning {
-		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestCityConfigCheck_SiteBoundName(t *testing.T) {
+	dir := setupCity(t, "[workspace]\n")
+	if err := os.WriteFile(filepath.Join(dir, ".gc", "site.toml"), []byte("workspace_name = \"site-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := &CityConfigCheck{}
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
 	}
 }
 
@@ -730,6 +751,42 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	}
 	if !sp.IsRunning("mayor") {
 		t.Error("legitimate session was killed by fix")
+	}
+}
+
+func TestOrphanSessionsCheck_PartialListWarns(t *testing.T) {
+	sp := &partialListDoctorProvider{
+		Fake:    runtime.NewFake(),
+		listErr: &runtime.PartialListError{Err: errors.New("remote backend down")},
+	}
+	if err := sp.Start(context.Background(), "stale-worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "partially failed") {
+		t.Fatalf("message = %q, want partial failure warning", r.Message)
+	}
+}
+
+func TestOrphanSessionsCheck_FixFailsOnPartialList(t *testing.T) {
+	sp := &partialListDoctorProvider{
+		Fake:    runtime.NewFake(),
+		listErr: &runtime.PartialListError{Err: errors.New("remote backend down")},
+	}
+	if err := sp.Start(context.Background(), "stale-worker", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	if err := c.Fix(&CheckContext{}); err == nil {
+		t.Fatal("Fix() error = nil, want partial list failure")
 	}
 }
 

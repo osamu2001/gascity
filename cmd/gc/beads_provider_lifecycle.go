@@ -184,7 +184,7 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 		return contract.ConfigState{}, false, nil
 	}
 	cityDolt := config.DoltConfig{}
-	if cfg, err := loadCityConfig(cityPath); err == nil {
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
 		cityPrefix := config.EffectiveHQPrefix(cfg)
 		cityDolt = cfg.Dolt
@@ -283,6 +283,10 @@ func defaultScopeDoltDatabase(cityPath, dir, prefix string) string {
 	return prefix
 }
 
+func isReservedManagedDoltDatabase(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), managedDoltProbeDatabase)
+}
+
 func canonicalScopeDoltDatabase(cityPath, dir, prefix string) string {
 	return readDeferredManagedDoltDatabase(filepath.Join(dir, ".beads", "metadata.json"), defaultScopeDoltDatabase(cityPath, dir, prefix))
 }
@@ -300,6 +304,12 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 	}
 	if strings.TrimSpace(doltDatabase) == "" {
 		doltDatabase = canonicalScopeDoltDatabase(cityPath, dir, prefix)
+	}
+	if isReservedManagedDoltDatabase(doltDatabase) {
+		// Preserve legacy probe metadata during startup normalization so old
+		// scopes can still boot and migrate deliberately. New init paths still
+		// reject this reserved name when it is not already pinned in metadata.
+		return ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
 	}
 	return enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
 }
@@ -467,7 +477,11 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	if strings.TrimSpace(doltDatabase) == "" {
 		doltDatabase = defaultScopeDoltDatabase(cityPath, dir, prefix)
 	}
-	if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+	if isReservedManagedDoltDatabase(doltDatabase) {
+		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+			return err
+		}
+	} else if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
 		return err
 	}
 	store, err := openStoreAtForCity(dir, cityPath)
@@ -499,7 +513,7 @@ func forcedScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.C
 		return contract.ConfigState{}, false, nil
 	}
 	cityDolt := config.DoltConfig{}
-	if cfg, err := loadCityConfig(cityPath); err == nil {
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
 		cityState := desiredCityDoltConfigState(cityPath, cfg.Dolt, config.EffectiveHQPrefix(cfg))
 		if samePath(cityPath, dir) {
@@ -581,7 +595,7 @@ func waitForAllBeadsScopesReadyAfterRecovery(cityPath string, timeout time.Durat
 	// migrated rigs (rig.path only in .gc/site.toml) are still waited
 	// for. A raw config.Load here would silently skip every migrated
 	// rig — the site binding wouldn't populate rig.Path.
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		return nil
 	}
@@ -825,30 +839,52 @@ func removeScopeLocalDoltServerArtifacts(dir string) error {
 	return nil
 }
 
+func validateManagedDoltDatabaseName(path, doltDatabase string) (string, error) {
+	doltDatabase = strings.TrimSpace(doltDatabase)
+	if doltDatabase == "" {
+		return "", fmt.Errorf("missing pinned dolt_database for %s", path)
+	}
+	if isReservedManagedDoltDatabase(doltDatabase) {
+		return "", fmt.Errorf("reserved pinned dolt_database %q for %s: used internally by managed Dolt health probes; choose a different dolt_database in metadata.json and rename or move the bead database before retrying", doltDatabase, path)
+	}
+	return doltDatabase, nil
+}
+
 func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, preserveExisting bool) error {
 	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
+	preserveReservedExisting := false
 	if preserveExisting {
 		if existing, ok, err := contract.ReadDoltDatabase(fs, path); err != nil {
 			return err
 		} else if ok && strings.TrimSpace(existing) != "" {
 			doltDatabase = strings.TrimSpace(existing)
+			if isReservedManagedDoltDatabase(doltDatabase) {
+				// New init paths reject this reserved name, but existing metadata
+				// may predate the reservation. Preserve it during startup
+				// normalization so operators can migrate the scope deliberately.
+				preserveReservedExisting = true
+			}
 		}
 	}
-	if strings.TrimSpace(doltDatabase) == "" {
-		return fmt.Errorf("missing pinned dolt_database for %s", path)
+	var err error
+	if !preserveReservedExisting {
+		if doltDatabase, err = validateManagedDoltDatabaseName(path, doltDatabase); err != nil {
+			return err
+		}
 	}
 	if err := ensureBeadsDir(fs, filepath.Dir(path)); err != nil {
 		return err
 	}
-	_, err := contract.EnsureCanonicalMetadata(fs, path, contract.MetadataState{
+	_, err = contract.EnsureCanonicalMetadata(fs, path, contract.MetadataState{
 		Database:     "dolt",
 		Backend:      "dolt",
 		DoltMode:     "server",
-		DoltDatabase: strings.TrimSpace(doltDatabase),
+		DoltDatabase: doltDatabase,
 	})
 	return err
 }
 
+//nolint:unparam // keep fs seam for future testable FS injection
 func ensureCanonicalScopeMetadataForInit(fs fsys.FS, scopeRoot, doltDatabase string) error {
 	return ensureCanonicalScopeMetadata(fs, scopeRoot, doltDatabase, true)
 }

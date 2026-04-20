@@ -381,12 +381,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	// Auto-fetch remote packs before full config load.
-	if qErr == nil && len(quickCfg.Packs) > 0 {
-		if fErr := config.FetchPacks(quickCfg.Packs, cityPath); fErr != nil {
-			fmt.Fprintf(stderr, "gc start: fetching packs: %v\n", fErr) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc start: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	allIncludes := make([]string, 0, len(extraConfigFiles)+3)
@@ -399,10 +396,14 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 	applyFeatureFlags(cfg)
-	// Strict mode (default) promotes composition warnings to errors.
-	if strictMode && len(prov.Warnings) > 0 {
-		for _, w := range prov.Warnings {
+	fatalWarnings, nonFatalWarnings := splitStrictConfigWarnings(prov.Warnings)
+	// Strict mode (default) promotes strict-eligible config warnings to errors.
+	if strictMode && len(fatalWarnings) > 0 {
+		for _, w := range fatalWarnings {
 			fmt.Fprintf(stderr, "gc start: strict: %s\n", w) //nolint:errcheck // best-effort stderr
+		}
+		for _, w := range nonFatalWarnings {
+			fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 		}
 		fmt.Fprintln(stderr, "gc start: use --no-strict to disable strict checking") //nolint:errcheck // best-effort stderr
 		return 1
@@ -411,10 +412,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
 
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
-	}
+	cityName := loadedCityName(cfg, cityPath)
 
 	// Validate rigs (prefix collisions, missing fields).
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
@@ -476,18 +474,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	}
 
 	// Materialize script symlinks before agent startup.
-	if len(cfg.ScriptLayers.City) > 0 {
-		if err := ResolveScripts(cityPath, cfg.ScriptLayers.City); err != nil {
-			fmt.Fprintf(stderr, "gc start: city scripts: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
-	}
-	for _, r := range cfg.Rigs {
-		if layers, ok := cfg.ScriptLayers.Rigs[r.Name]; ok && len(layers) > 0 {
-			if err := ResolveScripts(r.Path, layers); err != nil {
-				fmt.Fprintf(stderr, "gc start: rig %q scripts: %v\n", r.Name, err) //nolint:errcheck // best-effort stderr
-			}
-		}
-	}
+	resolveConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		fmt.Fprintf(stderr, "gc start: %s scripts: %v\n", scope, err) //nolint:errcheck // best-effort stderr
+	})
 
 	// Validate agents.
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
@@ -732,6 +721,27 @@ func settingsArgsIfReadable(cityPath, providerName string) string {
 	return fmt.Sprintf("--settings %q", settingsPath)
 }
 
+func resolvedProviderLaunchFamily(resolved *config.ResolvedProvider) string {
+	if resolved == nil {
+		return ""
+	}
+	if family := strings.TrimSpace(resolved.BuiltinAncestor); family != "" {
+		return family
+	}
+	return strings.TrimSpace(resolved.Name)
+}
+
+func resolvedProviderFamilyMetadata(resolved *config.ResolvedProvider) string {
+	if resolved == nil {
+		return ""
+	}
+	name := strings.TrimSpace(resolved.Name)
+	if family := strings.TrimSpace(resolved.BuiltinAncestor); family != "" && family != name {
+		return family
+	}
+	return ""
+}
+
 // ensureClaudeSettingsArgs projects managed Claude settings to
 // .gc/settings.json (idempotent: no-op when bytes match) and returns the
 // "--settings <path>" arg for the resolved Claude command. This is the
@@ -959,6 +969,26 @@ func passthroughEnv() map[string]string {
 		if v := os.Getenv(key); v != "" {
 			m[key] = v
 		}
+	}
+	// Locale vars are needed so TUI tools (e.g. Claude Code statusline)
+	// correctly render UTF-8 glyphs inside managed tmux sessions.
+	// The supervisor may run as a launchd service with no locale set,
+	// so fall back to en_US.UTF-8 when the environment is empty.
+	for _, key := range []string{"LANG", "LC_ALL", "LC_CTYPE"} {
+		if v := os.Getenv(key); v != "" {
+			m[key] = v
+		}
+	}
+	if _, ok := m["LC_ALL"]; !ok {
+		m["LC_ALL"] = ""
+	}
+	if _, ok := m["LC_CTYPE"]; !ok {
+		m["LC_CTYPE"] = ""
+	}
+	if m["LANG"] == "" && m["LC_ALL"] == "" && m["LC_CTYPE"] == "" {
+		// This fallback targets launchd-managed macOS sessions; explicit
+		// city or agent env can still override it through later layers.
+		m["LANG"] = "en_US.UTF-8"
 	}
 	// XDG directories are needed for providers to locate config files
 	// (e.g. ~/.config/opencode/opencode.jsonc). When not set, compute

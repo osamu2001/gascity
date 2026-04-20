@@ -229,39 +229,21 @@ func expandLoopIteration(step *Step, iteration int, iterVars map[string]string) 
 		title := substituteLoopVars(bodyStep.Title, iterVars)
 		description := substituteLoopVars(bodyStep.Description, iterVars)
 
-		clone := &Step{
-			ID:             iterID,
-			Title:          title,
-			Description:    description,
-			Type:           bodyStep.Type,
-			Priority:       bodyStep.Priority,
-			Assignee:       bodyStep.Assignee,
-			Condition:      bodyStep.Condition,
-			WaitsFor:       bodyStep.WaitsFor,
-			Expand:         bodyStep.Expand,
-			Gate:           bodyStep.Gate,
-			Loop:           cloneLoopSpec(bodyStep.Loop), // Support nested loops
-			OnComplete:     cloneOnComplete(bodyStep.OnComplete),
-			SourceFormula:  bodyStep.SourceFormula,                                       // Preserve source
-			SourceLocation: fmt.Sprintf("%s.iter%d", bodyStep.SourceLocation, iteration), // Track iteration
-		}
+		clone := cloneStep(bodyStep)
+		clone.ID = iterID
+		clone.Title = title
+		clone.Description = description
+		clone.Timeout = substituteLoopVars(bodyStep.Timeout, iterVars)
+		clone.SourceLocation = fmt.Sprintf("%s.iter%d", bodyStep.SourceLocation, iteration)
 
-		// Clone ExpandVars if present, adding loop vars
-		if len(bodyStep.ExpandVars) > 0 || len(iterVars) > 0 {
-			clone.ExpandVars = make(map[string]string)
-			for k, v := range bodyStep.ExpandVars {
-				clone.ExpandVars[k] = v
+		// Add loop variables to ExpandVars for nested expansion.
+		if len(iterVars) > 0 {
+			if clone.ExpandVars == nil {
+				clone.ExpandVars = make(map[string]string)
 			}
-			// Add loop variables to ExpandVars for nested expansion
 			for k, v := range iterVars {
 				clone.ExpandVars[k] = v
 			}
-		}
-
-		// Clone labels
-		if len(bodyStep.Labels) > 0 {
-			clone.Labels = make([]string, len(bodyStep.Labels))
-			copy(clone.Labels, bodyStep.Labels)
 		}
 
 		// Clone dependencies - only prefix references to steps WITHIN the loop body
@@ -270,8 +252,9 @@ func expandLoopIteration(step *Step, iteration int, iterVars map[string]string) 
 
 		// Recursively handle children with proper dependency rewriting
 		if len(bodyStep.Children) > 0 {
-			clone.Children = expandLoopChildren(bodyStep.Children, step.ID, iteration, bodyStepIDs)
+			clone.Children = expandLoopChildren(bodyStep.Children, step.ID, iteration, bodyStepIDs, iterVars)
 		}
+		substituteLoopVarsInTimeouts(clone, iterVars)
 
 		result = append(result, clone)
 	}
@@ -329,22 +312,62 @@ func rewriteLoopDependencies(deps []string, loopID string, iteration int, bodySt
 
 // expandLoopChildren expands children within a loop iteration.
 // Rewrites IDs and dependencies appropriately.
-func expandLoopChildren(children []*Step, loopID string, iteration int, bodyStepIDs map[string]bool) []*Step {
+func expandLoopChildren(children []*Step, loopID string, iteration int, bodyStepIDs map[string]bool, iterVars map[string]string) []*Step {
 	result := make([]*Step, len(children))
 	for i, child := range children {
 		clone := cloneStepDeep(child)
 		clone.ID = fmt.Sprintf("%s.iter%d.%s", loopID, iteration, child.ID)
+		clone.Timeout = substituteLoopVars(child.Timeout, iterVars)
 		clone.DependsOn = rewriteLoopDependencies(child.DependsOn, loopID, iteration, bodyStepIDs)
 		clone.Needs = rewriteLoopDependencies(child.Needs, loopID, iteration, bodyStepIDs)
 
 		// Recursively handle nested children
 		if len(child.Children) > 0 {
-			clone.Children = expandLoopChildren(child.Children, loopID, iteration, bodyStepIDs)
+			clone.Children = expandLoopChildren(child.Children, loopID, iteration, bodyStepIDs, iterVars)
 		}
+		substituteLoopVarsInTimeouts(clone, iterVars)
 
 		result[i] = clone
 	}
 	return result
+}
+
+func substituteLoopVarsInTimeouts(step *Step, iterVars map[string]string) {
+	if step == nil {
+		return
+	}
+	step.Timeout = substituteLoopVars(step.Timeout, iterVars)
+	if step.Ralph != nil && step.Ralph.Check != nil {
+		step.Ralph.Check.Timeout = substituteLoopVars(step.Ralph.Check.Timeout, iterVars)
+	}
+	for _, child := range step.Children {
+		substituteLoopVarsInTimeouts(child, iterVars)
+	}
+	if step.Loop != nil {
+		nestedVars := loopBodyTimeoutVars(iterVars, step.Loop)
+		for _, bodyStep := range step.Loop.Body {
+			substituteLoopVarsInTimeouts(bodyStep, nestedVars)
+		}
+	}
+}
+
+func loopBodyTimeoutVars(iterVars map[string]string, loop *LoopSpec) map[string]string {
+	if len(iterVars) == 0 || loop == nil || loop.Var == "" {
+		return iterVars
+	}
+	if _, shadows := iterVars[loop.Var]; !shadows {
+		return iterVars
+	}
+	if len(iterVars) == 1 {
+		return nil
+	}
+	nestedVars := make(map[string]string, len(iterVars)-1)
+	for k, v := range iterVars {
+		if k != loop.Var {
+			nestedVars[k] = v
+		}
+	}
+	return nestedVars
 }
 
 // chainExpandedIterations chains iterations AFTER nested loop expansion.
@@ -534,6 +557,9 @@ func ApplyControlFlow(steps []*Step, compose *ComposeRules) ([]*Step, error) {
 	steps, err = ApplyLoops(steps)
 	if err != nil {
 		return nil, fmt.Errorf("applying loops: %w", err)
+	}
+	if err := validateExpandedStepTimeouts(steps, "applying control flow"); err != nil {
+		return nil, err
 	}
 
 	// Build stepMap once for branches and gates

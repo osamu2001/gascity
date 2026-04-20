@@ -42,6 +42,24 @@ func TestSamePathSymlink(t *testing.T) {
 	}
 }
 
+func TestNormalizePathForCompareResolvesSymlinkAncestorForMissingLeaf(t *testing.T) {
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real-parent")
+	if err := os.MkdirAll(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := filepath.Join(root, "link-parent")
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skip("symlinks not supported")
+	}
+
+	got := NormalizePathForCompare(filepath.Join(linkParent, "missing", "gc-home"))
+	want := filepath.Join(realParent, "missing", "gc-home")
+	if got != want {
+		t.Fatalf("NormalizePathForCompare() = %q, want %q", got, want)
+	}
+}
+
 func TestSamePathDifferent(t *testing.T) {
 	a := t.TempDir()
 	b := t.TempDir()
