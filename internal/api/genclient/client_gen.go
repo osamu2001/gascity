@@ -1767,15 +1767,18 @@ type ProviderOptionDTO struct {
 
 // ProviderPatch defines model for ProviderPatch.
 type ProviderPatch struct {
-	Args         *[]string         `json:"Args"`
-	Command      *string           `json:"Command"`
-	Env          map[string]string `json:"Env"`
-	EnvRemove    *[]string         `json:"EnvRemove"`
-	Name         string            `json:"Name"`
-	PromptFlag   *string           `json:"PromptFlag"`
-	PromptMode   *string           `json:"PromptMode"`
-	ReadyDelayMs *int64            `json:"ReadyDelayMs"`
-	Replace      bool              `json:"Replace"`
+	Args               *[]string         `json:"Args"`
+	ArgsAppend         *[]string         `json:"ArgsAppend"`
+	Base               *string           `json:"Base"`
+	Command            *string           `json:"Command"`
+	Env                map[string]string `json:"Env"`
+	EnvRemove          *[]string         `json:"EnvRemove"`
+	Name               string            `json:"Name"`
+	OptionsSchemaMerge *string           `json:"OptionsSchemaMerge"`
+	PromptFlag         *string           `json:"PromptFlag"`
+	PromptMode         *string           `json:"PromptMode"`
+	ReadyDelayMs       *int64            `json:"ReadyDelayMs"`
+	Replace            bool              `json:"Replace"`
 }
 
 // ProviderPatchSetInputBody defines model for ProviderPatchSetInputBody.

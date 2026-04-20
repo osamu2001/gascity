@@ -69,6 +69,12 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 	// Step 4: merge agent-level overrides.
 	resolved := specToResolved(name, spec)
 	resolved.Kind = resolveProviderKind(name, cityProviders)
+	// BuiltinAncestor is the chain-derived family name (e.g. "claude"
+	// for a custom provider with base = "builtin:claude"). Runtime sites
+	// that branch on provider family should consume this field instead
+	// of the raw Name. See engdocs/design/provider-inheritance.md
+	// §Kind / provider-family propagation.
+	resolved.BuiltinAncestor = BuiltinFamily(name, cityProviders)
 	mergeAgentOverrides(resolved, agent)
 
 	// Step 4b: workspace.start_command overrides the resolved command when
@@ -123,10 +129,22 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 					return nil, fmt.Errorf("%w: provider %q command %q", ErrProviderNotInPATH, name, spec.pathCheckBinary())
 				}
 			}
-			// Layer city overrides on top of the built-in if the provider
-			// name or command matches a known builtin. This lets city
-			// configs override command/args while inheriting OptionsSchema,
-			// PromptMode, ResumeFlag, etc. from the builtin defaults.
+			// Phase 2+: if the spec has explicit Base declared (non-empty),
+			// resolve via the chain walker so inherited fields propagate.
+			// Wrapper providers (aimux-wrapped codex) rely on this path to
+			// pick up PermissionModes / OptionsSchema / ReadyDelayMs from
+			// the built-in ancestor. base = "" (explicit empty) is
+			// standalone opt-out — falls through to legacy branches.
+			if spec.Base != nil && strings.TrimSpace(*spec.Base) != "" {
+				resolved, err := ResolveProviderChain(name, spec, cityProviders)
+				if err != nil {
+					return nil, err
+				}
+				merged := resolvedChainToSpec(resolved, spec)
+				return &merged, nil
+			}
+			// Phase A legacy: layer city overrides on top of the built-in
+			// if the provider name or command matches a known builtin.
 			builtins := BuiltinProviders()
 			if base, ok := builtins[name]; ok {
 				merged := MergeProviderOverBuiltin(base, spec)
@@ -158,11 +176,27 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 // when non-nil. Map fields (Env, PermissionModes) merge additively (city keys
 // override base keys).
 //
-// Note: booleans are one-directional (can enable, not disable) due to TOML
-// zero-value ambiguity — city providers cannot override a built-in's true
-// to false for EmitsPermissionWarning, SupportsACP, or SupportsHooks.
+// Capability bools (EmitsPermissionWarning, SupportsACP, SupportsHooks)
+// are tri-state *bool: nil = inherit base, &true = enable, &false =
+// explicit disable. A child that sets `supports_hooks = false` now
+// suppresses the feature even when inherited from a built-in with &true.
 func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	result := base
+
+	// Inheritance control fields: presence-aware for Base.
+	if city.Base != nil {
+		// City explicitly declared base (may be "" for opt-out, or a
+		// named value). Copy the pointer so the presence is preserved
+		// through the merge; we do not deep-copy the underlying string.
+		b := *city.Base
+		result.Base = &b
+	}
+	if city.ArgsAppend != nil {
+		result.ArgsAppend = city.ArgsAppend
+	}
+	if city.OptionsSchemaMerge != "" {
+		result.OptionsSchemaMerge = city.OptionsSchemaMerge
+	}
 
 	// Scalar fields: override if city defines them.
 	if city.DisplayName != "" {
@@ -183,17 +217,19 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.ReadyPromptPrefix != "" {
 		result.ReadyPromptPrefix = city.ReadyPromptPrefix
 	}
-	if city.EmitsPermissionWarning {
-		result.EmitsPermissionWarning = true
+	// Tri-state capability bools: city pointer wins when non-nil,
+	// otherwise base is preserved (including base's own &false).
+	if city.EmitsPermissionWarning != nil {
+		result.EmitsPermissionWarning = city.EmitsPermissionWarning
 	}
 	if city.PathCheck != "" {
 		result.PathCheck = city.PathCheck
 	}
-	if city.SupportsACP {
-		result.SupportsACP = true
+	if city.SupportsACP != nil {
+		result.SupportsACP = city.SupportsACP
 	}
-	if city.SupportsHooks {
-		result.SupportsHooks = true
+	if city.SupportsHooks != nil {
+		result.SupportsHooks = city.SupportsHooks
 	}
 	if city.InstructionsFile != "" {
 		result.InstructionsFile = city.InstructionsFile
@@ -291,6 +327,54 @@ func resolveProviderKind(name string, cityProviders map[string]ProviderSpec) str
 	return name
 }
 
+// BuiltinFamily returns the built-in ancestor for a provider name,
+// resolving the chain if the name refers to a custom provider with
+// `base` set. Returns the name itself when it's a built-in, or "" when
+// the name is fully custom with no built-in ancestor (including when
+// chain resolution fails — callers should treat "" as "family
+// undetermined" rather than silently widening the match).
+//
+// Runtime sites that branch on provider family (soft-escape interrupt,
+// default submit, hook handler, skill-sink vendor) MUST consume this
+// helper (or ResolvedProvider.BuiltinAncestor when available) instead
+// of comparing the raw provider name. This lets a wrapped custom
+// provider (e.g. [providers.my-fast-claude] base = "builtin:claude")
+// be recognised as claude-family.
+func BuiltinFamily(name string, cityProviders map[string]ProviderSpec) string {
+	builtins := BuiltinProviders()
+	// Direct built-in match.
+	if _, ok := builtins[name]; ok {
+		return name
+	}
+	if cityProviders == nil {
+		return ""
+	}
+	spec, ok := cityProviders[name]
+	if !ok {
+		return ""
+	}
+	// Explicit inheritance declaration: walk the chain to find the
+	// nearest built-in hop (may be unreachable on cycles or unknown
+	// bases, in which case we report "" rather than guessing).
+	if spec.Base != nil {
+		resolved, err := ResolveProviderChain(name, spec, cityProviders)
+		if err != nil {
+			return ""
+		}
+		return resolved.BuiltinAncestor
+	}
+	// Phase A legacy auto-inheritance: no `base` declared — a same-name
+	// match is already covered above, so check command-match next. This
+	// keeps legacy [providers.fast] command = "claude" recognised as
+	// claude-family without requiring users to add base = "builtin:claude".
+	if spec.Command != "" {
+		if _, ok := builtins[spec.Command]; ok {
+			return spec.Command
+		}
+	}
+	return ""
+}
+
 // detectProviderName scans PATH for known built-in provider binaries.
 // Returns the first found in priority order (see BuiltinProviderOrder).
 func detectProviderName(lookPath LookPathFunc) (string, error) {
@@ -314,9 +398,9 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		PromptFlag:             spec.PromptFlag,
 		ReadyDelayMs:           spec.ReadyDelayMs,
 		ReadyPromptPrefix:      spec.ReadyPromptPrefix,
-		EmitsPermissionWarning: spec.EmitsPermissionWarning,
-		SupportsACP:            spec.SupportsACP,
-		SupportsHooks:          spec.SupportsHooks,
+		EmitsPermissionWarning: derefBool(spec.EmitsPermissionWarning),
+		SupportsACP:            derefBool(spec.SupportsACP),
+		SupportsHooks:          derefBool(spec.SupportsHooks),
 		InstructionsFile:       spec.InstructionsFile,
 		ResumeFlag:             spec.ResumeFlag,
 		ResumeStyle:            spec.ResumeStyle,
@@ -397,16 +481,25 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 // (either auto-installed or manually). The determination considers:
 //
 //  1. Explicit override: agent.HooksInstalled is set → use that value.
-//  2. Claude always has hooks (via --settings override).
+//  2. Claude-family always has hooks (via --settings override).
 //  3. Provider name appears in the resolved install_agent_hooks list.
 //  4. Otherwise: no hooks.
-func AgentHasHooks(agent *Agent, ws *Workspace, providerName string) bool {
+//
+// cityProviders is consulted via BuiltinFamily so a wrapped custom
+// provider (e.g. [providers.claude-max] base = "builtin:claude") is
+// recognised as claude-family and gets the same default behaviour as
+// literal "claude". Passing nil falls back to raw name comparison and
+// is only correct when the caller is certain no wrapped alias is in
+// play.
+func AgentHasHooks(agent *Agent, ws *Workspace, providerName string, cityProviders map[string]ProviderSpec) bool {
 	// 1. Explicit override wins.
 	if agent.HooksInstalled != nil {
 		return *agent.HooksInstalled
 	}
-	// 2. Claude always has hooks via --settings.
-	if providerName == "claude" {
+	// 2. Claude-family always has hooks via --settings. Use BuiltinFamily
+	//    so wrapped custom providers (e.g. claude-max with
+	//    base = "builtin:claude") are correctly recognized.
+	if BuiltinFamily(providerName, cityProviders) == "claude" {
 		return true
 	}
 	// 3. Check install_agent_hooks (agent-level overrides workspace-level).
@@ -468,4 +561,95 @@ func mergeAgentOverrides(rp *ResolvedProvider, agent *Agent) {
 			rp.EffectiveDefaults[k] = v
 		}
 	}
+}
+
+// resolvedChainToSpec folds a chain-resolved ResolvedProvider back into
+// a ProviderSpec. Used by lookupProvider so downstream callers (agent
+// merge, specToResolved) see the inherited fields from the chain walk.
+// Preserves the original leaf spec's fields that ResolvedProvider
+// doesn't carry (DisplayName, PathCheck).
+func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
+	out := leaf
+	out.Command = r.Command
+	if r.Args != nil {
+		out.Args = append([]string(nil), r.Args...)
+	}
+	if r.PromptMode != "" {
+		out.PromptMode = r.PromptMode
+	}
+	if r.PromptFlag != "" {
+		out.PromptFlag = r.PromptFlag
+	}
+	if r.ReadyDelayMs != 0 {
+		out.ReadyDelayMs = r.ReadyDelayMs
+	}
+	if r.ReadyPromptPrefix != "" {
+		out.ReadyPromptPrefix = r.ReadyPromptPrefix
+	}
+	if r.ProcessNames != nil {
+		out.ProcessNames = append([]string(nil), r.ProcessNames...)
+	}
+	// Tri-state *bool: preserve from leaf if set; else fold from resolved bool.
+	if leaf.EmitsPermissionWarning == nil && r.EmitsPermissionWarning {
+		t := true
+		out.EmitsPermissionWarning = &t
+	}
+	if leaf.SupportsACP == nil && r.SupportsACP {
+		t := true
+		out.SupportsACP = &t
+	}
+	if leaf.SupportsHooks == nil && r.SupportsHooks {
+		t := true
+		out.SupportsHooks = &t
+	}
+	if r.InstructionsFile != "" {
+		out.InstructionsFile = r.InstructionsFile
+	}
+	if r.ResumeFlag != "" {
+		out.ResumeFlag = r.ResumeFlag
+	}
+	if r.ResumeStyle != "" {
+		out.ResumeStyle = r.ResumeStyle
+	}
+	if r.ResumeCommand != "" {
+		out.ResumeCommand = r.ResumeCommand
+	}
+	if r.SessionIDFlag != "" {
+		out.SessionIDFlag = r.SessionIDFlag
+	}
+	if r.TitleModel != "" {
+		out.TitleModel = r.TitleModel
+	}
+	if r.PrintArgs != nil {
+		out.PrintArgs = append([]string(nil), r.PrintArgs...)
+	}
+	if r.Env != nil {
+		out.Env = make(map[string]string, len(r.Env))
+		for k, v := range r.Env {
+			out.Env[k] = v
+		}
+	}
+	if r.PermissionModes != nil {
+		out.PermissionModes = make(map[string]string, len(r.PermissionModes))
+		for k, v := range r.PermissionModes {
+			out.PermissionModes[k] = v
+		}
+	}
+	if r.OptionsSchema != nil {
+		out.OptionsSchema = append([]ProviderOption(nil), r.OptionsSchema...)
+	}
+	// EffectiveDefaults on ResolvedProvider is the merged defaults; fold
+	// into OptionDefaults on the spec so downstream specToResolved picks
+	// it up when rebuilding.
+	if r.EffectiveDefaults != nil {
+		if out.OptionDefaults == nil {
+			out.OptionDefaults = make(map[string]string, len(r.EffectiveDefaults))
+		}
+		for k, v := range r.EffectiveDefaults {
+			if _, ok := out.OptionDefaults[k]; !ok {
+				out.OptionDefaults[k] = v
+			}
+		}
+	}
+	return out
 }

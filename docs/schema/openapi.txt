@@ -4478,6 +4478,21 @@
               "null"
             ]
           },
+          "ArgsAppend": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "Base": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "Command": {
             "type": [
               "string",
@@ -4501,6 +4516,12 @@
           },
           "Name": {
             "type": "string"
+          },
+          "OptionsSchemaMerge": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "PromptFlag": {
             "type": [
@@ -4527,8 +4548,11 @@
         },
         "required": [
           "Name",
+          "Base",
           "Command",
           "Args",
+          "ArgsAppend",
+          "OptionsSchemaMerge",
           "PromptMode",
           "PromptFlag",
           "ReadyDelayMs",

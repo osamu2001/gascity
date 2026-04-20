@@ -207,15 +207,14 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 8: Build agent environment.
 	agentEnv := map[string]string{
-		"GC_SESSION_NAME":     sessName,
-		"GC_SESSION_ID":       sessionBeadID,
-		"GC_TEMPLATE":         templateNameFor(cfgAgent, qualifiedName),
-		"GC_SESSION_ORIGIN":   "ephemeral",
-		"GC_AGENT":            sessName,
-		"GC_ALIAS":            qualifiedName,
-		"BEADS_ACTOR":         sessName,
-		"GC_DIR":              workDir,
-		"GC_BEADS_SCOPE_ROOT": p.cityPath,
+		"GC_SESSION_NAME":   sessName,
+		"GC_SESSION_ID":     sessionBeadID,
+		"GC_TEMPLATE":       templateNameFor(cfgAgent, qualifiedName),
+		"GC_SESSION_ORIGIN": "ephemeral",
+		"GC_AGENT":          sessName,
+		"GC_ALIAS":          qualifiedName,
+		"BEADS_ACTOR":       sessName,
+		"GC_DIR":            workDir,
 		// Explicit empty values matter here. tmux session creation uses `env -u`
 		// only for keys present with empty strings, which prevents stale rig
 		// scope from leaking out of the tmux server's inherited environment.
@@ -231,7 +230,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	for key, value := range citylayout.CityRuntimeEnvMap(p.cityPath) {
 		agentEnv[key] = value
 	}
-	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
+	agentEnv["GC_BEADS"] = rawBeadsProvider(p.cityPath)
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
@@ -242,20 +241,16 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["GC_RIG"] = rigName
 		agentEnv["GC_RIG_ROOT"] = rigRoot
 		agentEnv["BEADS_DIR"] = filepath.Join(rigRoot, ".beads")
-		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
 	}
 
 	// Step 9: Render prompt with beacon.
 	var prompt string
 	// Merge fragment sources: V1 global_fragments + inject_fragments,
-	// imported-pack [agent_defaults].append_fragments, then city-level
-	// [agent_defaults].append_fragments.
-	fragments := effectivePromptFragments(
-		p.globalFragments,
-		cfgAgent.InjectFragments,
-		cfgAgent.InheritedAppendFragments,
-		p.appendFragments,
-	)
+	// plus V2 append_fragments from agent defaults.
+	fragments := mergeFragmentLists(p.globalFragments, cfgAgent.InjectFragments)
+	if len(p.appendFragments) > 0 {
+		fragments = mergeFragmentLists(fragments, p.appendFragments)
+	}
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:      p.cityPath,
 		AgentName:     qualifiedName,
@@ -265,11 +260,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WorkDir:       workDir,
 		IssuePrefix:   findRigPrefix(rigName, p.rigs),
 		DefaultBranch: defaultBranchFor(workDir),
-		WorkQuery:     expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
-		SlingQuery:    expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
+		WorkQuery:     cfgAgent.EffectiveWorkQuery(),
+		SlingQuery:    cfgAgent.EffectiveSlingQuery(),
 		Env:           cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
-	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name)
+	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	if prompt != "" {
 		prompt = beacon + "\n\n" + prompt
@@ -300,7 +295,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		if p.workspace != nil {
 			wsProvider = p.workspace.Provider
 		}
-		provider := effectiveAgentProvider(cfgAgent, wsProvider)
+		provider := effectiveAgentProviderFamily(cfgAgent, wsProvider, p.providers)
 		if _, ok := materialize.VendorSink(provider); ok {
 			scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
 			canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
@@ -318,7 +313,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 						agentCat = c
 					}
 				}
-				if frag := buildAssignedSkillsPromptFragment(cfgAgent, p.sharedSkillCatalogForAgent(cfgAgent), agentCat); frag != "" {
+				if frag := buildAssignedSkillsPromptFragment(cfgAgent, p.skillCatalog, agentCat); frag != "" {
 					prompt = prompt + "\n\n" + frag
 				}
 			}
@@ -369,7 +364,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		if p.workspace != nil {
 			wsProvider = p.workspace.Provider
 		}
-		desired := effectiveSkillsForAgent(p.sharedSkillCatalogForAgent(cfgAgent), cfgAgent, wsProvider, p.stderr)
+		desired := effectiveSkillsForAgent(p.skillCatalog, cfgAgent, wsProvider, p.providers, p.stderr)
 		if len(desired) > 0 {
 			fpExtra = mergeSkillFingerprintEntries(fpExtra, desired)
 			if canonWorkDir != scopeRoot {
@@ -382,81 +377,6 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				materializeAgent := templateNameFor(cfgAgent, qualifiedName)
 				expandedPreStart = appendMaterializeSkillsPreStart(expandedPreStart, materializeAgent, workDir)
 			}
-		}
-	}
-
-	// Step 11c: MCP projection integration. Provider-native MCP config is
-	// session/runtime state rather than passive content, so every deliverable
-	// target contributes a projection hash to the runtime fingerprint. When the
-	// session workdir differs from the scope root, tmux sessions reconcile the
-	// workdir-local target via a hidden PreStart command before launch.
-	scopeRoot := agentScopeRoot(cfgAgent, p.cityPath, p.rigs)
-	canonWorkDir := canonicaliseFilePath(workDir, p.cityPath)
-	mcpCity := p.city
-	mcpCityIsSynthetic := false
-	if mcpCity == nil {
-		// Tests sometimes construct agentBuildParams directly without
-		// setting `city`. Build a minimal synthetic config.City so
-		// non-MCP resolution still works — but mark the result and
-		// hard-error downstream if the synthetic city resolves any
-		// effective MCP. The synthetic city cannot see
-		// ExplicitImportPackDirs/ImplicitImportPackDirs/BootstrapImportPackDirs
-		// or rig import bindings, so silently returning a degraded MCP
-		// catalog would hide production divergence behind "green" tests.
-		mcpCityIsSynthetic = true
-		mcpCity = &config.City{
-			Providers:         p.providers,
-			Rigs:              p.rigs,
-			PackGraphOnlyDirs: append([]string(nil), p.packDirs...),
-		}
-		if p.workspace != nil {
-			mcpCity.Workspace = *p.workspace
-		}
-		cityMCPDir := filepath.Join(p.cityPath, "mcp")
-		if info, err := os.Stat(cityMCPDir); err == nil && info.IsDir() {
-			mcpCity.PackMCPDir = cityMCPDir
-		}
-	}
-	mcpCatalog, mcpProjection, err := resolveAgentMCPProjection(
-		p.cityPath,
-		mcpCity,
-		cfgAgent,
-		qualifiedName,
-		workDir,
-		resolved.Kind,
-	)
-	if err != nil {
-		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
-	}
-	if mcpCityIsSynthetic && len(mcpCatalog.Servers) > 0 {
-		return TemplateParams{}, fmt.Errorf(
-			"agent %q: resolveTemplate invoked without config.City but resolved %d MCP server(s) — "+
-				"tests exercising MCP must construct a real config.City (the synthetic fallback "+
-				"cannot see import/implicit/bootstrap layers and would diverge from production)",
-			qualifiedName, len(mcpCatalog.Servers),
-		)
-	}
-	// MCP delivery only fires when there's an actual catalog to project.
-	// An empty catalog with a supported provider kind still produces a
-	// non-empty projection shell (Provider+Target populated) but has no
-	// servers — skipping it here avoids spurious fingerprint churn and
-	// redundant `gc internal project-mcp` PreStart entries (which is what
-	// TestPhase2StartupMaterialization/WC-START-002 guards against).
-	if mcpProjection.Provider != "" && len(mcpCatalog.Servers) > 0 {
-		stage1Delivers := canStage1Materialize(p.sessionProvider, cfgAgent) && canonWorkDir == scopeRoot
-		stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent) && canonWorkDir != scopeRoot
-		switch {
-		case stage1Delivers || stage2Delivers:
-			fpExtra = mergeMCPFingerprintEntry(fpExtra, mcpProjection)
-			if stage2Delivers {
-				projectAgent := templateNameFor(cfgAgent, qualifiedName)
-				expandedPreStart = appendProjectMCPPreStart(expandedPreStart, projectAgent, qualifiedName, workDir)
-			}
-		default:
-			return TemplateParams{}, fmt.Errorf(
-				"agent %q: effective MCP cannot be delivered to workdir %q with session provider %q",
-				qualifiedName, workDir, p.sessionProvider,
-			)
 		}
 	}
 
