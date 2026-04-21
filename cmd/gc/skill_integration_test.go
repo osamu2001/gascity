@@ -518,7 +518,7 @@ func TestBuildAssignedSkillsPromptFragmentOmitsDescriptionWhenMissing(t *testing
 func TestAppendMaterializeSkillsPreStart(t *testing.T) {
 	t.Parallel()
 	existing := []string{"mkdir -p .cache", "./setup.sh"}
-	got := appendMaterializeSkillsPreStart(existing, "hello-world/polecat", "/worktrees/polecat-1")
+	got := appendMaterializeSkillsPreStart(existing, "hello-world/polecat", "/worktrees/polecat-1", "")
 	if len(got) != 3 {
 		t.Fatalf("want 3 entries, got %d (%v)", len(got), got)
 	}

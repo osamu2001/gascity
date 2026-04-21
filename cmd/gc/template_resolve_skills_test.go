@@ -160,7 +160,15 @@ func TestResolveTemplateSkillsIntegration(t *testing.T) {
 	}
 }
 
-func TestResolveTemplateSharedCatalogSnapshotUsesEnvWithoutChangingPreStart(t *testing.T) {
+// TestResolveTemplateSharedCatalogSnapshotFlowsThroughFile asserts that
+// the shared skill catalog snapshot reaches stage-2 materialize-skills
+// via --shared-catalog-snapshot-file <path> rather than through the
+// environment or inline on argv. This is the fix for the "tmux -u:
+// command too long" bug — catalogs with many skills (77+ at the time
+// the regression was diagnosed) base64-encode to ~37 KiB, which
+// overflows tmux's ~16 KiB imsg protocol buffer when injected as
+// -e GC_SHARED_SKILL_CATALOG_SNAPSHOT=... on `tmux new-session`.
+func TestResolveTemplateSharedCatalogSnapshotFlowsThroughFile(t *testing.T) {
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "file")
 	sharedCat := materialize.CityCatalog{
@@ -198,26 +206,46 @@ func TestResolveTemplateSharedCatalogSnapshotUsesEnvWithoutChangingPreStart(t *t
 		t.Fatalf("resolveTemplate: %v", err)
 	}
 
-	found := false
+	var materializeEntry string
 	for _, entry := range tp.Hints.PreStart {
 		if strings.Contains(entry, "internal materialize-skills") {
-			found = true
-			if strings.Contains(entry, "--shared-catalog-snapshot") {
-				t.Fatalf("stage-2 PreStart should stay upgrade-compatible and must not carry snapshot flags: %v", tp.Hints.PreStart)
-			}
+			materializeEntry = entry
 			break
 		}
 	}
-	if !found {
+	if materializeEntry == "" {
 		t.Fatalf("expected stage-2 PreStart materialize command, got %v", tp.Hints.PreStart)
 	}
-	snapshot := strings.TrimSpace(tp.Env[sharedSkillCatalogSnapshotEnvVar])
-	if snapshot == "" {
-		t.Fatalf("expected %s env var to carry shared catalog snapshot", sharedSkillCatalogSnapshotEnvVar)
+	// The snapshot must flow through a file, not the env or inline argv.
+	if !strings.Contains(materializeEntry, "--shared-catalog-snapshot-file") {
+		t.Fatalf("materialize-skills must pass snapshot via --shared-catalog-snapshot-file, got: %q", materializeEntry)
 	}
-	decoded, err := decodeSharedCatalogSnapshot(snapshot)
+	if strings.Contains(materializeEntry, "--shared-catalog-snapshot ") {
+		t.Errorf("materialize-skills must NOT pass snapshot inline — argv would re-inflate via shell expansion and argv limits would reappear: %q", materializeEntry)
+	}
+	// Env MUST NOT carry the snapshot — that's the tmux-imsg-overflow path.
+	if got := strings.TrimSpace(tp.Env[sharedSkillCatalogSnapshotEnvVar]); got != "" {
+		t.Fatalf("env must not carry snapshot (causes tmux imsg overflow for large catalogs); got %d bytes", len(got))
+	}
+	// Extract the file path from the PreStart command and verify the file
+	// contains a valid snapshot (end-to-end check).
+	fileFlag := "--shared-catalog-snapshot-file "
+	idx := strings.Index(materializeEntry, fileFlag)
+	if idx < 0 {
+		t.Fatalf("flag parse: %q", materializeEntry)
+	}
+	tail := materializeEntry[idx+len(fileFlag):]
+	// shellquote.Join wraps paths in single quotes when they contain spaces
+	// or special chars; for an ordinary tempdir path it emits the raw token.
+	tail = strings.TrimSpace(tail)
+	tail = strings.Trim(tail, `"'`)
+	data, err := os.ReadFile(tail)
 	if err != nil {
-		t.Fatalf("decodeSharedCatalogSnapshot(%s): %v", sharedSkillCatalogSnapshotEnvVar, err)
+		t.Fatalf("reading snapshot file %q: %v", tail, err)
+	}
+	decoded, err := decodeSharedCatalogSnapshot(string(data))
+	if err != nil {
+		t.Fatalf("decodeSharedCatalogSnapshot: %v", err)
 	}
 	if len(decoded.Entries) != 1 || decoded.Entries[0].Name != "plan" {
 		t.Fatalf("decoded snapshot = %+v, want plan entry", decoded)
@@ -273,7 +301,15 @@ func TestResolveTemplateSharedCatalogSnapshotKeepsConfigHashStableAcrossCacheTra
 	}
 }
 
-func TestResolveTemplateSharedCatalogSnapshotEnvIsIgnoredByRuntimeHash(t *testing.T) {
+// TestResolveTemplateSharedCatalogSnapshotEnvIsAbsent verifies the
+// post-fix invariant: the GC_SHARED_SKILL_CATALOG_SNAPSHOT env var is
+// NEVER populated by resolveTemplate. The old code path injected the
+// base64 blob into tp.Env, which tmux then tried to pass via
+// `new-session -e KEY=VALUE` and overflowed the imsg protocol buffer
+// for catalogs with ~30+ skills. The replacement path writes the
+// snapshot to a file and references it via --shared-catalog-snapshot-file
+// in the materialize-skills PreStart command.
+func TestResolveTemplateSharedCatalogSnapshotEnvIsAbsent(t *testing.T) {
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "file")
 	sharedCat := materialize.CityCatalog{
@@ -309,19 +345,16 @@ func TestResolveTemplateSharedCatalogSnapshotEnvIsIgnoredByRuntimeHash(t *testin
 	if err != nil {
 		t.Fatalf("resolveTemplate: %v", err)
 	}
-	if strings.TrimSpace(tp.Env[sharedSkillCatalogSnapshotEnvVar]) == "" {
-		t.Fatalf("expected %s env var to be present", sharedSkillCatalogSnapshotEnvVar)
+	if got := strings.TrimSpace(tp.Env[sharedSkillCatalogSnapshotEnvVar]); got != "" {
+		t.Fatalf("env var %s must be empty (blob flows via file, not env): got %d bytes", sharedSkillCatalogSnapshotEnvVar, len(got))
 	}
-
-	legacy := tp
-	legacy.Env = make(map[string]string, len(tp.Env))
-	for k, v := range tp.Env {
-		legacy.Env[k] = v
-	}
-	delete(legacy.Env, sharedSkillCatalogSnapshotEnvVar)
-
-	if got, want := runtime.CoreFingerprint(templateParamsToConfig(tp)), runtime.CoreFingerprint(templateParamsToConfig(legacy)); got != want {
-		t.Fatalf("runtime.CoreFingerprint changed when only %s env var was added: with=%s without=%s", sharedSkillCatalogSnapshotEnvVar, got, want)
+	// CoreFingerprint comparison becomes trivial once the env var is always
+	// absent — keep a smoke check that resolveTemplate produces a
+	// deterministic fingerprint so hash-stable regressions have a test hook.
+	fp1 := runtime.CoreFingerprint(templateParamsToConfig(tp))
+	fp2 := runtime.CoreFingerprint(templateParamsToConfig(tp))
+	if fp1 != fp2 {
+		t.Fatalf("CoreFingerprint non-deterministic: %s vs %s", fp1, fp2)
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -373,17 +374,52 @@ func writeSkillBullets(b *strings.Builder, entries []materialize.SkillEntry, ori
 
 // appendMaterializeSkillsPreStart appends a PreStart command that
 // invokes `gc internal materialize-skills --agent <name> --workdir
-// <path>` for per-session-worktree materialization. Shared-catalog
-// snapshots travel via GC_SHARED_SKILL_CATALOG_SNAPSHOT in the session
-// environment instead of via argv so stage-2 stays upgrade-compatible
-// with already-running sessions whose started CoreFingerprint hashed the
-// old pre-start command string.
+// <path>` for per-session-worktree materialization.
+//
+// When snapshotFile is non-empty the shared-catalog snapshot is passed
+// via --shared-catalog-snapshot-file <path> (file indirection) so the
+// base64 blob stays out of the tmux env and tmux argv, avoiding the
+// ~16 KiB imsg protocol limit that causes "command too long" errors when
+// new-session is called with -e GC_SHARED_SKILL_CATALOG_SNAPSHOT=<blob>.
+// The catalog is read from the file at materialize-skills execution
+// time, not via shell expansion, so the blob never appears in argv either.
 //
 // The gc binary path comes from $GC_BIN (populated by the runtime env
 // setup) with "gc" as a fallback if the env var isn't available at
 // PreStart expansion time. Argument values are shell-quoted.
-func appendMaterializeSkillsPreStart(prestart []string, qualifiedName, workDir string) []string {
+func appendMaterializeSkillsPreStart(prestart []string, qualifiedName, workDir, snapshotFile string) []string {
 	cmd := `"${GC_BIN:-gc}" internal materialize-skills --agent ` +
 		shellquote.Join([]string{qualifiedName}) + ` --workdir ` + shellquote.Join([]string{workDir})
+	if snapshotFile != "" {
+		cmd += ` --shared-catalog-snapshot-file ` + shellquote.Join([]string{snapshotFile})
+	}
 	return append(prestart, cmd)
+}
+
+// writeSkillSnapshotFile persists a base64-encoded shared skill catalog
+// snapshot to a file under <workDir>/.gc/tmp so the PreStart materialize
+// command can read it back without forcing the catalog through tmux's
+// new-session protocol buffer or argv. Returns the absolute path on
+// success, "" on any failure (caller falls back to letting
+// materialize-skills load the live catalog from disk).
+//
+// The filename is keyed by agent so repeat spawns of the same agent
+// reuse one file rather than littering .gc/tmp with one snapshot per
+// reconciler tick. The blob itself is overwritten each call because the
+// catalog can drift between ticks.
+func writeSkillSnapshotFile(workDir, qualifiedName, snapshot string) string {
+	if workDir == "" || snapshot == "" {
+		return ""
+	}
+	dir := filepath.Join(workDir, ".gc", "tmp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	safeName := strings.ReplaceAll(qualifiedName, string(filepath.Separator), "_")
+	safeName = strings.ReplaceAll(safeName, "/", "_")
+	path := filepath.Join(dir, "skill-catalog-"+safeName+".b64")
+	if err := os.WriteFile(path, []byte(snapshot), 0o600); err != nil {
+		return ""
+	}
+	return path
 }
