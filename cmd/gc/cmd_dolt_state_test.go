@@ -60,6 +60,25 @@ func requireDeletedPathHeld(t *testing.T, pid int, targetPath string) {
 	}
 }
 
+func symlinkedCityPaths(t *testing.T) (aliasCity, realCity string) {
+	t.Helper()
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real")
+	if err := os.MkdirAll(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasParent := filepath.Join(root, "alias")
+	if err := os.Symlink(realParent, aliasParent); err != nil {
+		t.Skip("symlinks not supported")
+	}
+	aliasCity = filepath.Join(aliasParent, "bright-lights")
+	realCity = filepath.Join(realParent, "bright-lights")
+	if err := os.MkdirAll(realCity, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return aliasCity, realCity
+}
+
 func TestDoltStateRuntimeLayoutCmdUsesCanonicalPaths(t *testing.T) {
 	cityPath := t.TempDir()
 	wantCityPath := normalizePathForCompare(cityPath)
@@ -87,20 +106,7 @@ func TestDoltStateRuntimeLayoutCmdUsesCanonicalPaths(t *testing.T) {
 }
 
 func TestResolveManagedDoltRuntimeLayoutCanonicalizesSymlinkedCityPath(t *testing.T) {
-	root := t.TempDir()
-	realParent := filepath.Join(root, "real")
-	if err := os.MkdirAll(realParent, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	aliasParent := filepath.Join(root, "alias")
-	if err := os.Symlink(realParent, aliasParent); err != nil {
-		t.Skip("symlinks not supported")
-	}
-	aliasCity := filepath.Join(aliasParent, "bright-lights")
-	realCity := filepath.Join(realParent, "bright-lights")
-	if err := os.MkdirAll(realCity, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	aliasCity, realCity := symlinkedCityPaths(t)
 	wantCityPath := normalizePathForCompare(realCity)
 
 	layout, err := resolveManagedDoltRuntimeLayout(aliasCity)
@@ -120,6 +126,109 @@ func TestResolveManagedDoltRuntimeLayoutCanonicalizesSymlinkedCityPath(t *testin
 	}
 	if layout != want {
 		t.Fatalf("resolveManagedDoltRuntimeLayout() = %+v, want %+v", layout, want)
+	}
+}
+
+func TestValidDoltRuntimeStateAcceptsSymlinkEquivalentDataDir(t *testing.T) {
+	aliasCity, realCity := symlinkedCityPaths(t)
+	layout, err := resolveManagedDoltRuntimeLayout(realCity)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
+
+	cases := []struct {
+		name     string
+		cityPath string
+		dataDir  string
+	}{
+		{
+			name:     "real state data dir against aliased city path",
+			cityPath: aliasCity,
+			dataDir:  layout.DataDir,
+		},
+		{
+			name:     "aliased state data dir against real city path",
+			cityPath: realCity,
+			dataDir:  filepath.Join(aliasCity, ".beads", "dolt"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := doltRuntimeState{
+				Running:   true,
+				PID:       listener.Process.Pid,
+				Port:      port,
+				DataDir:   tc.dataDir,
+				StartedAt: time.Now().UTC().Format(time.RFC3339),
+			}
+			if !validDoltRuntimeState(state, tc.cityPath) {
+				t.Fatalf("validDoltRuntimeState(%q, %q) = false, want true", tc.dataDir, tc.cityPath)
+			}
+		})
+	}
+}
+
+func TestRepairedManagedDoltRuntimeStateAcceptsSymlinkEquivalentDataDir(t *testing.T) {
+	aliasCity, realCity := symlinkedCityPaths(t)
+	layout, err := resolveManagedDoltRuntimeLayout(realCity)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	defer func() {
+		_ = listener.Process.Kill()
+		_ = listener.Wait()
+	}()
+
+	cases := []struct {
+		name    string
+		dataDir string
+	}{
+		{
+			name:    "real data dir",
+			dataDir: layout.DataDir,
+		},
+		{
+			name:    "aliased data dir",
+			dataDir: filepath.Join(aliasCity, ".beads", "dolt"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repaired, ok := repairedManagedDoltRuntimeState(aliasCity, layout, doltRuntimeState{
+				Port:    port,
+				DataDir: tc.dataDir,
+			})
+			if !ok {
+				t.Fatalf("repairedManagedDoltRuntimeState(%q) = not ok, want ok", tc.dataDir)
+			}
+			if !repaired.Running {
+				t.Fatal("repaired state Running = false, want true")
+			}
+			if repaired.PID != listener.Process.Pid {
+				t.Fatalf("repaired state PID = %d, want %d", repaired.PID, listener.Process.Pid)
+			}
+			if repaired.Port != port {
+				t.Fatalf("repaired state Port = %d, want %d", repaired.Port, port)
+			}
+			if repaired.DataDir != layout.DataDir {
+				t.Fatalf("repaired state DataDir = %q, want %q", repaired.DataDir, layout.DataDir)
+			}
+			if strings.TrimSpace(repaired.StartedAt) == "" {
+				t.Fatal("repaired state StartedAt is empty")
+			}
+		})
 	}
 }
 
@@ -166,6 +275,26 @@ func TestDoltStateAllocatePortCmdHonorsEnvOverride(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "4406" {
 		t.Fatalf("allocate-port = %q, want 4406", got)
+	}
+}
+
+func TestChooseManagedDoltPortUsesCanonicalSeedForSymlinkedCityPath(t *testing.T) {
+	aliasCity, realCity := symlinkedCityPaths(t)
+
+	if got, want := deterministicManagedDoltPortSeed(aliasCity), deterministicManagedDoltPortSeed(realCity); got != want {
+		t.Fatalf("deterministicManagedDoltPortSeed(alias) = %d, want %d", got, want)
+	}
+
+	aliasPort, err := chooseManagedDoltPort(aliasCity, "")
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort(alias): %v", err)
+	}
+	realPort, err := chooseManagedDoltPort(realCity, "")
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort(real): %v", err)
+	}
+	if aliasPort != realPort {
+		t.Fatalf("chooseManagedDoltPort(alias) = %q, want %q", aliasPort, realPort)
 	}
 }
 
