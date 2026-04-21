@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -1383,7 +1384,7 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 
 	agent := config.Agent{Name: "control-dispatcher"}
 	err := runWorkflowServeFollow(agent, agent.EffectiveWorkQuery(), t.TempDir(), nil, io.Discard)
-	if err != stopErr {
+	if !errors.Is(err, stopErr) {
 		t.Fatalf("runWorkflowServeFollow error = %v, want %v", err, stopErr)
 	}
 

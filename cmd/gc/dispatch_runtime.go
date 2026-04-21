@@ -317,11 +317,10 @@ func runWorkflowServeFollow(agentCfg config.Agent, workQuery string, workDir str
 		if err != nil {
 			return err
 		}
-		if eventWake {
+		switch {
+		case eventWake, drainResult.pendingAny:
 			idleSweeps = 0
-		} else if drainResult.pendingAny {
-			idleSweeps = 0
-		} else if !drainResult.processedAny {
+		case !drainResult.processedAny:
 			idleSweeps++
 		}
 	}
