@@ -106,8 +106,10 @@ hints or ignore them:
   filesystem **before** the session is created. Used for directory
   preparation, worktree creation, or other setup that must exist before
   the agent starts. Scripts should execute each command in the target
-  environment before creating the session. Fatal: abort startup if a
-  command fails so the agent never launches into an unprepared workDir.
+  environment before creating the session. If a command fails, the
+  recommended behavior is to abort startup and report the error so the
+  agent does not launch into an unprepared workDir, though exact handling
+  may vary by script/backend.
 
 - **`session_setup`** — array of shell commands to run on the target
   filesystem after the session is created and ready, before returning.
