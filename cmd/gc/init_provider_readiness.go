@@ -521,7 +521,7 @@ const (
 // sees the actual error.
 func checkHardDependencies(cityPath string) []missingDep {
 	beadsProvider := rawBeadsProvider(cityPath)
-	if cfg, err := loadCityConfig(cityPath); err == nil {
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
 		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 			beadsProvider = "bd"
@@ -568,26 +568,6 @@ func checkHardDependencies(cityPath string) []missingDep {
 		}
 	}
 	return missing
-}
-
-func initNeedsBdTooling(cityPath string) bool {
-	if providerUsesBdStoreContract(rawBeadsProvider(cityPath)) {
-		return true
-	}
-
-	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		return false
-	}
-	cfg, err := config.Parse(data)
-	if err != nil {
-		return false
-	}
-	if _, err := config.ApplySiteBindings(fsys.OSFS{}, cityPath, cfg); err != nil {
-		return false
-	}
-	resolveRigPaths(cityPath, cfg.Rigs)
-	return workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
 }
 
 // parseDepVersion runs "<binary> version" and extracts a semver-like version string.

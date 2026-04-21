@@ -42,7 +42,7 @@ type binaryDependency struct {
 // loaded, it falls back to the default provider contract.
 func effectiveSessionProviderForCity(cityPath string) string {
 	configured := ""
-	if cfg, err := loadCityConfig(cityPath); err == nil {
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
 		configured = cfg.Session.Provider
 	}
 	return effectiveProviderName(configured)
