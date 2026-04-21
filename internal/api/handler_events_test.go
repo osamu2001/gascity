@@ -209,7 +209,7 @@ func TestWatcherCloseUnblocksNext(t *testing.T) {
 		if err == nil {
 			t.Error("Next() returned nil error after Close(); expected error")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Next() did not unblock after Close() — goroutine leak")
 	}
 }

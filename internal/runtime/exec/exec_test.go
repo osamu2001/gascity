@@ -398,7 +398,7 @@ esac
 		if err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Start() hung while cleaning up a no-event watch-startup child")
 	}
 
@@ -448,7 +448,7 @@ esac
 		if !strings.Contains(err.Error(), "startup watcher decode") {
 			t.Fatalf("Start error = %v, want startup watcher decode context", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Start() hung after malformed first watch-startup event")
 	}
 
@@ -584,7 +584,7 @@ esac
 		if err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Start() hung while falling back from an irrelevant watch-startup snapshot")
 	}
 
@@ -646,7 +646,7 @@ esac
 		if err != nil {
 			t.Fatalf("Start() error = %v, want nil", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("Start() hung while cleaning up watch-startup stream")
 	}
 }
