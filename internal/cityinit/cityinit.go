@@ -12,7 +12,7 @@
 //
 // A follow-up refactor will physically move the scaffold/finalize
 // body into this package so the domain logic lives in internal/
-// (per specs/architecture.md §1). Until then, injecting the
+// (per engdocs/architecture/api-control-plane.md §1). Until then, injecting the
 // implementation from cmd/gc at startup preserves the architectural
 // intent that "the CLI and the HTTP API are projections over the
 // shared object model" — both surfaces drive the same code path via

@@ -1,11 +1,16 @@
-# Gas City Architecture
+---
+title: "API Control Plane"
+description: "Current-state architecture for Gas City's CLI, HTTP, SSE, generated client, and typed-wire contract."
+---
 
-This spec captures the architectural invariants Gas City has
-converged on. It is a normative document: future contributions that
-violate these invariants are wrong unless a conscious decision in
-this spec changes. Plans in `plans/archive/` describe the journeys
-that produced these invariants; this spec describes the
-destination.
+> Last verified against code: 2026-04-22
+
+This architecture doc captures the API control-plane invariants Gas
+City has converged on. It is normative current-state documentation:
+future contributions that violate these invariants are wrong unless a
+conscious decision updates this document. Plans in `plans/archive/`
+describe the journeys that produced these invariants; this document
+describes the destination.
 
 Two architectural themes run through everything below:
 
@@ -14,7 +19,7 @@ Two architectural themes run through everything below:
    surfaces.
 2. **Typed data end-to-end.** Go structs with annotations drive a
    generated OpenAPI 3.1 contract; every wire-visible shape appears
-   in the spec; consumers in any language code against the same
+   in the OpenAPI spec; consumers in any language code against the same
    contract. Zero opacity on the wire.
 
 ## 1. The object model
@@ -170,7 +175,7 @@ not a second description — it is the same mechanism applied
 at one layer up, and the OpenAPI spec that results still describes
 every operation's full contract. See §3.5.2. Patterns and Huma
 quirks that inform these helpers are documented in
-[`specs/huma-usage.md`](./huma-usage.md).
+[Huma Usage Notes](../contributors/huma-usage.md).
 
 ### 3.2 Spec is generated, never hand-written
 
@@ -634,7 +639,7 @@ type guard in the SPA.
 
 ## 8. Maintenance rule
 
-Every file-path citation in this spec is load-bearing. If you
+Every file-path citation in this document is load-bearing. If you
 rename or remove a cited symbol (`events.KnownEventTypes`,
 `EventPayloadUnion`, `TestEveryKnownEventTypeHasRegisteredPayload`,
 `cmd/gc/apiroute.go:apiClient()`, `addMutationCSRFParam`,
@@ -642,13 +647,13 @@ rename or remove a cited symbol (`events.KnownEventTypes`,
 `OptionalParam`, `cityinit.Initializer`, `cityinit.InitRequest`,
 `cityinit.InitResult`, `cityinit.UnregisterRequest`,
 `cityinit.UnregisterResult`, `cityinit.ErrNotRegistered`,
-`TransientCityEventSource`, etc.), **update this spec in the same
-commit**. A stale spec is worse than no spec — it misleads future
-agents about what invariants hold.
+`TransientCityEventSource`, etc.), **update this document in the same
+commit**. Stale architecture docs are worse than no docs — they
+mislead future agents about what invariants hold.
 
 Framework-specific patterns and Huma quirks are captured in
-[`specs/huma-usage.md`](./huma-usage.md); update that file in the
-same commit when you touch any of: `OptionalParam`,
+[Huma Usage Notes](../contributors/huma-usage.md); update that file
+in the same commit when you touch any of: `OptionalParam`,
 `addMutationCSRFParam`, `registerFrameworkHeaders`,
 `sseResponseHeaders`, the SSE hand-writing zone, or the
 `cityPost`/`cityRegister` helper family.

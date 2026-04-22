@@ -22,9 +22,9 @@ package api
 //
 // The spec emits the underlying T's schema (not the wrapper's), so the
 // wire contract is identical to a plain query:"..." field: the only
-// difference is server-side presence detection. No architecture.md
-// §3.5.1 violation — the handler does not read undeclared URL keys,
-// only its own declared field.
+// difference is server-side presence detection. This stays within
+// engdocs/architecture/api-control-plane.md §3.5.1: the handler does
+// not read undeclared URL keys, only its own declared field.
 
 import (
 	"reflect"

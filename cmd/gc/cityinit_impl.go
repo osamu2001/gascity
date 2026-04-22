@@ -8,7 +8,7 @@ package main
 //
 // The long-term plan is to move doInit/finalizeInit and their
 // helpers into internal/cityinit so the domain logic physically
-// lives in the object model (per specs/architecture.md §1). This
+// lives in the object model (per engdocs/architecture/api-control-plane.md §1). This
 // bridge is the minimum viable unblocker: the HTTP API no longer
 // shells out, both surfaces drive the same in-process code path via
 // the same typed contract, and the refactor of where the body lives

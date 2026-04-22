@@ -1,4 +1,7 @@
-# Huma usage notes
+---
+title: "Huma Usage Notes"
+description: "Contributor notes for Huma v2 patterns, quirks, and generated OpenAPI behavior in Gas City's HTTP and SSE API."
+---
 
 Gas City's HTTP + SSE control plane is built on Huma v2
 (`github.com/danielgtaylor/huma/v2`). This document captures the
@@ -8,7 +11,7 @@ it from the framework source or stumbling into the same traps.
 
 Every pattern below is load-bearing in the current implementation;
 removing one breaks a specific invariant described in
-`specs/architecture.md`.
+[API Control Plane](../architecture/api-control-plane.md).
 
 ## 1. Presence detection for query parameters
 
@@ -64,7 +67,8 @@ APIs must design around two-state (`IsSet && value != ""`).
 
 This constraint is intrinsic to the framework, not a Gas City
 choice. Do not work around it by reading raw URL values in a
-Resolver (that's a `specs/architecture.md` §3.5.1 violation).
+Resolver (that's an [API Control Plane](../architecture/api-control-plane.md)
+§3.5.1 violation).
 
 ## 2. Pointer query params panic; Resolvers cannot rescue them
 
@@ -274,7 +278,8 @@ The same trick applies to `Summary`.
 protocol framing. It hand-writes `id:` / `event:` / `data:` /
 blank-line separators around a call to `encoder.Encode(payload)`
 where payload is a typed, schema-registered struct. This is the
-§3.4 carve-out described in the architecture spec.
+§3.4 carve-out described in the
+[API Control Plane](../architecture/api-control-plane.md).
 
 Three related hand-written helpers:
 
