@@ -57,7 +57,7 @@ func RenderMarkdown(w io.Writer, s *jsonschema.Schema) error {
 		return names[i] < names[j]
 	})
 
-	for _, name := range names {
+	for i, name := range names {
 		def := s.Definitions[name]
 		if def == nil || def.Properties == nil {
 			continue
@@ -104,6 +104,9 @@ func RenderMarkdown(w io.Writer, s *jsonschema.Schema) error {
 			}
 		}
 
+		if i == len(names)-1 {
+			continue
+		}
 		if _, err := fmt.Fprintln(w); err != nil {
 			return err
 		}

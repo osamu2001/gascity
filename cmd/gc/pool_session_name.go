@@ -16,7 +16,7 @@ type releasedPoolAssignment struct {
 	Index int
 }
 
-// PoolSessionName derives the tmux session name for a pool worker session.
+// PoolSessionName derives the runtime session name for a pool worker session.
 // Format: {basename(template)}-{beadID} (e.g., "claude-mc-xyz").
 // Named sessions with an alias use the alias instead.
 func PoolSessionName(template, beadID string) string {

@@ -765,10 +765,11 @@ gc dashboard serve [flags]
 
 Run diagnostic health checks on the city workspace.
 
-Checks city structure, config validity, binary dependencies (tmux, git,
-bd, dolt), controller status, agent sessions, zombie/orphan sessions,
-bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix to attempt automatic repairs.
+Checks city structure, config validity, session-backend dependencies
+(including tmux when required), git, bd, dolt, controller status,
+agent sessions, zombie/orphan sessions, bead stores, Dolt server
+health, event log integrity, and per-rig health. Use --fix to
+attempt automatic repairs.
 
 ```
 gc doctor [flags]
@@ -1966,8 +1967,8 @@ gc session
 
 Attach to a running session or resume a suspended one.
 
-If the session is active with a live tmux session, reattaches.
-If the session is suspended or the tmux session died, resumes
+If the session is active with a live runtime session, reattaches.
+If the session is suspended or the runtime session disappeared, resumes
 using the provider's resume mechanism (if supported) or restarts.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).

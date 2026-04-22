@@ -13,7 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -37,10 +39,21 @@ type initProviderTarget struct {
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
 	MaterializeBuiltinPacks(cityPath) //nolint:errcheck // best-effort; needed before dependency and provider checks
+	// Collision detection: if the city already declares [imports.<name>]
+	// matching a bootstrap pack, refuse to write the implicit-import entry
+	// that would otherwise be silently shadowed. See
+	// engdocs/proposals/skill-materialization.md — "Name-collision with a
+	// user-declared [imports.core]".
+	cityImports := readCityImportsForBootstrap(cityPath)
+	if err := bootstrap.EnsureBootstrapForCity("", cityImports); err != nil {
+		fmt.Fprintf(stderr, "%s: bootstrapping implicit imports: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	// Check hard binary dependencies before handing off to the supervisor.
-	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
-	// to fail-loop silently — the user never sees the error.
+	// Without this, missing backend deps (for example tmux for tmux/hybrid
+	// cities, plus git/dolt/bd where relevant) cause the supervisor to
+	// fail-loop silently and the user never sees the actual error.
 	if missing := checkHardDependencies(cityPath); len(missing) > 0 {
 		fmt.Fprintf(stderr, "%s: missing required dependencies:\n\n", opts.commandName) //nolint:errcheck // best-effort stderr
 		for _, dep := range missing {
@@ -92,6 +105,36 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		logInitProgress(stdout, 7, "Registering city with supervisor")
 	}
 	return registerCityWithSupervisor(cityPath, stdout, stderr, opts.commandName, opts.showProgress)
+}
+
+// readCityImportsForBootstrap reads the [imports] table from city.toml and
+// from any sibling pack.toml so the bootstrap writer can detect collisions
+// against user-declared imports. Best-effort: parse errors and missing
+// files return an empty map (the composer will surface a clearer error
+// later if the city is malformed). Only the import binding name is used
+// by the collision check — the rest of the Import struct is irrelevant.
+func readCityImportsForBootstrap(cityPath string) map[string]config.Import {
+	merged := make(map[string]config.Import)
+
+	for _, rel := range []string{"city.toml", "pack.toml"} {
+		data, err := os.ReadFile(filepath.Join(cityPath, rel))
+		if err != nil {
+			continue
+		}
+		var doc struct {
+			Imports map[string]config.Import `toml:"imports"`
+		}
+		if _, err := toml.Decode(string(data), &doc); err != nil {
+			continue
+		}
+		for name, imp := range doc.Imports {
+			if _, already := merged[name]; already {
+				continue
+			}
+			merged[name] = imp
+		}
+	}
+	return merged
 }
 
 func maybePrintWizardProviderGuidance(wiz wizardConfig, stdout io.Writer) {
@@ -477,63 +520,38 @@ const (
 // binaries cause the supervisor to fail-loop silently and the user never
 // sees the actual error.
 func checkHardDependencies(cityPath string) []missingDep {
-	type dep struct {
-		name        string
-		installHint string
-		minVersion  string      // empty = no version check
-		condition   func() bool // if non-nil, only checked when true
+	beadsProvider := rawBeadsProvider(cityPath)
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
+		resolveRigPaths(cityPath, cfg.Rigs)
+		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
+			beadsProvider = "bd"
+		}
 	}
-
-	needsBd := initNeedsBdTooling(cityPath)
-
-	deps := []dep{
-		{
-			name:        "tmux",
-			installHint: "https://github.com/tmux/tmux/wiki/Installing",
-		},
-		{
-			name:        "jq",
-			installHint: "brew install jq (macOS) or apt install jq (Linux)",
-		},
-		{
-			name:        "git",
-			installHint: "https://git-scm.com/downloads",
-		},
-		{
-			name:        "dolt",
-			installHint: "https://github.com/dolthub/dolt/releases",
-			minVersion:  doltMinVersion,
-			condition:   func() bool { return needsBd },
-		},
-		{
-			name:        "bd",
-			installHint: "https://github.com/gastownhall/beads/releases",
-			minVersion:  bdMinVersion,
-			condition:   func() bool { return needsBd },
-		},
-		{
-			name:        "flock",
-			installHint: "brew install flock (macOS) or apt install util-linux (Linux)",
-			condition:   func() bool { return needsBd },
-		},
-		{
-			name:        "pgrep",
-			installHint: "brew install proctools (macOS) or apt install procps (Linux)",
-		},
-		{
-			name:        "lsof",
-			installHint: "brew install lsof (macOS) or apt install lsof (Linux)",
-		},
-	}
+	sessionProvider := effectiveSessionProviderForCity(cityPath)
+	deps := coreBinaryDependencies(sessionProvider, beadsProvider, coreBinaryDependencyOptions{
+		includePackManaged: true,
+	})
 
 	var missing []missingDep
 	for _, d := range deps {
-		if d.condition != nil && !d.condition() {
-			continue
-		}
-		if _, err := initLookPath(d.name); err != nil {
+		if d.lookupName == "" {
 			missing = append(missing, missingDep{
 				name:        d.name,
+				installHint: d.installHint,
+			})
+			continue
+		}
+		resolvedPath, err := initLookPath(d.lookupName)
+		if err != nil {
+			missing = append(missing, missingDep{
+				name:        d.name,
+				installHint: d.installHint,
+			})
+			continue
+		}
+		if err := validateBinaryDependency(d, resolvedPath); err != nil {
+			missing = append(missing, missingDep{
+				name:        fmt.Sprintf("%s (%v)", d.name, err),
 				installHint: d.installHint,
 			})
 			continue
@@ -550,26 +568,6 @@ func checkHardDependencies(cityPath string) []missingDep {
 		}
 	}
 	return missing
-}
-
-func initNeedsBdTooling(cityPath string) bool {
-	if providerUsesBdStoreContract(rawBeadsProvider(cityPath)) {
-		return true
-	}
-
-	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		return false
-	}
-	cfg, err := config.Parse(data)
-	if err != nil {
-		return false
-	}
-	if _, err := config.ApplySiteBindings(fsys.OSFS{}, cityPath, cfg); err != nil {
-		return false
-	}
-	resolveRigPaths(cityPath, cfg.Rigs)
-	return workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
 }
 
 // parseDepVersion runs "<binary> version" and extracts a semver-like version string.
