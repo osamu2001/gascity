@@ -10,13 +10,17 @@ import (
 
 // Fake is an in-memory [FS] for testing. It records all calls (spy) and
 // simulates filesystem state (fake). Pre-populate Dirs, Files, Symlinks,
-// and Errors before calling methods.
+// and Errors before calling methods. ModTimes is optional unless a test needs
+// exact timestamp control; Stat synthesizes and stores a mod time on demand.
 type Fake struct {
-	Dirs     map[string]bool   // pre-populated directories
-	Files    map[string][]byte // pre-populated files
-	Symlinks map[string]string // pre-populated symlinks (path -> target)
-	Errors   map[string]error  // path → injected error (checked first)
-	Calls    []Call            // spy log
+	Dirs     map[string]bool      // pre-populated directories
+	Files    map[string][]byte    // pre-populated files
+	Symlinks map[string]string    // pre-populated symlinks (path -> target)
+	Errors   map[string]error     // path → injected error (checked first)
+	ModTimes map[string]time.Time // file path → synthetic mod time
+	Calls    []Call               // spy log
+
+	clock time.Time
 }
 
 // Call records a single method invocation on [Fake].
@@ -32,7 +36,20 @@ func NewFake() *Fake {
 		Files:    make(map[string][]byte),
 		Symlinks: make(map[string]string),
 		Errors:   make(map[string]error),
+		ModTimes: make(map[string]time.Time),
+		clock:    time.Unix(0, 0).UTC(),
 	}
+}
+
+func (f *Fake) nextModTime() time.Time {
+	if f.ModTimes == nil {
+		f.ModTimes = make(map[string]time.Time)
+	}
+	if f.clock.IsZero() {
+		f.clock = time.Unix(0, 0).UTC()
+	}
+	f.clock = f.clock.Add(time.Second)
+	return f.clock
 }
 
 // MkdirAll records the call and adds the directory (and parents) to Dirs.
@@ -54,9 +71,14 @@ func (f *Fake) WriteFile(name string, data []byte, _ os.FileMode) error {
 	if err, ok := f.Errors[name]; ok {
 		return err
 	}
+	if f.Files == nil {
+		f.Files = make(map[string][]byte)
+	}
+	modTime := f.nextModTime()
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	f.Files[name] = cp
+	f.ModTimes[name] = modTime
 	return nil
 }
 
@@ -86,7 +108,12 @@ func (f *Fake) Stat(name string) (os.FileInfo, error) {
 			return fakeFileInfo{name: filepath.Base(name), dir: true}, nil
 		}
 		if data, ok := f.Files[target]; ok {
-			return fakeFileInfo{name: filepath.Base(name), size: int64(len(data))}, nil
+			modTime := f.ModTimes[target]
+			if modTime.IsZero() {
+				modTime = f.nextModTime()
+				f.ModTimes[target] = modTime
+			}
+			return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), modTime: modTime}, nil
 		}
 		return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
 	}
@@ -94,7 +121,12 @@ func (f *Fake) Stat(name string) (os.FileInfo, error) {
 		return fakeFileInfo{name: filepath.Base(name), dir: true}, nil
 	}
 	if data, ok := f.Files[name]; ok {
-		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data))}, nil
+		modTime := f.ModTimes[name]
+		if modTime.IsZero() {
+			modTime = f.nextModTime()
+			f.ModTimes[name] = modTime
+		}
+		return fakeFileInfo{name: filepath.Base(name), size: int64(len(data)), modTime: modTime}, nil
 	}
 	return nil, &os.PathError{Op: "stat", Path: name, Err: os.ErrNotExist}
 }
@@ -162,9 +194,23 @@ func (f *Fake) Rename(oldpath, newpath string) error {
 	if err, ok := f.Errors[oldpath]; ok {
 		return err
 	}
+	if target, ok := f.Symlinks[oldpath]; ok {
+		if f.Symlinks == nil {
+			f.Symlinks = make(map[string]string)
+		}
+		f.Symlinks[newpath] = target
+		delete(f.Symlinks, oldpath)
+		return nil
+	}
 	if data, ok := f.Files[oldpath]; ok {
 		f.Files[newpath] = data
 		delete(f.Files, oldpath)
+		if modTime, ok := f.ModTimes[oldpath]; ok {
+			f.ModTimes[newpath] = modTime
+			delete(f.ModTimes, oldpath)
+		} else {
+			f.ModTimes[newpath] = f.nextModTime()
+		}
 		return nil
 	}
 	return &os.PathError{Op: "rename", Path: oldpath, Err: os.ErrNotExist}
@@ -176,8 +222,13 @@ func (f *Fake) Remove(name string) error {
 	if err, ok := f.Errors[name]; ok {
 		return err
 	}
+	if _, ok := f.Symlinks[name]; ok {
+		delete(f.Symlinks, name)
+		return nil
+	}
 	if _, ok := f.Files[name]; ok {
 		delete(f.Files, name)
+		delete(f.ModTimes, name)
 		return nil
 	}
 	if f.Dirs[name] {
@@ -194,6 +245,9 @@ func (f *Fake) Chmod(name string, _ os.FileMode) error {
 	if err, ok := f.Errors[name]; ok {
 		return err
 	}
+	if _, ok := f.Symlinks[name]; ok {
+		return nil
+	}
 	if _, ok := f.Files[name]; ok {
 		return nil
 	}
@@ -209,6 +263,7 @@ type fakeFileInfo struct {
 	name    string
 	size    int64
 	dir     bool
+	modTime time.Time
 	symlink bool
 }
 
@@ -220,7 +275,7 @@ func (fi fakeFileInfo) Mode() os.FileMode {
 	}
 	return 0o755
 }
-func (fi fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (fi fakeFileInfo) ModTime() time.Time { return fi.modTime }
 func (fi fakeFileInfo) IsDir() bool        { return fi.dir }
 func (fi fakeFileInfo) Sys() any           { return nil }
 
