@@ -965,3 +965,32 @@ func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing
 		t.Fatalf("gc-beads-bd should not run before provider readiness passes, got:\n%s", data)
 	}
 }
+
+func TestReadCityImportsForBootstrapKeepsFirstDuplicateAcrossFiles(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(strings.Join([]string{
+		`[imports.core]`,
+		`source = "../city-core"`,
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte(strings.Join([]string{
+		`[imports.core]`,
+		`source = "../pack-core"`,
+		"",
+		`[imports.extra]`,
+		`source = "../extra-pack"`,
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	imports := readCityImportsForBootstrap(cityPath)
+	if got := imports["core"].Source; got != "../city-core" {
+		t.Fatalf("imports[core].Source = %q, want city import to win", got)
+	}
+	if got := imports["extra"].Source; got != "../extra-pack" {
+		t.Fatalf("imports[extra].Source = %q, want pack import to remain", got)
+	}
+}

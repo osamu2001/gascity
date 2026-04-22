@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -239,6 +240,26 @@ func TestCoreBinaryDependenciesExecProviderPreservesScriptDependency(t *testing.
 	t.Fatal("expected exec provider dependency")
 }
 
+func TestSessionProviderDependenciesExecWithoutScriptPathUsesPlaceholderName(t *testing.T) {
+	deps := sessionProviderDependencies("exec:")
+	if len(deps) != 1 {
+		t.Fatalf("len(deps) = %d, want 1", len(deps))
+	}
+	dep := deps[0]
+	if dep.name != "exec session provider script" {
+		t.Fatalf("dep.name = %q, want placeholder script name", dep.name)
+	}
+	if dep.lookupName != "" {
+		t.Fatalf("dep.lookupName = %q, want empty", dep.lookupName)
+	}
+	if !strings.Contains(dep.installHint, "exec:/path/to/script") {
+		t.Fatalf("dep.installHint = %q, want default example path", dep.installHint)
+	}
+	if sessionProviderRequiresTmux("exec:") {
+		t.Fatal("sessionProviderRequiresTmux(exec:) = true, want false")
+	}
+}
+
 func TestCheckHardDependenciesRespectsMinVersions(t *testing.T) {
 	oldLookPath := initLookPath
 	t.Cleanup(func() { initLookPath = oldLookPath })
@@ -391,6 +412,16 @@ func TestRegisterCoreBinaryChecksRespectsSessionProvider(t *testing.T) {
 	}
 }
 
+func TestRegisterCoreBinaryChecksNilLookPathStillRegistersChecks(t *testing.T) {
+	d := &doctor.Doctor{}
+	registerCoreBinaryChecks(d, "exec:", nil)
+
+	checks := reflect.ValueOf(d).Elem().FieldByName("checks")
+	if got := checks.Len(); got == 0 {
+		t.Fatal("registerCoreBinaryChecks() registered no checks")
+	}
+}
+
 func TestProviderDependencyCheckIncludesExecConfigGuidance(t *testing.T) {
 	dep := sessionProviderDependencies("exec:/tmp/spy")[0]
 	check := newBinaryDependencyCheck(dep, fakeLookPath("/tmp/spy"))
@@ -407,6 +438,56 @@ func TestProviderDependencyCheckIncludesExecConfigGuidance(t *testing.T) {
 	}
 	if !strings.Contains(result.FixHint, `[session].provider = "exec:/tmp/spy"`) {
 		t.Fatalf("FixHint = %q, want city.toml example", result.FixHint)
+	}
+}
+
+func TestBinaryDependencyCheckRunReportsMissingExecScriptPath(t *testing.T) {
+	dep := sessionProviderDependencies("exec:")[0]
+	check := newBinaryDependencyCheck(dep, fakeLookPath())
+
+	result := check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %d, want error", result.Status)
+	}
+	if !strings.Contains(result.Message, "missing a script path") {
+		t.Fatalf("message = %q, want missing-script-path guidance", result.Message)
+	}
+	if !strings.Contains(result.FixHint, "exec:/path/to/script") {
+		t.Fatalf("FixHint = %q, want default exec example", result.FixHint)
+	}
+}
+
+func TestBinaryDependencyCheckNameFallbacks(t *testing.T) {
+	cases := []struct {
+		name string
+		dep  binaryDependency
+		want string
+	}{
+		{
+			name: "uses dependency name when lookup missing",
+			dep: binaryDependency{
+				name:       "exec session provider script",
+				lookupName: "",
+			},
+			want: "session-provider-exec-session-provider-script",
+		},
+		{
+			name: "uses generic placeholder when both names are empty",
+			dep: binaryDependency{
+				name:       "   ",
+				lookupName: "",
+			},
+			want: "session-provider-session-provider",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			check := newBinaryDependencyCheck(tc.dep, fakeLookPath())
+			if got := check.Name(); got != tc.want {
+				t.Fatalf("Name() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -471,6 +552,17 @@ func TestExecSessionProviderSmokeCheckTreatsExit2AsRunnable(t *testing.T) {
 	}
 }
 
+func TestExecSessionProviderSmokeCheckTreatsExit0AsRunnable(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "provider.sh")
+	content := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile(%s): %v", script, err)
+	}
+	if err := execSessionProviderSmokeCheck(script); err != nil {
+		t.Fatalf("execSessionProviderSmokeCheck(%s): %v", script, err)
+	}
+}
+
 func TestExecSessionProviderSmokeCheckReportsScriptFailure(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "provider.sh")
 	content := "#!/bin/sh\necho 'bad interpreter' >&2\nexit 1\n"
@@ -483,5 +575,31 @@ func TestExecSessionProviderSmokeCheckReportsScriptFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "bad interpreter") {
 		t.Fatalf("error = %q, want stderr text", err.Error())
+	}
+}
+
+func TestExecSessionProviderSmokeCheckFallsBackToRunErrorWithoutStderr(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "provider.sh")
+	content := "#!/bin/sh\nexit 1\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile(%s): %v", script, err)
+	}
+
+	err := execSessionProviderSmokeCheck(script)
+	if err == nil {
+		t.Fatalf("execSessionProviderSmokeCheck(%s): expected error", script)
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Fatalf("error = %q, want fallback run error", err.Error())
+	}
+}
+
+func TestBinaryDependencyCheckCanFixIsNoop(t *testing.T) {
+	check := newBinaryDependencyCheck(binaryDependency{name: "jq", lookupName: "jq"}, fakeLookPath())
+	if check.CanFix() {
+		t.Fatal("CanFix() = true, want false")
+	}
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix() = %v, want nil", err)
 	}
 }

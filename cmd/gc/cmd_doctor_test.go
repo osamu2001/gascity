@@ -14,6 +14,19 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+func TestNewDoctorCmdDescribesProviderAwareDependencies(t *testing.T) {
+	cmd := newDoctorCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	if cmd.Use != "doctor" {
+		t.Fatalf("Use = %q, want doctor", cmd.Use)
+	}
+	if !strings.Contains(cmd.Long, "session-backend dependencies") {
+		t.Fatalf("Long = %q, want provider-aware dependency wording", cmd.Long)
+	}
+	if !strings.Contains(cmd.Long, "including tmux when required") {
+		t.Fatalf("Long = %q, want tmux qualifier", cmd.Long)
+	}
+}
+
 func TestDoctorSkipsDoltChecksTreatsExecGcBeadsBdAsBdContract(t *testing.T) {
 	cityDir := t.TempDir()
 	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityDir))
