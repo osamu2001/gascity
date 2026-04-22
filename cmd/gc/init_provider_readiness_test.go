@@ -273,6 +273,92 @@ func TestFinalizeInitDoesNotWriteImplicitImportState(t *testing.T) {
 	}
 }
 
+func TestFinalizeInitBlocksBootstrapCollisionBeforeRegistration(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BOOTSTRAP", "")
+
+	oldBootstrap := bootstrap.BootstrapPacks
+	bootstrap.BootstrapPacks = []bootstrap.Entry{{
+		Name:     "core",
+		Source:   "github.com/gastownhall/gc-core",
+		Version:  "0.1.0",
+		AssetDir: "packs/core",
+	}}
+	t.Cleanup(func() { bootstrap.BootstrapPacks = oldBootstrap })
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	for _, tc := range []struct {
+		name       string
+		configFile string
+	}{
+		{name: "city toml import", configFile: "city.toml"},
+		{name: "root pack import", configFile: "pack.toml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := filepath.Join(t.TempDir(), "bright-lights")
+			var initStdout, initStderr bytes.Buffer
+			code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr)
+			if code != 0 {
+				t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+			}
+
+			userCoreDir := filepath.Join(filepath.Dir(cityPath), "user-core")
+			if err := os.MkdirAll(userCoreDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(userCoreDir, "pack.toml"), []byte("[pack]\nname = \"user-core\"\nschema = 2\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			configPath := filepath.Join(cityPath, tc.configFile)
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", tc.configFile, err)
+			}
+			data = append(data, []byte("\n[imports.core]\nsource = \"../user-core\"\n")...)
+			if err := os.WriteFile(configPath, data, 0o644); err != nil {
+				t.Fatalf("WriteFile(%s): %v", tc.configFile, err)
+			}
+
+			calledRegister := false
+			oldRegister := registerCityWithSupervisorTestHook
+			registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+				calledRegister = true
+				return true, 0
+			}
+			t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+			var stdout, stderr bytes.Buffer
+			code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+				commandName:           "gc init",
+				skipProviderReadiness: true,
+			})
+			if code != 1 {
+				t.Fatalf("finalizeInit = %d, want 1; stderr=%s", code, stderr.String())
+			}
+			if calledRegister {
+				t.Fatal("registerCityWithSupervisor should not run when bootstrap collision blocks init")
+			}
+			if !strings.Contains(stderr.String(), "bootstrapping implicit imports") {
+				t.Fatalf("stderr = %q, want bootstrap collision message", stderr.String())
+			}
+			if !strings.Contains(stderr.String(), `"core"`) {
+				t.Fatalf("stderr = %q, want colliding import name", stderr.String())
+			}
+
+			implicitPath := filepath.Join(os.Getenv("GC_HOME"), "implicit-import.toml")
+			if _, err := os.Stat(implicitPath); !os.IsNotExist(err) {
+				t.Fatalf("implicit-import.toml should not be created after collision, stat err = %v", err)
+			}
+		})
+	}
+}
+
 func TestFinalizeInitReportsConfigLoadErrorDuringProviderPreflight(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
