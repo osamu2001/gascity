@@ -131,7 +131,7 @@ func TestStreamSessionPeekRawWorkerWakeEmitsPendingWithoutOutputChange(t *testin
 		Subject: info.ID,
 	})
 
-	body := waitForRecorderSubstring(t, rec, "req-1", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "req-1", outputStreamPollInterval+time.Second)
 
 	cancel()
 	<-done

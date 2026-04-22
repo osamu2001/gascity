@@ -2965,7 +2965,7 @@ func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *t
 		Subject: info.ID,
 	})
 
-	body := waitForRecorderSubstring(t, rec, "second-continued-output", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "second-continued-output", outputStreamPollInterval+time.Second)
 
 	cancel()
 	<-done
@@ -3130,7 +3130,7 @@ func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing
 		Subject: info.ID,
 	})
 
-	body := waitForRecorderSubstring(t, rec, "event wake turn", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "event wake turn", outputStreamPollInterval+time.Second)
 
 	cancel()
 	<-done
@@ -3197,7 +3197,7 @@ func TestHandleSessionStreamRawWorkerOperationEventWakesTranscriptReload(t *test
 		Subject: info.ID,
 	})
 
-	body := waitForRecorderSubstring(t, rec, "raw event wake", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "raw event wake", outputStreamPollInterval+time.Second)
 
 	cancel()
 	<-done
@@ -3380,7 +3380,7 @@ func TestHandleSessionStreamTranscriptWriteWakesWithoutPolling(t *testing.T) {
 		t.Fatalf("append transcript: %v", err)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "fsnotify wake turn", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "fsnotify wake turn", outputStreamPollInterval+time.Second)
 
 	cancel()
 	<-done

@@ -573,7 +573,7 @@ func TestAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) 
 		Subject: sessionName,
 	})
 
-	if body := waitForRecorderSubstring(t, rec, "second-output", 1500*time.Millisecond); !strings.Contains(body, "second-output") {
+	if body := waitForRecorderSubstring(t, rec, "second-output", outputStreamPollInterval+time.Second); !strings.Contains(body, "second-output") {
 		t.Fatalf("stream body missing rotated transcript after wake: %s", body)
 	}
 
@@ -587,7 +587,7 @@ func TestAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) 
 		t.Fatalf("chtimes(updated second transcript): %v", err)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "third-output", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "third-output", outputStreamPollInterval+time.Second)
 
 	cancel()
 	<-done
@@ -633,7 +633,7 @@ func TestCityScopedAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *t
 		Subject: sessionName,
 	})
 
-	if body := waitForRecorderSubstring(t, rec, "second-output", 1500*time.Millisecond); !strings.Contains(body, "second-output") {
+	if body := waitForRecorderSubstring(t, rec, "second-output", outputStreamPollInterval+time.Second); !strings.Contains(body, "second-output") {
 		t.Fatalf("city-scoped stream body missing rotated transcript after wake: %s", body)
 	}
 
@@ -647,7 +647,7 @@ func TestCityScopedAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *t
 		t.Fatalf("chtimes(updated second transcript): %v", err)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "third-output", 1500*time.Millisecond)
+	body := waitForRecorderSubstring(t, rec, "third-output", outputStreamPollInterval+time.Second)
 
 	cancel()
 	<-done
