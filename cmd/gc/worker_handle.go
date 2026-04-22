@@ -229,6 +229,15 @@ func resolvedWorkerSessionConfigWithConfig(
 	if resolved == nil {
 		return worker.ResolvedSessionConfig{}, fmt.Errorf("resolved provider is required")
 	}
+	var err error
+	metadata, err = session.WithStoredMCPMetadata(
+		metadata,
+		firstNonEmptyGCString(metadata[session.MCPIdentityMetadataKey], metadata["agent_name"]),
+		mcpServers,
+	)
+	if err != nil {
+		return worker.ResolvedSessionConfig{}, err
+	}
 	command = strings.TrimSpace(command)
 	if command == "" {
 		if transport == "acp" {

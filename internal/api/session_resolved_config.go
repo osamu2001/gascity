@@ -19,6 +19,15 @@ func resolvedSessionConfigForProvider(
 	if resolved == nil {
 		return worker.ResolvedSessionConfig{}, fmt.Errorf("%w: resolved provider is required", worker.ErrHandleConfig)
 	}
+	var err error
+	metadata, err = session.WithStoredMCPMetadata(
+		metadata,
+		firstNonEmptyString(metadata[session.MCPIdentityMetadataKey], metadata["agent_name"]),
+		mcpServers,
+	)
+	if err != nil {
+		return worker.ResolvedSessionConfig{}, err
+	}
 	// Use the ACP-specific command when the session uses ACP transport,
 	// falling back to the default command for tmux sessions.
 	resolvedCommand := resolved.CommandString()

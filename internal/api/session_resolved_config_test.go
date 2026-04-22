@@ -5,10 +5,14 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
-	metadata := map[string]string{"session_origin": "named"}
+	metadata := map[string]string{
+		"session_origin": "named",
+		"agent_name":     "myrig/worker-adhoc-123",
+	}
 	env := map[string]string{"API_TOKEN": "present"}
 	mcpServers := []runtime.MCPServerConfig{{
 		Name:    "filesystem",
@@ -68,6 +72,12 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 	}
 	if got, want := cfg.Runtime.Resume.SessionIDFlag, "--session-id"; got != want {
 		t.Fatalf("Runtime.Resume.SessionIDFlag = %q, want %q", got, want)
+	}
+	if got, want := cfg.Metadata[session.MCPIdentityMetadataKey], "myrig/worker-adhoc-123"; got != want {
+		t.Fatalf("Metadata[mcp_identity] = %q, want %q", got, want)
+	}
+	if got := cfg.Metadata[session.MCPServersSnapshotMetadataKey]; got == "" {
+		t.Fatal("Metadata[mcp_servers_snapshot] = empty, want persisted snapshot")
 	}
 
 	metadata["session_origin"] = "mutated"

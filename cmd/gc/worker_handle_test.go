@@ -769,6 +769,41 @@ func TestResolvedWorkerSessionConfigWithConfigFallsBackToProviderArgForCommand(t
 	}
 }
 
+func TestResolvedWorkerSessionConfigWithConfigPersistsStoredMCPMetadata(t *testing.T) {
+	cfg, err := resolvedWorkerSessionConfigWithConfig(
+		"",
+		"legacy-provider",
+		"/tmp/work",
+		"worker",
+		"",
+		"worker",
+		"Worker",
+		"acp",
+		&config.ResolvedProvider{
+			Name: "custom-provider",
+		},
+		map[string]string{
+			"session_origin": "test",
+			"agent_name":     "myrig/worker-adhoc-123",
+		},
+		[]runtime.MCPServerConfig{{
+			Name:      "filesystem",
+			Transport: runtime.MCPTransportStdio,
+			Command:   "/bin/mcp",
+			Args:      []string{"--stdio"},
+		}},
+	)
+	if err != nil {
+		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
+	}
+	if got, want := cfg.Metadata[session.MCPIdentityMetadataKey], "myrig/worker-adhoc-123"; got != want {
+		t.Fatalf("Metadata[mcp_identity] = %q, want %q", got, want)
+	}
+	if got := cfg.Metadata[session.MCPServersSnapshotMetadataKey]; got == "" {
+		t.Fatal("Metadata[mcp_servers_snapshot] = empty, want persisted snapshot")
+	}
+}
+
 func TestResolvedWorkerRuntimeWithConfigFallsBackToCityPathAndSyncsHintsWorkDir(t *testing.T) {
 	cityDir := t.TempDir()
 	writePhase0InterfaceCity(t, cityDir, `[workspace]
