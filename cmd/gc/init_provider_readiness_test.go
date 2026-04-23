@@ -688,6 +688,27 @@ func TestCheckHardDependenciesTreatsExecGcBeadsBdAsBdContract(t *testing.T) {
 	}
 }
 
+func TestCheckHardDependenciesReportsExecProviderMissingScriptPath(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "")
+
+	oldLookPath := initLookPath
+	initLookPath = fakeLookPath()
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	cityPath := writeSessionProviderTestCity(t, "exec:")
+	missing := checkHardDependencies(cityPath)
+	if len(missing) != 1 {
+		t.Fatalf("missing deps = %#v, want one missing exec script path", missing)
+	}
+	if missing[0].name != "exec session provider script" {
+		t.Fatalf("missing dep = %#v, want exec session provider script", missing[0])
+	}
+	if !strings.Contains(missing[0].installHint, "exec:/path/to/script") {
+		t.Fatalf("installHint = %q, want exec:/path/to/script guidance", missing[0].installHint)
+	}
+}
+
 func TestCheckHardDependenciesRequiresBdToolsForBdRigUnderFileCity(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")

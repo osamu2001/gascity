@@ -242,11 +242,7 @@ func (c *binaryDependencyCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult 
 	}
 	if err := validateBinaryDependency(c.dependency, path); err != nil {
 		r.Status = doctor.StatusError
-		if c.dependency.kind == binaryDependencyKindExecSessionProvider {
-			r.Message = fmt.Sprintf("exec session provider %q is not runnable: %v", c.dependency.provider, err)
-		} else {
-			r.Message = fmt.Sprintf("%s failed validation: %v", c.dependency.lookupName, err)
-		}
+		r.Message = fmt.Sprintf("exec session provider %q is not runnable: %v", c.dependency.provider, err)
 		r.FixHint = c.dependency.installHint
 		return r
 	}

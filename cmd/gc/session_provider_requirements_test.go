@@ -457,6 +457,25 @@ func TestBinaryDependencyCheckRunReportsMissingExecScriptPath(t *testing.T) {
 	}
 }
 
+func TestBinaryDependencyCheckRunReportsMissingBinary(t *testing.T) {
+	check := newBinaryDependencyCheck(binaryDependency{
+		name:        "jq",
+		lookupName:  "jq",
+		installHint: "brew install jq",
+	}, fakeLookPath("jq"))
+
+	result := check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusError {
+		t.Fatalf("status = %d, want error", result.Status)
+	}
+	if result.Message != "jq not found" {
+		t.Fatalf("message = %q, want jq not found", result.Message)
+	}
+	if result.FixHint != "brew install jq" {
+		t.Fatalf("FixHint = %q, want brew install jq", result.FixHint)
+	}
+}
+
 func TestBinaryDependencyCheckNameFallbacks(t *testing.T) {
 	cases := []struct {
 		name string
