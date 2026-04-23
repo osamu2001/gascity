@@ -541,7 +541,7 @@ func TestAgentOutputStreamStoppedAgent(t *testing.T) {
 func TestAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) {
 	fixture := newGeminiAgentOutputStreamFixture(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamRecorderContextTimeout())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
@@ -601,7 +601,7 @@ func TestCityScopedAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *t
 	fixture := newGeminiAgentOutputStreamFixture(t)
 	h := newTestCityHandlerWith(t, fixture.state, fixture.srv)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamRecorderContextTimeout())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", cityURL(fixture.state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)

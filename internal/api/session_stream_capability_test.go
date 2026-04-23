@@ -105,7 +105,7 @@ func TestStreamSessionPeekRawWorkerWakeEmitsPendingWithoutOutputChange(t *testin
 	handle := &peekPendingHandle{output: "steady output"}
 	rec := newSyncResponseRecorder()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamRecorderContextTimeout())
 	defer cancel()
 
 	done := make(chan struct{})

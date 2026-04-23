@@ -205,6 +205,10 @@ func waitForRecorderSubstring(t *testing.T, rec *syncResponseRecorder, want stri
 	return rec.BodyString()
 }
 
+func streamRecorderContextTimeout() time.Duration {
+	return outputStreamPollInterval + 2*time.Second
+}
+
 func TestHandleSessionList(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -2934,7 +2938,7 @@ func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *t
 		t.Fatalf("Create: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamRecorderContextTimeout())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID+"/stream", nil).WithContext(ctx)
@@ -3092,7 +3096,7 @@ func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamRecorderContextTimeout())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
@@ -3162,7 +3166,7 @@ func TestHandleSessionStreamRawWorkerOperationEventWakesTranscriptReload(t *test
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamRecorderContextTimeout())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream?format=raw", nil).WithContext(ctx)
@@ -3348,7 +3352,7 @@ func TestHandleSessionStreamTranscriptWriteWakesWithoutPolling(t *testing.T) {
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), streamRecorderContextTimeout())
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
