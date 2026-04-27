@@ -250,6 +250,9 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.TitleModel != "" {
 		result.TitleModel = city.TitleModel
 	}
+	if city.ACPCommand != "" {
+		result.ACPCommand = city.ACPCommand
+	}
 
 	// Slice fields: replace entirely when non-nil.
 	if city.Args != nil {
@@ -273,6 +276,9 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	}
 	if city.PrintArgs != nil {
 		result.PrintArgs = city.PrintArgs
+	}
+	if city.ACPArgs != nil {
+		result.ACPArgs = city.ACPArgs
 	}
 
 	// Map fields: merge additively (city keys win).
@@ -486,6 +492,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		ResumeCommand:          spec.ResumeCommand,
 		SessionIDFlag:          spec.SessionIDFlag,
 		TitleModel:             spec.TitleModel,
+		ACPCommand:             spec.ACPCommand,
 	}
 	// Deep-copy OptionsSchema to avoid aliasing the spec's slice.
 	if len(spec.OptionsSchema) > 0 {
@@ -552,6 +559,10 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 	if len(spec.PrintArgs) > 0 {
 		rp.PrintArgs = make([]string, len(spec.PrintArgs))
 		copy(rp.PrintArgs, spec.PrintArgs)
+	}
+	if spec.ACPArgs != nil {
+		rp.ACPArgs = make([]string, len(spec.ACPArgs))
+		copy(rp.ACPArgs, spec.ACPArgs)
 	}
 	return rp
 }
@@ -699,6 +710,13 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	}
 	if r.TitleModel != "" {
 		out.TitleModel = r.TitleModel
+	}
+	if r.ACPCommand != "" {
+		out.ACPCommand = r.ACPCommand
+	}
+	if r.ACPArgs != nil {
+		out.ACPArgs = make([]string, len(r.ACPArgs))
+		copy(out.ACPArgs, r.ACPArgs)
 	}
 	if r.PrintArgs != nil {
 		out.PrintArgs = append([]string(nil), r.PrintArgs...)

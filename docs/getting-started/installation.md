@@ -47,9 +47,13 @@ The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/ga
 brew install gastownhall/gascity/gascity
 ```
 
-This taps the `gastownhall/gascity` formula, builds or fetches the `gc` binary,
-and installs the default backend toolchain (`tmux`, `jq`, `git`, `dolt`,
-`flock`, `beads`).
+This taps the `gastownhall/gascity` formula, downloads the matching `gc`
+release asset, and installs the default backend toolchain (`tmux`, `jq`,
+`git`, `dolt`, `flock`, `beads`).
+
+Once Gas City is accepted into homebrew-core, the normal install path will be
+`brew install gascity`; the `gastownhall/gascity` tap remains available for
+emergency updates.
 
 Verify the installation:
 

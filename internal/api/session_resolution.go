@@ -275,7 +275,11 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		return "", err
 	}
 
-	resolved, _, transport, qualifiedTemplate, err := s.resolveSessionTemplate(spec.Agent.QualifiedName())
+	resolved, _, transport, qualifiedTemplate, err := s.resolveSessionTemplateForCreate(spec.Agent.QualifiedName())
+	if err != nil {
+		return "", err
+	}
+	transport, err = validateSessionTransport(resolved, transport, s.state.SessionProvider())
 	if err != nil {
 		return "", err
 	}
@@ -285,7 +289,7 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 	if err != nil {
 		return "", err
 	}
-	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, nil)
+	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, nil, transport)
 	if err != nil {
 		return "", err
 	}
@@ -308,7 +312,17 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 	if resolved.BuiltinAncestor != "" && resolved.BuiltinAncestor != resolved.Name {
 		extraMeta["builtin_ancestor"] = resolved.BuiltinAncestor
 	}
-	hints := sessionCreateHints(resolved)
+	mcpServers, err := s.sessionMCPServers(qualifiedTemplate, resolved.Name, spec.Identity, workDir, transport, "")
+	if err != nil {
+		return "", err
+	}
+	if transport == "acp" {
+		extraMeta, err = session.WithStoredMCPMetadata(extraMeta, spec.Identity, mcpServers)
+		if err != nil {
+			return "", err
+		}
+	}
+	hints := sessionCreateHints(resolved, mcpServers)
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{spec.Identity, spec.SessionName}, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {

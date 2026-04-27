@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -139,6 +140,34 @@ func TestBuiltinProvidersGemini(t *testing.T) {
 	}
 }
 
+func TestBuiltinProvidersCursor(t *testing.T) {
+	p := BuiltinProviders()["cursor"]
+	if p.Command != "cursor-agent" {
+		t.Errorf("Command = %q, want %q", p.Command, "cursor-agent")
+	}
+	if len(p.Args) != 1 || p.Args[0] != "-f" {
+		t.Errorf("Args = %v, want [-f]", p.Args)
+	}
+	if p.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
+	}
+	if p.ReadyPromptPrefix != "\u2192 " {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", p.ReadyPromptPrefix, "\u2192 ")
+	}
+	if p.ReadyDelayMs != 10000 {
+		t.Errorf("ReadyDelayMs = %d, want 10000", p.ReadyDelayMs)
+	}
+	if len(p.ProcessNames) != 1 || p.ProcessNames[0] != "cursor-agent" {
+		t.Errorf("ProcessNames = %v, want [cursor-agent]", p.ProcessNames)
+	}
+	if !derefBool(p.SupportsHooks) {
+		t.Error("SupportsHooks = false, want true")
+	}
+	if p.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
+	}
+}
+
 func TestBuiltinProvidersReturnsNewMap(t *testing.T) {
 	a := BuiltinProviders()
 	b := BuiltinProviders()
@@ -156,6 +185,12 @@ func TestBuiltinProvidersOpenCode(t *testing.T) {
 	p := BuiltinProviders()["opencode"]
 	if p.Command != "opencode" {
 		t.Errorf("Command = %q, want %q", p.Command, "opencode")
+	}
+	if p.ACPCommand != "" {
+		t.Errorf("ACPCommand = %q, want empty fallback to Command", p.ACPCommand)
+	}
+	if !reflect.DeepEqual(p.ACPArgs, []string{"acp"}) {
+		t.Errorf("ACPArgs = %v, want [acp]", p.ACPArgs)
 	}
 	if p.PromptMode != "none" {
 		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
@@ -237,5 +272,198 @@ func TestCommandStringQuotesShellMetacharacters(t *testing.T) {
 	want := "codex --model 'sonnet[1m]' --message 'it'\\''s ready'"
 	if got := rp.CommandString(); got != want {
 		t.Errorf("CommandString() = %q, want %q", got, want)
+	}
+}
+
+func TestACPCommandString(t *testing.T) {
+	tests := []struct {
+		name string
+		rp   ResolvedProvider
+		want string
+	}{
+		{
+			name: "FullOverride",
+			rp: ResolvedProvider{
+				Command:    "opencode",
+				Args:       []string{"--verbose"},
+				ACPCommand: "opencode-acp",
+				ACPArgs:    []string{"--json-rpc"},
+			},
+			want: "opencode-acp --json-rpc",
+		},
+		{
+			name: "FallbackToCommand",
+			rp: ResolvedProvider{
+				Command: "opencode",
+				Args:    []string{"--verbose"},
+			},
+			want: "opencode --verbose",
+		},
+		{
+			name: "PartialOverride_CommandOnly",
+			rp: ResolvedProvider{
+				Command:    "opencode",
+				Args:       []string{"--verbose"},
+				ACPCommand: "opencode-acp",
+			},
+			want: "opencode-acp --verbose",
+		},
+		{
+			name: "PartialOverride_ArgsOnly",
+			rp: ResolvedProvider{
+				Command: "opencode",
+				Args:    []string{"--verbose"},
+				ACPArgs: []string{"--json-rpc"},
+			},
+			want: "opencode --json-rpc",
+		},
+		{
+			name: "EmptyACPArgs",
+			rp: ResolvedProvider{
+				Command:    "opencode",
+				Args:       []string{"--verbose"},
+				ACPCommand: "opencode-acp",
+				ACPArgs:    []string{},
+			},
+			want: "opencode-acp",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.rp.ACPCommandString()
+			if got != tt.want {
+				t.Errorf("ACPCommandString() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// Verify FallbackToCommand produces same result as CommandString().
+	t.Run("FallbackMatchesCommandString", func(t *testing.T) {
+		rp := &ResolvedProvider{Command: "opencode", Args: []string{"--verbose"}}
+		if rp.ACPCommandString() != rp.CommandString() {
+			t.Errorf("ACPCommandString() = %q, but CommandString() = %q — should match when no ACP overrides",
+				rp.ACPCommandString(), rp.CommandString())
+		}
+	})
+}
+
+func TestDefaultSessionTransportOpenCodeFamilyDefaultsToACP(t *testing.T) {
+	tests := []struct {
+		name string
+		rp   ResolvedProvider
+	}{
+		{
+			name: "direct builtin name",
+			rp: ResolvedProvider{
+				Name:        "opencode",
+				SupportsACP: true,
+			},
+		},
+		{
+			name: "builtin ancestor",
+			rp: ResolvedProvider{
+				Name:            "custom-opencode",
+				BuiltinAncestor: "opencode",
+				SupportsACP:     true,
+			},
+		},
+		{
+			name: "deprecated kind fallback",
+			rp: ResolvedProvider{
+				Name:        "custom-opencode",
+				Kind:        "opencode",
+				SupportsACP: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rp.DefaultSessionTransport(); got != "acp" {
+				t.Fatalf("DefaultSessionTransport() = %q, want %q", got, "acp")
+			}
+		})
+	}
+}
+
+func TestDefaultSessionTransportSupportsACPDoesNotImplyACPDefault(t *testing.T) {
+	rp := &ResolvedProvider{
+		Name:        "custom-acp",
+		SupportsACP: true,
+	}
+	if got := rp.DefaultSessionTransport(); got != "" {
+		t.Fatalf("DefaultSessionTransport() = %q, want empty default transport", got)
+	}
+}
+
+func TestProviderSessionCreateTransportUsesExplicitACPOverrides(t *testing.T) {
+	tests := []struct {
+		name string
+		rp   ResolvedProvider
+	}{
+		{
+			name: "explicit acp command",
+			rp: ResolvedProvider{
+				Name:        "custom-acp",
+				SupportsACP: true,
+				ACPCommand:  "/bin/custom-acp",
+			},
+		},
+		{
+			name: "explicit acp args",
+			rp: ResolvedProvider{
+				Name:        "custom-acp",
+				SupportsACP: true,
+				ACPArgs:     []string{"acp"},
+			},
+		},
+		{
+			name: "opencode family remains acp",
+			rp: ResolvedProvider{
+				Name:            "custom-opencode",
+				BuiltinAncestor: "opencode",
+				SupportsACP:     true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rp.ProviderSessionCreateTransport(); got != "acp" {
+				t.Fatalf("ProviderSessionCreateTransport() = %q, want %q", got, "acp")
+			}
+		})
+	}
+}
+
+func TestProviderSessionCreateTransportSupportsACPAloneStaysDefault(t *testing.T) {
+	rp := &ResolvedProvider{
+		Name:        "custom-acp",
+		SupportsACP: true,
+	}
+	if got := rp.ProviderSessionCreateTransport(); got != "" {
+		t.Fatalf("ProviderSessionCreateTransport() = %q, want empty transport", got)
+	}
+}
+
+func TestResolveSessionCreateTransportPrefersAgentSessionOverride(t *testing.T) {
+	got := ResolveSessionCreateTransport("acp", &ResolvedProvider{
+		Name:        "custom-acp",
+		SupportsACP: true,
+	})
+	if got != "acp" {
+		t.Fatalf("ResolveSessionCreateTransport() = %q, want %q", got, "acp")
+	}
+}
+
+func TestResolveSessionCreateTransportFallsBackToProviderCreateTransport(t *testing.T) {
+	got := ResolveSessionCreateTransport("", &ResolvedProvider{
+		Name:        "custom-acp",
+		SupportsACP: true,
+		ACPCommand:  "/bin/echo",
+	})
+	if got != "acp" {
+		t.Fatalf("ResolveSessionCreateTransport() = %q, want %q", got, "acp")
 	}
 }

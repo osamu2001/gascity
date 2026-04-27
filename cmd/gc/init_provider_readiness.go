@@ -534,6 +534,15 @@ func checkHardDependencies(cityPath string) []missingDep {
 
 	var missing []missingDep
 	for _, d := range deps {
+		if len(d.lookupCandidates) > 0 {
+			if !initAnyToolAvailable(d.lookupCandidates...) {
+				missing = append(missing, missingDep{
+					name:        d.name,
+					installHint: d.installHint,
+				})
+			}
+			continue
+		}
 		if d.lookupName == "" {
 			missing = append(missing, missingDep{
 				name:        d.name,
@@ -568,6 +577,15 @@ func checkHardDependencies(cityPath string) []missingDep {
 		}
 	}
 	return missing
+}
+
+func initAnyToolAvailable(names ...string) bool {
+	for _, name := range names {
+		if _, err := initLookPath(name); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // parseDepVersion runs "<binary> version" and extracts a semver-like version string.

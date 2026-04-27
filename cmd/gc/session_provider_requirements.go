@@ -29,12 +29,13 @@ const (
 )
 
 type binaryDependency struct {
-	name        string
-	lookupName  string
-	installHint string
-	minVersion  string
-	provider    string
-	kind        binaryDependencyKind
+	name             string
+	lookupName       string
+	lookupCandidates []string
+	installHint      string
+	minVersion       string
+	provider         string
+	kind             binaryDependencyKind
 }
 
 // effectiveSessionProviderForCity returns the effective session backend name
@@ -93,6 +94,11 @@ func coreBinaryDependencies(sessionProvider, beadsProvider string, opts coreBina
 				name:        "flock",
 				lookupName:  "flock",
 				installHint: "brew install flock (macOS) or apt install util-linux (Linux)",
+			},
+			binaryDependency{
+				name:             "timeout/gtimeout/python3",
+				lookupCandidates: []string{"timeout", "gtimeout", "python3"},
+				installHint:      "install GNU coreutils timeout/gtimeout or python3",
 			},
 		)
 	}

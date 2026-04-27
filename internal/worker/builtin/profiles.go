@@ -55,6 +55,8 @@ type BuiltinProviderSpec struct {
 	OptionsSchema          []BuiltinProviderOption
 	PrintArgs              []string
 	TitleModel             string
+	ACPCommand             string
+	ACPArgs                []string
 }
 
 // ProfileIdentity captures the explicit production identity for a canonical
@@ -149,6 +151,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		Command:     "codex",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
+			"model":           "gpt-5.5",
 			"effort":          "xhigh",
 		},
 		PromptMode:        "arg",
@@ -184,6 +187,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
+					{Value: "gpt-5.5", Label: "GPT-5.5", FlagArgs: []string{"--model", "gpt-5.5"}},
 					{Value: "o3", Label: "o3", FlagArgs: []string{"--model", "o3"}},
 					{Value: "o4-mini", Label: "o4-mini", FlagArgs: []string{"--model", "o4-mini"}},
 				},
@@ -260,13 +264,15 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		},
 	},
 	"cursor": {
-		DisplayName:      "Cursor Agent",
-		Command:          "cursor-agent",
-		Args:             []string{"-f"},
-		PromptMode:       "arg",
-		ProcessNames:     []string{"cursor-agent"},
-		SupportsHooks:    true,
-		InstructionsFile: "AGENTS.md",
+		DisplayName:       "Cursor Agent",
+		Command:           "cursor-agent",
+		Args:              []string{"-f"},
+		PromptMode:        "arg",
+		ReadyPromptPrefix: "\u2192 ",
+		ReadyDelayMs:      10000,
+		ProcessNames:      []string{"cursor-agent"},
+		SupportsHooks:     true,
+		InstructionsFile:  "AGENTS.md",
 	},
 	"copilot": {
 		DisplayName:       "GitHub Copilot",
@@ -298,6 +304,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		SupportsACP:      true,
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
+		ACPArgs:          []string{"acp"},
 	},
 	"auggie": {
 		DisplayName:      "Auggie CLI",
@@ -385,6 +392,7 @@ func cloneBuiltinProviderSpec(spec BuiltinProviderSpec) BuiltinProviderSpec {
 	spec.OptionDefaults = cloneStringMap(spec.OptionDefaults)
 	spec.PrintArgs = cloneStrings(spec.PrintArgs)
 	spec.OptionsSchema = cloneBuiltinOptions(spec.OptionsSchema)
+	spec.ACPArgs = cloneStrings(spec.ACPArgs)
 	return spec
 }
 

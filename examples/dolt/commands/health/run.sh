@@ -77,13 +77,24 @@ server_pid=0
 server_latency=0
 server_reachable=false
 
+# Portable millisecond timestamp. BSD date(1) on macOS treats %N as a
+# literal 'N' (exits 0, output like "1776740122N"), so the GNU-only
+# || fallback never triggers. Feature-test the output instead.
+now_ms() {
+  _raw=$(date +%s%N 2>/dev/null)
+  case "$_raw" in
+    ''|*[!0-9]*) printf '%s000' "$(date +%s 2>/dev/null)" ;;
+    *)        printf '%s' "$_raw" | cut -c1-13 ;;
+  esac
+}
+
 # Find dolt PID by port.
 pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
 if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
   server_running=true
   [ -n "$pid" ] && server_pid="$pid"
   # Measure query latency.
-  start_ms=$(date +%s%N 2>/dev/null | cut -c1-13 || date +%s)
+  start_ms=$(now_ms)
   conn_args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"
   # Always export DOLT_CLI_PASSWORD (even empty) so the client does not
   # prompt for a password on stdin. Without this, the SELECT 1 probe
@@ -96,7 +107,7 @@ if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
   # goroutine, saturated pool, migration lock) would otherwise hang.
   if run_bounded 5 dolt $conn_args sql -q "SELECT 1" >/dev/null 2>&1; then
     server_reachable=true
-    end_ms=$(date +%s%N 2>/dev/null | cut -c1-13 || date +%s)
+    end_ms=$(now_ms)
     server_latency=$((end_ms - start_ms))
     [ "$server_latency" -lt 0 ] && server_latency=0
   fi
@@ -123,15 +134,20 @@ if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
     [ ! -d "$d/.dolt" ] && continue
     name="$(basename "$d")"
     case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|__gc_probe) continue ;; esac
-    # Reject names with anything outside [A-Za-z0-9_] before interpolating
-    # into the SQL identifier. Dolt permits directory names that shell
+    # Reject names with anything outside [A-Za-z0-9_-] before interpolating
+    # into the SQL identifier. The first byte must still be alnum/underscore
+    # so the command-side contract matches gc-nudge and avoids option-shaped
+    # names. Dolt permits directory names that shell
     # basename happily returns (e.g. backticks, semicolons) but which
     # would break out of the identifier and execute attacker-chosen SQL
     # as the patrol user. Not an external-attack surface today — data
     # directories are server-controlled — but fragile enough under
     # config drift that it's worth skipping rather than probing.
     case "$name" in
-      *[!A-Za-z0-9_]*|'') continue ;;
+      [A-Za-z0-9_]*)
+        case "$name" in *[!A-Za-z0-9_-]*) continue ;; esac
+        ;;
+      *) continue ;;
     esac
     # Count commits via SQL (bounded). 0 on timeout or error — keep
     # going rather than hang the whole report. Extract the first
@@ -219,6 +235,9 @@ fi
 # positives from processes that merely mention "dolt" in their args
 # (e.g., Claude sessions whose prompt text contains "dolt sql-server").
 #
+# Rig-local Dolt servers (configured via dolt.port in config.yaml)
+# are legitimate — exclude any PID listening on a known rig port.
+#
 # GC_HEALTH_SKIP_ZOMBIE_SCAN is a test-only escape hatch. Zombie
 # enumeration spawns one `ps` per matching process, which on shared
 # dev machines with many accumulated dolt processes dominates the
@@ -228,8 +247,22 @@ fi
 zombie_count=0
 zombie_pids=""
 if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
+  # Collect PIDs of legitimate rig-local Dolt servers.
+  rig_dolt_pids=""
+  while IFS= read -r meta; do
+    [ -f "$meta" ] || continue
+    config_file="$(dirname "$meta")/config.yaml"
+    [ -f "$config_file" ] || continue
+    rig_port=$(grep '^dolt\.port:' "$config_file" 2>/dev/null | sed "s/^dolt\\.port:[[:space:]]*//; s/[[:space:]]*#.*$//; s/['\\\"]//g; s/[[:space:]]*$//" | head -1)
+    case "$rig_port" in ''|*[!0-9]*) continue ;; esac
+    [ "$rig_port" = "$GC_DOLT_PORT" ] && continue
+    rig_pid=$(managed_runtime_listener_pid "$rig_port" || true)
+    [ -n "$rig_pid" ] && rig_dolt_pids="$rig_dolt_pids $rig_pid "
+  done < "$_meta_cache"
+
   for p in $(pgrep -x dolt 2>/dev/null || true); do
     [ "$p" = "$server_pid" ] && continue
+    case "$rig_dolt_pids" in *" $p "*) continue ;; esac
     cmd=$(ps -p "$p" -o args= 2>/dev/null || true)
     case "$cmd" in
       *sql-server*) ;;

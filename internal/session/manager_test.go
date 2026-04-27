@@ -328,6 +328,28 @@ func TestCreateBeadOnly(t *testing.T) {
 	}
 }
 
+func TestGetSurfacesAgentNameMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManager(store, sp)
+
+	info, err := mgr.CreateBeadOnly("helper", "my chat", "claude", "/tmp", "claude", "", nil, ProviderResume{})
+	if err != nil {
+		t.Fatalf("CreateBeadOnly: %v", err)
+	}
+	if err := store.SetMetadata(info.ID, "agent_name", "myrig/helper-adhoc-123"); err != nil {
+		t.Fatalf("SetMetadata(agent_name): %v", err)
+	}
+
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.AgentName != "myrig/helper-adhoc-123" {
+		t.Fatalf("AgentName = %q, want %q", got.AgentName, "myrig/helper-adhoc-123")
+	}
+}
+
 func TestCreateNamedWithTransport_UsesExplicitSessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -617,6 +639,35 @@ func TestClose(t *testing.T) {
 	// Close again is idempotent.
 	if err := mgr.Close(info.ID); err != nil {
 		t.Fatalf("Close (idempotent): %v", err)
+	}
+}
+
+func TestCloseRemovesRuntimeMCPSnapshot(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithCityPath(store, sp, cityPath)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := PersistRuntimeMCPServersSnapshot(cityPath, info.ID, []runtime.MCPServerConfig{{
+		Name:      "identity",
+		Transport: runtime.MCPTransportHTTP,
+		URL:       "https://example.invalid/mcp",
+	}}); err != nil {
+		t.Fatalf("PersistRuntimeMCPServersSnapshot: %v", err)
+	}
+	if _, err := os.Stat(runtimeMCPServersSnapshotPath(cityPath, info.ID)); err != nil {
+		t.Fatalf("Stat(runtime snapshot): %v", err)
+	}
+
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(runtimeMCPServersSnapshotPath(cityPath, info.ID)); !os.IsNotExist(err) {
+		t.Fatalf("runtime snapshot still exists after close, stat err = %v", err)
 	}
 }
 
@@ -2089,7 +2140,7 @@ func TestSendBackfillsTransportForLegacyACPSession(t *testing.T) {
 		t.Fatalf("Start ACP session: %v", err)
 	}
 
-	mgr := NewManagerWithTransportResolver(store, autoSP, func(template string) string {
+	mgr := NewManagerWithTransportResolver(store, autoSP, func(template, _ string) string {
 		if template == "helper" {
 			return "acp"
 		}
@@ -2147,7 +2198,7 @@ func TestGetDoesNotPersistGuessedTransportForLegacySession(t *testing.T) {
 		t.Fatalf("Create legacy bead: %v", err)
 	}
 
-	mgr := NewManagerWithTransportResolver(store, autoSP, func(template string) string {
+	mgr := NewManagerWithTransportResolver(store, autoSP, func(template, _ string) string {
 		if template == "helper" {
 			return "acp"
 		}
@@ -2163,6 +2214,247 @@ func TestGetDoesNotPersistGuessedTransportForLegacySession(t *testing.T) {
 	}
 	if updated.Metadata["transport"] != "" {
 		t.Fatalf("transport metadata = %q, want empty on read-only lookup", updated.Metadata["transport"])
+	}
+}
+
+func TestGetUsesConfiguredTransportForPendingCreateWithoutRuntimeProbe(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+
+	deferred, err := store.Create(beads.Bead{
+		Title: "deferred acp",
+		Type:  BeadType,
+		Labels: []string{
+			LabelSession,
+			"template:helper",
+		},
+		Metadata: map[string]string{
+			"template":             "helper",
+			"state":                string(StateCreating),
+			"pending_create_claim": "true",
+			"provider":             "claude",
+			"work_dir":             "/tmp",
+			"command":              "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create deferred bead: %v", err)
+	}
+
+	mgr := NewManagerWithTransportResolver(store, sp, func(template, _ string) string {
+		if template == "helper" {
+			return "acp"
+		}
+		return ""
+	})
+
+	info, err := mgr.Get(deferred.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := info.Transport; got != "acp" {
+		t.Fatalf("Transport = %q, want acp", got)
+	}
+	if len(sp.Calls) != 0 {
+		t.Fatalf("runtime calls = %#v, want none for pending create", sp.Calls)
+	}
+}
+
+func TestGetPrefersLiveTransportDetectionOverConfiguredTransportInference(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	autoSP := sessionauto.New(defaultSP, acpSP)
+
+	legacy, err := store.Create(beads.Bead{
+		Title: "legacy tmux",
+		Type:  BeadType,
+		Labels: []string{
+			LabelSession,
+			"template:helper",
+		},
+		Metadata: map[string]string{
+			"template": "helper",
+			"state":    string(StateActive),
+			"provider": "claude",
+			"work_dir": "/tmp",
+			"command":  "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create legacy bead: %v", err)
+	}
+	sessName := sessionNameFor(legacy.ID)
+	if err := store.SetMetadata(legacy.ID, "session_name", sessName); err != nil {
+		t.Fatalf("SetMetadata(session_name): %v", err)
+	}
+	if err := defaultSP.Start(context.Background(), sessName, runtime.Config{WorkDir: "/tmp"}); err != nil {
+		t.Fatalf("Start default session: %v", err)
+	}
+
+	mgr := NewManagerWithTransportResolver(store, autoSP, func(template, _ string) string {
+		if template == "helper" {
+			return "acp"
+		}
+		return ""
+	})
+
+	info, err := mgr.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := info.Transport; got != "" {
+		t.Fatalf("Transport = %q, want empty for live tmux session", got)
+	}
+
+	updated, err := store.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata["transport"]; got != "" {
+		t.Fatalf("transport metadata = %q, want empty for live tmux session", got)
+	}
+}
+
+func TestGetDoesNotInferConfiguredTransportForStoppedLegacySession(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	autoSP := sessionauto.New(defaultSP, acpSP)
+
+	legacy, err := store.Create(beads.Bead{
+		Title: "legacy tmux",
+		Type:  BeadType,
+		Labels: []string{
+			LabelSession,
+			"template:helper",
+		},
+		Metadata: map[string]string{
+			"template": "helper",
+			"state":    string(StateAsleep),
+			"provider": "claude",
+			"work_dir": "/tmp",
+			"command":  "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create legacy bead: %v", err)
+	}
+	sessName := sessionNameFor(legacy.ID)
+	if err := store.SetMetadata(legacy.ID, "session_name", sessName); err != nil {
+		t.Fatalf("SetMetadata(session_name): %v", err)
+	}
+
+	mgr := NewManagerWithTransportResolver(store, autoSP, func(template, _ string) string {
+		if template == "helper" {
+			return "acp"
+		}
+		return ""
+	})
+
+	info, err := mgr.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := info.Transport; got != "" {
+		t.Fatalf("Transport = %q, want empty for stopped legacy session without stored transport", got)
+	}
+
+	updated, err := store.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata["transport"]; got != "" {
+		t.Fatalf("transport metadata = %q, want empty for read-only lookup", got)
+	}
+}
+
+func TestGetDoesNotInferConfiguredTransportForStoppedLegacySessionWithPolicyFallback(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	autoSP := sessionauto.New(defaultSP, acpSP)
+
+	legacy, err := store.Create(beads.Bead{
+		Title: "legacy acp",
+		Type:  BeadType,
+		Labels: []string{
+			LabelSession,
+			"template:helper",
+		},
+		Metadata: map[string]string{
+			"template": "helper",
+			"state":    string(StateAsleep),
+			"provider": "claude",
+			"work_dir": "/tmp",
+			"command":  "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create legacy bead: %v", err)
+	}
+	sessName := sessionNameFor(legacy.ID)
+	if err := store.SetMetadata(legacy.ID, "session_name", sessName); err != nil {
+		t.Fatalf("SetMetadata(session_name): %v", err)
+	}
+
+	mgr := NewManagerWithTransportPolicyResolverAndCityPath(store, autoSP, "", func(template, _ string) (string, bool) {
+		if template == "helper" {
+			return "acp", true
+		}
+		return "", false
+	})
+
+	info, err := mgr.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := info.Transport; got != "" {
+		t.Fatalf("Transport = %q, want empty for stopped legacy session without stored evidence", got)
+	}
+
+	updated, err := store.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata["transport"]; got != "" {
+		t.Fatalf("transport metadata = %q, want empty for read-only lookup", got)
+	}
+}
+
+func TestGetInfersACPTransportFromStoredMCPMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	defaultSP := runtime.NewFake()
+	acpSP := runtime.NewFake()
+	autoSP := sessionauto.New(defaultSP, acpSP)
+
+	legacy, err := store.Create(beads.Bead{
+		Title: "legacy acp",
+		Type:  BeadType,
+		Labels: []string{
+			LabelSession,
+			"template:helper",
+		},
+		Metadata: map[string]string{
+			"template":                    "helper",
+			"state":                       string(StateAsleep),
+			"provider":                    "claude",
+			"work_dir":                    "/tmp",
+			"command":                     "claude",
+			MCPServersSnapshotMetadataKey: `[{"name":"filesystem","transport":"stdio","command":"/bin/mcp"}]`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create legacy bead: %v", err)
+	}
+
+	mgr := NewManagerWithTransportResolver(store, autoSP, nil)
+	info, err := mgr.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := info.Transport; got != "acp" {
+		t.Fatalf("Transport = %q, want acp from stored MCP metadata", got)
 	}
 }
 

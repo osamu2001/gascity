@@ -5,6 +5,7 @@
 package dolt_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -531,6 +532,129 @@ exit 0
 	}
 }
 
+func TestHealthScriptPortableTimestampFallbacksRemainNumeric(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "bsd percent n literal", raw: "1776740122N"},
+		{name: "empty percent n output", raw: ""},
+	}
+
+	root := repoRoot(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			fakeBin := t.TempDir()
+
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+
+			writeExecutable(t, filepath.Join(fakeBin, "lsof"), `#!/bin/sh
+exit 0
+`)
+			writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
+host="$2"
+probe_port="$3"
+if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "`+port+`" ]; then
+  exit 0
+fi
+exit 1
+`)
+			writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+exit 0
+`)
+			writeExecutable(t, filepath.Join(fakeBin, "date"), `#!/bin/sh
+case "$1" in
+  +%s%N)
+    printf '%s' "${FAKE_DATE_PERCENT_SN_RAW-}"
+    exit 0
+    ;;
+  +%s)
+    counter_file="${FAKE_DATE_SECONDS_COUNTER_FILE:?}"
+    if [ -f "$counter_file" ]; then
+      count=$(cat "$counter_file")
+    else
+      count=0
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$counter_file"
+    case "$count" in
+      1) printf '%s\n' "${FAKE_DATE_SECONDS_FIRST-1776740122}" ;;
+      *) printf '%s\n' "${FAKE_DATE_SECONDS_SECOND-1776740123}" ;;
+    esac
+    exit 0
+    ;;
+  -u)
+    printf '%s\n' '2026-04-23T00:00:00Z'
+    exit 0
+    ;;
+esac
+exec /bin/date "$@"
+`)
+
+			counterFile := filepath.Join(t.TempDir(), "date-counter")
+			cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+			cmd.Env = append(filteredEnv(
+				"FAKE_DATE_PERCENT_SN_RAW",
+				"FAKE_DATE_SECONDS_COUNTER_FILE",
+				"FAKE_DATE_SECONDS_FIRST",
+				"FAKE_DATE_SECONDS_SECOND",
+				"GC_CITY_PATH",
+				"GC_PACK_DIR",
+				"GC_DOLT_HOST",
+				"GC_DOLT_PORT",
+				"GC_DOLT_USER",
+				"GC_DOLT_PASSWORD",
+				"GC_HEALTH_SKIP_ZOMBIE_SCAN",
+				"PATH",
+			),
+				"FAKE_DATE_PERCENT_SN_RAW="+tt.raw,
+				"FAKE_DATE_SECONDS_COUNTER_FILE="+counterFile,
+				"FAKE_DATE_SECONDS_FIRST=1776740122",
+				"FAKE_DATE_SECONDS_SECOND=1776740123",
+				"GC_CITY_PATH="+cityPath,
+				"GC_PACK_DIR="+root,
+				"GC_DOLT_HOST=127.0.0.1",
+				"GC_DOLT_PORT="+port,
+				"GC_DOLT_USER=root",
+				"GC_DOLT_PASSWORD=",
+				"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			)
+
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+			}
+
+			var report struct {
+				Server struct {
+					Running   bool `json:"running"`
+					Reachable bool `json:"reachable"`
+					LatencyMS int  `json:"latency_ms"`
+				} `json:"server"`
+			}
+			if err := json.Unmarshal(out, &report); err != nil {
+				t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+			}
+			if !report.Server.Running {
+				t.Fatalf("server.running = false, want true\n%s", out)
+			}
+			if !report.Server.Reachable {
+				t.Fatalf("server.reachable = false, want true\n%s", out)
+			}
+			if report.Server.LatencyMS != 1000 {
+				t.Fatalf("server.latency_ms = %d, want 1000 to prove seconds fallback ran\n%s", report.Server.LatencyMS, out)
+			}
+		})
+	}
+}
+
 func writeManagedRuntimeStateForScript(t *testing.T, cityPath string, port int) {
 	t.Helper()
 	writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, os.Getpid())
@@ -542,11 +666,15 @@ func writeManagedRuntimeStateForScriptWithPID(t *testing.T, cityPath string, por
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	dataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	payload := []byte(fmt.Sprintf(
 		`{"running":true,"pid":%d,"port":%d,"data_dir":%q,"started_at":"2026-04-20T00:00:00Z"}`,
 		pid,
 		port,
-		filepath.Join(cityPath, ".beads", "dolt"),
+		dataDir,
 	))
 	if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), payload, 0o644); err != nil {
 		t.Fatal(err)
@@ -557,6 +685,141 @@ func writeExecutable(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
 		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
+}
+
+// TestHealthScriptZombieScanExcludesRigLocalServers verifies that
+// Dolt processes on rig-configured ports are not flagged as zombies.
+// Regression guard for the bug where deacon patrol killed rig-local
+// Dolt servers because the zombie scan treated every non-city-server
+// dolt sql-server PID as a zombie.
+func runHealthScriptZombieScanExcludesRigLocalServers(t *testing.T, rigConfig string) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	mainPort := "19901"
+	rigPort := "19902"
+
+	mainPID := "424201"
+	rigPID := "424202"
+	zombiePID := "424203"
+
+	// City .beads directory with metadata.
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rig directory with config.yaml containing dolt.port.
+	rigBeads := filepath.Join(cityPath, "rigs", "enterprise", ".beads")
+	if err := os.MkdirAll(rigBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"),
+		[]byte(`{"dolt_database":"enterprise"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, "config.yaml"),
+		[]byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake gc: fail so metadata_files() falls back to find.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake pgrep: returns rig PID and zombie PID (main PID excluded
+	// by server_pid check, not by pgrep filtering).
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
+		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, rigPID, zombiePID))
+
+	// Fake lsof: maps ports to PIDs.
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -iTCP:%s) echo %s; exit 0 ;;
+    -iTCP:%s) echo %s; exit 0 ;;
+  esac
+done
+exit 1
+`, mainPort, mainPID, rigPort, rigPID))
+
+	// Fake ps: handles pid_is_running (-o pid=) and zombie scan (-o args=).
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), `#!/bin/sh
+if [ "$1" = "-p" ] && [ "$3" = "-o" ]; then
+  case "$4" in
+    pid=) printf ' %s\n' "$2"; exit 0 ;;
+    args=) echo "dolt sql-server"; exit 0 ;;
+  esac
+fi
+exit 1
+`)
+
+	// Fake nc: unreachable (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake dolt: SELECT 1 fails (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+
+	output := string(out)
+
+	// The true zombie (424203) should be counted.
+	if !strings.Contains(output, `"zombie_count": 1`) {
+		t.Errorf("expected zombie_count 1; got:\n%s", output)
+	}
+
+	// The rig PID (424202) must NOT appear in zombie_pids.
+	if strings.Contains(output, rigPID) {
+		t.Errorf("rig-local Dolt PID %s should not be in zombie_pids; got:\n%s", rigPID, output)
+	}
+
+	// The true zombie PID (424203) must appear in zombie_pids.
+	if !strings.Contains(output, zombiePID) {
+		t.Errorf("true zombie PID %s should be in zombie_pids; got:\n%s", zombiePID, output)
+	}
+}
+
+func TestHealthScriptZombieScanExcludesRigLocalServers(t *testing.T) {
+	tests := []struct {
+		name      string
+		rigConfig string
+	}{
+		{
+			name:      "bare port",
+			rigConfig: "dolt.port: 19902\n",
+		},
+		{
+			name:      "quoted port",
+			rigConfig: "dolt.port: \"19902\"\n",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runHealthScriptZombieScanExcludesRigLocalServers(t, tc.rigConfig)
+		})
 	}
 }
 

@@ -182,7 +182,7 @@ func TestCoreBinaryDependenciesPackManagedDeps(t *testing.T) {
 			opts: coreBinaryDependencyOptions{
 				includePackManaged: true,
 			},
-			want: []string{"jq", "git", "pgrep", "lsof", "dolt", "bd", "flock"},
+			want: []string{"jq", "git", "pgrep", "lsof", "dolt", "bd", "flock", "timeout/gtimeout/python3"},
 		},
 		{
 			name:     "file provider skips pack-managed deps",
@@ -190,7 +190,7 @@ func TestCoreBinaryDependenciesPackManagedDeps(t *testing.T) {
 			opts: coreBinaryDependencyOptions{
 				includePackManaged: true,
 			},
-			dontWant: []string{"dolt", "bd", "flock"},
+			dontWant: []string{"dolt", "bd", "flock", "timeout/gtimeout/python3"},
 		},
 		{
 			name:     "opt-out excludes pack-managed deps even for bd",
@@ -198,7 +198,7 @@ func TestCoreBinaryDependenciesPackManagedDeps(t *testing.T) {
 			opts: coreBinaryDependencyOptions{
 				includePackManaged: false,
 			},
-			dontWant: []string{"dolt", "bd", "flock"},
+			dontWant: []string{"dolt", "bd", "flock", "timeout/gtimeout/python3"},
 		},
 	}
 
