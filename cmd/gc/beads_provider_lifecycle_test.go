@@ -2086,11 +2086,11 @@ func TestInitBeadsForDir_execPassesCanonicalDoltDatabase(t *testing.T) {
 	}
 }
 
-// TestInitBeadsForDirExecSetsBEADSDIR exercises all three exec paths in
-// initBeadsForDir and asserts BEADS_DIR=<dir>/.beads is present in the
-// subprocess env. bd init creates a .git/ as a side effect unless BEADS_DIR
-// is set (see upstream gastownhall/beads cmd/bd/init.go), so the init call
-// sites must guarantee it regardless of provider. Regression for #399.
+// TestInitBeadsForDirExecSetsBEADSDIR exercises the controller-side exec paths
+// that invoke bd init directly and asserts BEADS_DIR=<dir>/.beads is present in
+// the subprocess env. The k8s scoped path sets BEADS_DIR inside the provider
+// script itself; that behavior is covered by internal/runtime/k8s tests.
+// Regression for #399.
 func TestInitBeadsForDirExecSetsBEADSDIR(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -2110,13 +2110,6 @@ func TestInitBeadsForDirExecSetsBEADSDIR(t *testing.T) {
 			scriptBase: "record-env",
 			cityToml: func(rigRel string) string {
 				return "[workspace]\nname = \"demo\"\n\n[[rigs]]\nname = \"r\"\npath = \"" + rigRel + "\"\nprefix = \"rg\"\n"
-			},
-		},
-		{
-			name:       "gc-beads-k8s scoped",
-			scriptBase: "gc-beads-k8s",
-			cityToml: func(rigRel string) string {
-				return "[workspace]\nname = \"demo\"\n\n[dolt]\nhost = \"city-db.example.com\"\nport = 3307\n\n[[rigs]]\nname = \"r\"\npath = \"" + rigRel + "\"\nprefix = \"rg\"\ndolt_host = \"rig-db.example.com\"\ndolt_port = \"4407\"\n"
 			},
 		},
 	} {

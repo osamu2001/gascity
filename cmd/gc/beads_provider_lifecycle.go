@@ -451,10 +451,11 @@ func shutdownBeadsProvider(cityPath string) error {
 // Idempotent — skips if already initialized. Callers should use
 // initAndHookDir instead to ensure hooks are installed afterward.
 //
-// Every exec path sets BEADS_DIR=<dir>/.beads in the subprocess env. bd init
-// creates a .git/ as a side effect when BEADS_DIR is unset (upstream
-// gastownhall/beads cmd/bd/init.go), so all provider scripts — managed and
-// not — receive the scope's bead directory explicitly.
+// Every load-bearing exec path ensures bd init runs with BEADS_DIR=<dir>/.beads.
+// bd init creates a .git/ as a side effect when BEADS_DIR is unset (upstream
+// gastownhall/beads cmd/bd/init.go), so generic exec providers get the scope's
+// bead directory in the subprocess env and script-based providers must set it
+// inside their own wrapper before invoking bd init.
 func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 	if cityUsesBdStoreContract(cityPath) && os.Getenv("GC_DOLT") == "skip" {
 		if err := seedDeferredManagedBeadsErr(cityPath, dir, prefix, doltDatabase); err != nil {
@@ -509,9 +510,6 @@ func initBeadsForDir(cityPath, dir, prefix, doltDatabase string) error {
 		if err != nil {
 			return err
 		}
-		providerEnv = overlayEnvEntries(providerEnv, map[string]string{
-			"BEADS_DIR": filepath.Join(dir, ".beads"),
-		})
 		return runProviderOpWithEnv(script, providerEnv, args...)
 	}
 	return nil

@@ -80,6 +80,33 @@ func TestBeadsScriptInitSetsBEADSDIR(t *testing.T) {
 	assertCallContains(t, result.callLog, "init --server")
 }
 
+func TestBeadsScriptInitDoesNotPreseedIssuePrefixBeforeBdInit(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op:   "init",
+		Args: []string{"/city/frontend", "fe"},
+		Env: map[string]string{
+			"GC_CITY_PATH":    "/city",
+			"GC_STORE_ROOT":   "/city/frontend",
+			"GC_BEADS_PREFIX": "fe",
+			"GC_DOLT_HOST":    "canonical-dolt.example.com",
+			"GC_DOLT_PORT":    "4406",
+		},
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s init error = %v\noutput:\n%s", result.err, result.output)
+	}
+	lines := strings.Split(strings.TrimSpace(result.callLog), "\n")
+	if len(lines) == 0 {
+		t.Fatal("call log was empty")
+	}
+	if !strings.Contains(lines[0], "init --server") {
+		t.Fatalf("first init call = %q, want init --server", lines[0])
+	}
+	if strings.Contains(lines[0], "config set issue_prefix") {
+		t.Fatalf("first init call should not preseed issue_prefix before bd init:\n%s", lines[0])
+	}
+}
+
 func TestBeadsScriptInitRejectsPartialCanonicalDoltTarget(t *testing.T) {
 	clearDoltAndCityEnv(t)
 	result := runBeadsScript(t, beadsScriptOptions{
@@ -131,10 +158,10 @@ func TestBeadsScriptListUsesScopedWorkdir(t *testing.T) {
 	}
 	assertCallContains(t, result.callLog, "/workspace/frontend")
 	assertCallContains(t, result.callLog, "list --json --limit 0 --all")
-	assertCallNotContains(t, result.callLog, `export BEADS_DIR="$workdir/.beads"`)
+	assertCallContains(t, result.callLog, `export BEADS_DIR="$workdir/.beads"`)
 }
 
-func TestBeadsScriptConfigSetDoesNotExportBEADSDIR(t *testing.T) {
+func TestBeadsScriptConfigSetKeepsBEADSDIRScoped(t *testing.T) {
 	result := runBeadsScript(t, beadsScriptOptions{
 		Op:   "config-set",
 		Args: []string{"issue_prefix", "fe"},
@@ -148,7 +175,7 @@ func TestBeadsScriptConfigSetDoesNotExportBEADSDIR(t *testing.T) {
 	}
 	assertCallContains(t, result.callLog, "/workspace/frontend")
 	assertCallContains(t, result.callLog, "config set issue_prefix fe")
-	assertCallNotContains(t, result.callLog, `export BEADS_DIR="$workdir/.beads"`)
+	assertCallContains(t, result.callLog, `export BEADS_DIR="$workdir/.beads"`)
 }
 
 type beadsScriptOptions struct {
