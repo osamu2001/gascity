@@ -64,7 +64,9 @@ type Info struct {
 	Closed        bool
 	Title         string
 	Alias         string
+	AgentName     string // persisted concrete identity for MCP materialization
 	Provider      string
+	Transport     string
 	Command       string // resolved command stored at creation
 	WorkDir       string
 	SessionName   string // tmux session name
@@ -119,7 +121,7 @@ type Manager struct {
 	store             beads.Store
 	sp                runtime.Provider
 	cityPath          string
-	transportResolver func(template string) string
+	transportResolver func(template, provider string) transportResolution
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -139,6 +141,11 @@ type transportDetector interface {
 	DetectTransport(name string) string
 }
 
+type transportResolution struct {
+	transport            string
+	allowStoppedFallback bool
+}
+
 func normalizeTransport(provider, transport string) string {
 	if transport != "" {
 		return transport
@@ -153,16 +160,38 @@ func transportFromMetadata(b beads.Bead) string {
 	return normalizeTransport(b.Metadata["provider"], b.Metadata["transport"])
 }
 
+func (m *Manager) resolveConfiguredTransport(template, provider string) (string, bool) {
+	if m.transportResolver == nil {
+		return "", false
+	}
+	resolution := m.transportResolver(strings.TrimSpace(template), strings.TrimSpace(provider))
+	return normalizeTransport(provider, resolution.transport), resolution.allowStoppedFallback
+}
+
 func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool) {
 	transport := transportFromMetadata(b)
 	if transport != "" {
 		return transport, false
+	}
+	if strings.TrimSpace(b.Metadata[MCPIdentityMetadataKey]) != "" ||
+		strings.TrimSpace(b.Metadata[MCPServersSnapshotMetadataKey]) != "" {
+		return "acp", false
+	}
+	if strings.TrimSpace(b.Metadata["pending_create_claim"]) == "true" {
+		transport, _ = m.resolveConfiguredTransport(b.Metadata["template"], b.Metadata["provider"])
+		if transport != "" {
+			return transport, true
+		}
+		return "", false
 	}
 	if detector, ok := m.sp.(transportDetector); ok {
 		transport = normalizeTransport(b.Metadata["provider"], detector.DetectTransport(sessName))
 		if transport != "" {
 			return transport, true
 		}
+	}
+	if m.sp != nil && m.sp.IsRunning(sessName) {
+		return "", false
 	}
 	return "", false
 }
@@ -193,9 +222,19 @@ func NewManager(store beads.Store, sp runtime.Provider) *Manager {
 }
 
 // NewManagerWithTransportResolver creates a Manager that can infer session
-// transport from template config when older beads do not have transport metadata.
-func NewManagerWithTransportResolver(store beads.Store, sp runtime.Provider, resolver func(template string) string) *Manager {
-	return &Manager{store: store, sp: sp, transportResolver: resolver}
+// transport from template or provider config when older beads do not have
+// transport metadata.
+func NewManagerWithTransportResolver(store beads.Store, sp runtime.Provider, resolver func(template, provider string) string) *Manager {
+	return &Manager{
+		store: store,
+		sp:    sp,
+		transportResolver: func(template, provider string) transportResolution {
+			if resolver == nil {
+				return transportResolution{}
+			}
+			return transportResolution{transport: resolver(template, provider)}
+		},
+	}
 }
 
 // NewManagerWithCityPath creates a Manager that can persist deferred submits
@@ -205,10 +244,47 @@ func NewManagerWithCityPath(store beads.Store, sp runtime.Provider, cityPath str
 }
 
 // NewManagerWithTransportResolverAndCityPath creates a Manager that can infer
-// session transport from template config and persist deferred submits into the
-// city's nudge queue.
-func NewManagerWithTransportResolverAndCityPath(store beads.Store, sp runtime.Provider, cityPath string, resolver func(template string) string) *Manager {
-	return &Manager{store: store, sp: sp, cityPath: cityPath, transportResolver: resolver}
+// session transport from template or provider config and persist deferred
+// submits into the city's nudge queue.
+func NewManagerWithTransportResolverAndCityPath(store beads.Store, sp runtime.Provider, cityPath string, resolver func(template, provider string) string) *Manager {
+	return &Manager{
+		store:    store,
+		sp:       sp,
+		cityPath: cityPath,
+		transportResolver: func(template, provider string) transportResolution {
+			if resolver == nil {
+				return transportResolution{}
+			}
+			return transportResolution{transport: resolver(template, provider)}
+		},
+	}
+}
+
+// NewManagerWithTransportPolicyResolverAndCityPath creates a Manager that can
+// infer transport from config and, when the resolver marks it safe, continue
+// using that transport for stopped legacy sessions without persisted
+// transport metadata.
+func NewManagerWithTransportPolicyResolverAndCityPath(
+	store beads.Store,
+	sp runtime.Provider,
+	cityPath string,
+	resolver func(template, provider string) (string, bool),
+) *Manager {
+	return &Manager{
+		store:    store,
+		sp:       sp,
+		cityPath: cityPath,
+		transportResolver: func(template, provider string) transportResolution {
+			if resolver == nil {
+				return transportResolution{}
+			}
+			transport, allowStoppedFallback := resolver(template, provider)
+			return transportResolution{
+				transport:            transport,
+				allowStoppedFallback: allowStoppedFallback,
+			}
+		},
+	}
 }
 
 // Create creates a new chat session bead and starts the runtime session.
@@ -345,6 +421,10 @@ func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, ex
 		b.Metadata["session_name"] = sessName
 		if explicitName != "" {
 			b.Metadata["session_name_explicit"] = "true"
+		}
+		if err := m.syncStoredMCPServers(b.ID, &b, hints.MCPServers); err != nil {
+			_ = m.store.Close(b.ID)
+			return err
 		}
 
 		unroute := m.routeACPIfNeeded(provider, transport, sessName)
@@ -681,6 +761,7 @@ func (m *Manager) Close(id string) error {
 			return err
 		}
 		if b.Status == "closed" {
+			_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
 			return nil // idempotent: already closed
 		}
 		// CmdClose is legal from any non-none state; this is effectively a
@@ -710,7 +791,11 @@ func (m *Manager) Close(id string) error {
 			return err
 		}
 
-		return m.store.Close(id)
+		if err := m.store.Close(id); err != nil {
+			return err
+		}
+		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
+		return nil
 	})
 }
 
@@ -1138,8 +1223,9 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 		sessName = sessionNameFor(b.ID)
 	}
 	closed := b.Status == "closed"
+	transport := transportFromMetadata(b)
 	if !closed {
-		transport, _ := m.transportForBead(b, sessName)
+		transport, _ = m.transportForBead(b, sessName)
 		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	}
 
@@ -1159,7 +1245,9 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 		Closed:        closed,
 		Title:         b.Title,
 		Alias:         b.Metadata["alias"],
+		AgentName:     b.Metadata["agent_name"],
 		Provider:      b.Metadata["provider"],
+		Transport:     transport,
 		Command:       b.Metadata["command"],
 		WorkDir:       b.Metadata["work_dir"],
 		SessionName:   sessName,

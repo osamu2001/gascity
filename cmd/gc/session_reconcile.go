@@ -119,10 +119,8 @@ func evaluateWakeReasons(
 		reasons = append(reasons, WakeKeepWarm)
 	}
 
-	if !waitHold && sp != nil {
-		if attached, err := workerSessionTargetAttachedWithConfig("", nil, sp, nil, name); err == nil && attached {
-			reasons = append(reasons, WakeAttached)
-		}
+	if !waitHold && sessionAttachedForWakeReason(sp, name) {
+		reasons = append(reasons, WakeAttached)
 	}
 
 	if pendingInteractionReady(sp, name) {
@@ -571,6 +569,10 @@ func recordWakeFailure(session *beads.Bead, store beads.Store, clk clock.Clock) 
 
 // clearWakeFailures resets crash counter and quarantine for a stable session.
 func clearWakeFailures(session *beads.Bead, store beads.Store) {
+	attempts := session.Metadata["wake_attempts"]
+	if (attempts == "" || attempts == "0") && session.Metadata["quarantined_until"] == "" {
+		return
+	}
 	batch := map[string]string{
 		"wake_attempts":     "0",
 		"quarantined_until": "",

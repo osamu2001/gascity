@@ -109,7 +109,9 @@ type ProviderPatchSetInput struct {
 	Body struct {
 		Name         string            `json:"name,omitempty" doc:"Provider name."`
 		Command      *string           `json:"command,omitempty" doc:"Override command binary."`
+		ACPCommand   *string           `json:"acp_command,omitempty" doc:"Override ACP transport command binary."`
 		Args         []string          `json:"args,omitempty" doc:"Override command arguments."`
+		ACPArgs      []string          `json:"acp_args,omitempty" doc:"Override ACP transport command arguments."`
 		PromptMode   *string           `json:"prompt_mode,omitempty" doc:"Override prompt delivery mode."`
 		PromptFlag   *string           `json:"prompt_flag,omitempty" doc:"Override prompt flag."`
 		ReadyDelayMs *int              `json:"ready_delay_ms,omitempty" doc:"Override ready delay in milliseconds."`

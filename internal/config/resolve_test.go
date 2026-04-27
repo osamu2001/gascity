@@ -112,7 +112,11 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "codex")
 	}
 	defaultArgs := rp.ResolveDefaultArgs()
-	codexWantArgs := []string{"--dangerously-bypass-approvals-and-sandbox", "-c", "model_reasoning_effort=xhigh"}
+	codexWantArgs := []string{
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--model", "gpt-5.5",
+		"-c", "model_reasoning_effort=xhigh",
+	}
 	if len(defaultArgs) != len(codexWantArgs) {
 		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, codexWantArgs)
 	} else {
@@ -856,6 +860,31 @@ func TestMergeProviderOverBuiltin(t *testing.T) {
 	}
 }
 
+func TestResolveProviderBuiltinOpenCodeCustomCommandKeepsACPArgsOnCustomBinary(t *testing.T) {
+	base := "builtin:opencode"
+	cityProviders := map[string]ProviderSpec{
+		"custom-opencode": {
+			Base:    &base,
+			Command: "custom-opencode",
+		},
+	}
+	agent := &Agent{Name: "worker", Provider: "custom-opencode"}
+
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("custom-opencode"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Command != "custom-opencode" {
+		t.Fatalf("Command = %q, want custom-opencode", rp.Command)
+	}
+	if rp.ACPCommand != "" {
+		t.Fatalf("ACPCommand = %q, want empty fallback to Command", rp.ACPCommand)
+	}
+	if got := rp.ACPCommandString(); got != "custom-opencode acp" {
+		t.Fatalf("ACPCommandString() = %q, want custom-opencode acp", got)
+	}
+}
+
 // --- Tri-state capability bool tests ---
 //
 // These verify the three-way *bool semantics for SupportsHooks,
@@ -1235,6 +1264,8 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		OptionsSchema:          []ProviderOption{{Key: "model"}},
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
+		ACPCommand:             "custom-acp",
+		ACPArgs:                []string{"acp-mode"},
 	}
 
 	// Verify every field on city is non-zero (catches new fields not added to test data).

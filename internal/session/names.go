@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -104,6 +105,24 @@ func GenerateAdhocExplicitName(base string) (string, error) {
 		base = base[:maxBaseLen]
 	}
 	return ValidateExplicitName(base + suffix)
+}
+
+// GenerateAdhocIdentity produces a stable, MCP-safe per-session identity for
+// aliasless sessions that still need a concrete unique name for templating.
+func GenerateAdhocIdentity(base string) (string, error) {
+	token, err := GenerateSessionKey()
+	if err != nil {
+		return "", fmt.Errorf("generate adhoc identity: %w", err)
+	}
+	compact := strings.ReplaceAll(token, "-", "")
+	if len(compact) > 10 {
+		compact = compact[:10]
+	}
+	base = agent.SanitizeQualifiedNameForSession(strings.TrimSpace(base))
+	if base == "" {
+		base = "session"
+	}
+	return base + "-adhoc-" + compact, nil
 }
 
 // ValidateAlias validates a human-chosen session alias. Empty means

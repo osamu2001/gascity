@@ -201,6 +201,42 @@ func TestConfigFingerprintExtraDifferentValues(t *testing.T) {
 	}
 }
 
+func TestConfigFingerprintIncludesMCPServers(t *testing.T) {
+	a := Config{Command: "claude"}
+	b := Config{
+		Command: "claude",
+		MCPServers: []MCPServerConfig{{
+			Name:      "filesystem",
+			Transport: MCPTransportStdio,
+			Command:   "/bin/mcp",
+			Args:      []string{"--stdio"},
+		}},
+	}
+	if ConfigFingerprint(a) == ConfigFingerprint(b) {
+		t.Error("MCPServers should change the config fingerprint")
+	}
+}
+
+func TestConfigFingerprintMCPServersOrderIndependent(t *testing.T) {
+	a := Config{
+		Command: "claude",
+		MCPServers: []MCPServerConfig{
+			{Name: "remote", Transport: MCPTransportHTTP, URL: "https://mcp.example", Headers: map[string]string{"Authorization": "token"}},
+			{Name: "filesystem", Transport: MCPTransportStdio, Command: "/bin/mcp", Args: []string{"--stdio"}, Env: map[string]string{"TOKEN": "abc"}},
+		},
+	}
+	b := Config{
+		Command: "claude",
+		MCPServers: []MCPServerConfig{
+			{Name: "filesystem", Transport: MCPTransportStdio, Command: "/bin/mcp", Args: []string{"--stdio"}, Env: map[string]string{"TOKEN": "abc"}},
+			{Name: "remote", Transport: MCPTransportHTTP, URL: "https://mcp.example", Headers: map[string]string{"Authorization": "token"}},
+		},
+	}
+	if ConfigFingerprint(a) != ConfigFingerprint(b) {
+		t.Error("MCPServers order should not affect hash")
+	}
+}
+
 func TestConfigFingerprintNilVsEmptyExtra(t *testing.T) {
 	a := Config{Command: "claude", FingerprintExtra: nil}
 	b := Config{Command: "claude", FingerprintExtra: map[string]string{}}

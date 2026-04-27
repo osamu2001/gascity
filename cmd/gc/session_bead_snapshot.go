@@ -115,3 +115,18 @@ func (s *sessionBeadSnapshot) FindSessionNameByTemplate(template string) string 
 	}
 	return s.sessionNameByTemplateHint[template]
 }
+
+func (s *sessionBeadSnapshot) FindSessionNameByNamedIdentity(identity string) string {
+	if s == nil || strings.TrimSpace(identity) == "" {
+		return ""
+	}
+	for _, bead := range s.open {
+		if strings.TrimSpace(bead.Metadata["configured_named_identity"]) != identity {
+			continue
+		}
+		if sessionName := strings.TrimSpace(bead.Metadata["session_name"]); sessionName != "" {
+			return sessionName
+		}
+	}
+	return ""
+}

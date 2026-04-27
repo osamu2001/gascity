@@ -103,6 +103,9 @@ type TemplateParams struct {
 	// identity-stamped templates (pool workers, dependency floors) from the
 	// resolver's default stamping on ordinary sessions.
 	EnvIdentityStamped bool
+	// MCPServers is the effective ACP session/new MCP server set for this
+	// concrete session context.
+	MCPServers []runtime.MCPServerConfig
 }
 
 // DisplayName returns the name to use for log messages and event subjects.
@@ -127,8 +130,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
+	sessionTransport := config.ResolveSessionCreateTransport(cfgAgent.Session, resolved)
 	// Step 2: Validate session vs provider compatibility.
-	if cfgAgent.Session == "acp" && !resolved.SupportsACP {
+	if sessionTransport == "acp" && !resolved.SupportsACP {
 		return TemplateParams{}, fmt.Errorf("agent %q: session = \"acp\" but provider %q does not support ACP (set supports_acp = true on the provider)", qualifiedName, resolved.Name)
 	}
 
@@ -147,7 +151,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 5: Build copy_files and command with settings args + schema defaults.
 	var copyFiles []runtime.CopyEntry
-	command := resolved.CommandString()
+	var command string
+	if sessionTransport == "acp" {
+		command = resolved.ACPCommandString()
+	} else {
+		command = resolved.CommandString()
+	}
 	// Append schema-derived default args (e.g., --dangerously-skip-permissions
 	// from EffectiveDefaults["permission_mode"] = "unrestricted").
 	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
@@ -468,6 +477,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			)
 		}
 	}
+	var mcpServers []runtime.MCPServerConfig
+	if sessionTransport == "acp" {
+		mcpServers = materialize.RuntimeMCPServers(mcpCatalog.Servers)
+	}
 
 	// Step 12: Build startup hints.
 	hints := agent.StartupHints{
@@ -502,8 +515,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigName:          rigName,
 		RigRoot:          rigRoot,
 		WakeMode:         cfgAgent.WakeMode,
-		IsACP:            cfgAgent.Session == "acp",
+		IsACP:            sessionTransport == "acp",
 		HookEnabled:      hasHooks,
+		MCPServers:       mcpServers,
 	}, nil
 }
 
@@ -574,10 +588,16 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		env[startupPromptDeliveredEnv] = "1"
 	}
 	return runtime.Config{
-		Command:                tp.Command,
-		PromptSuffix:           promptSuffix,
-		PromptFlag:             promptFlag,
-		Env:                    env,
+		Command:      tp.Command,
+		PromptSuffix: promptSuffix,
+		PromptFlag:   promptFlag,
+		Env:          env,
+		MCPServers: func() []runtime.MCPServerConfig {
+			if tp.IsACP {
+				return tp.MCPServers
+			}
+			return nil
+		}(),
 		WorkDir:                tp.WorkDir,
 		ReadyPromptPrefix:      tp.Hints.ReadyPromptPrefix,
 		ReadyDelayMs:           tp.Hints.ReadyDelayMs,

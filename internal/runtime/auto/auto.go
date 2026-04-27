@@ -29,6 +29,7 @@ var (
 	_ runtime.InteractionProvider           = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -65,6 +66,18 @@ func (p *Provider) route(name string) runtime.Provider {
 		return p.acpSP
 	}
 	return p.defaultSP
+}
+
+// SupportsTransport reports whether this provider can route the requested
+// session transport.
+func (p *Provider) SupportsTransport(transport string) bool {
+	if transport != "acp" {
+		return true
+	}
+	if provider, ok := p.acpSP.(runtime.TransportCapabilityProvider); ok {
+		return provider.SupportsTransport(transport)
+	}
+	return false
 }
 
 // DetectTransport reports the backend currently hosting the named session.

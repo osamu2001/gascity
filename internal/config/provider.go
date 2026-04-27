@@ -1,6 +1,8 @@
 package config
 
 import (
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/shellquote"
 	workerbuiltin "github.com/gastownhall/gascity/internal/worker/builtin"
 )
@@ -127,6 +129,12 @@ type ProviderSpec struct {
 	// Defaults to the cheapest/fastest model for each provider.
 	// Examples: "haiku" (claude), "o4-mini" (codex), "gemini-2.5-flash" (gemini)
 	TitleModel string `toml:"title_model,omitempty"`
+	// ACPCommand overrides Command when the session transport is ACP.
+	// When empty, Command is used for both tmux and ACP transports.
+	ACPCommand string `toml:"acp_command,omitempty"`
+	// ACPArgs overrides Args when the session transport is ACP.
+	// When nil, Args is used for both tmux and ACP transports.
+	ACPArgs []string `toml:"acp_args,omitempty"`
 }
 
 // Reserved prefixes for the Base field.
@@ -187,6 +195,8 @@ type ResolvedProvider struct {
 	OptionsSchema          []ProviderOption
 	PrintArgs              []string
 	TitleModel             string
+	ACPCommand             string
+	ACPArgs                []string
 	// EffectiveDefaults is the fully-merged option default map.
 	// Computed from: schema Default -> provider OptionDefaults -> agent OptionDefaults.
 	// Used by ResolveDefaultArgs() to produce CLI flags and by the API to
@@ -200,6 +210,71 @@ func (rp *ResolvedProvider) CommandString() string {
 		return rp.Command
 	}
 	return rp.Command + " " + shellquote.Join(rp.Args)
+}
+
+// ACPCommandString returns the command line for ACP transport sessions.
+// Each field falls back independently: ACPCommand defaults to Command,
+// and ACPArgs defaults to Args, so partial overrides are supported.
+func (rp *ResolvedProvider) ACPCommandString() string {
+	cmd := rp.ACPCommand
+	args := rp.ACPArgs
+	if cmd == "" {
+		cmd = rp.Command
+	}
+	if args == nil {
+		args = rp.Args
+	}
+	if len(args) == 0 {
+		return cmd
+	}
+	return cmd + " " + shellquote.Join(args)
+}
+
+// DefaultSessionTransport returns the transport used for provider-backed
+// sessions when no template-level session override exists.
+func (rp *ResolvedProvider) DefaultSessionTransport() string {
+	if rp == nil || !rp.SupportsACP {
+		return ""
+	}
+	family := strings.TrimSpace(rp.BuiltinAncestor)
+	if family == "" {
+		family = strings.TrimSpace(rp.Kind)
+	}
+	if family == "" {
+		family = strings.TrimSpace(rp.Name)
+	}
+	if family == "opencode" {
+		return "acp"
+	}
+	return ""
+}
+
+// ProviderSessionCreateTransport returns the transport to use when creating a
+// provider-backed session without any template-level session override.
+func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
+	if rp == nil || !rp.SupportsACP {
+		return ""
+	}
+	if transport := rp.DefaultSessionTransport(); transport != "" {
+		return transport
+	}
+	if strings.TrimSpace(rp.ACPCommand) != "" || rp.ACPArgs != nil {
+		return "acp"
+	}
+	return ""
+}
+
+// ResolveSessionCreateTransport returns the transport to use when creating a
+// fresh session from an agent/template configuration.
+func ResolveSessionCreateTransport(agentSession string, resolved *ResolvedProvider) string {
+	agentSession = strings.TrimSpace(agentSession)
+	if agentSession != "" {
+		return agentSession
+	}
+	if resolved == nil {
+		return ""
+	}
+	return strings.TrimSpace(resolved.ProviderSessionCreateTransport())
 }
 
 // TitleModelFlagArgs resolves the TitleModel key against the "model"
@@ -307,6 +382,8 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		OptionsSchema:          providerOptionsFromWorker(spec.OptionsSchema),
 		PrintArgs:              cloneStrings(spec.PrintArgs),
 		TitleModel:             spec.TitleModel,
+		ACPCommand:             spec.ACPCommand,
+		ACPArgs:                cloneStrings(spec.ACPArgs),
 	}
 }
 

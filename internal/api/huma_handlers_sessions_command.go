@@ -17,7 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // Command-side session handlers (create, patch, submit, message, stop, kill,
@@ -56,6 +56,10 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		}
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
+	transport, err = validateSessionTransport(resolved, transport, s.state.SessionProvider())
+	if err != nil {
+		return nil, huma.Error503ServiceUnavailable(err.Error())
+	}
 
 	if len(body.Options) > 0 {
 		if len(resolved.OptionsSchema) == 0 {
@@ -74,12 +78,6 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		title = template
 	}
 
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
-	}
 	alias, err := session.ValidateAlias(body.Alias)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
@@ -88,27 +86,27 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 	if cfg == nil {
 		return nil, huma.Error500InternalServerError("no city config loaded")
 	}
-	agentCfg, ok := resolveSessionTemplateAgent(cfg, template)
-	if !ok {
-		return nil, huma.Error500InternalServerError("resolved agent template disappeared: " + template)
-	}
-	if alias != "" && agentCfg.SupportsMultipleSessions() {
-		alias = workdirutil.SessionQualifiedName(s.state.CityPath(), agentCfg, cfg.Rigs, alias, "")
-	}
-	explicitName, err := sessionExplicitNameForCreate(agentCfg, alias)
+	createCtx, err := s.resolveAgentCreateContext(template, alias)
 	if err != nil {
-		return nil, humaSessionManagerError(err)
+		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	workDirQualifiedName := workdirutil.SessionQualifiedName(s.state.CityPath(), agentCfg, cfg.Rigs, alias, explicitName)
-	workDir, err = s.resolveSessionWorkDir(agentCfg, workDirQualifiedName)
+	agentCfg := createCtx.Agent
+	alias = createCtx.Alias
+	explicitName := createCtx.ExplicitName
+	workDirQualifiedName := createCtx.Identity
+	workDir = createCtx.WorkDir
+
+	launchCommand, err := config.BuildProviderLaunchCommandWithoutOptions(s.state.CityPath(), resolved, transport)
+	if err != nil {
+		return nil, huma.Error500InternalServerError(err.Error())
+	}
+	command := launchCommand.Command
+	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
+	mcpServers, err := s.sessionMCPServers(template, resolved.Name, workDirQualifiedName, workDir, transport, kind)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 
-	command := sessionCreateAgentCommand(resolved)
-	extraMeta := sessionTemplateOverridesMetadata(body.Options, body.Message)
-
-	mgr := s.sessionManager(store)
 	var info session.Info
 	reservationIDs := []string{alias, explicitName}
 	reserveConcreteIdentity := agentCfg.SupportsMultipleSessions() && strings.TrimSpace(workDirQualifiedName) != ""
@@ -132,19 +130,34 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 		}
 		extraMeta["agent_name"] = workDirQualifiedName
 		extraMeta["session_origin"] = "manual"
-		var createErr error
-		info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
+		if transport == "acp" {
+			var mcpMetaErr error
+			extraMeta, mcpMetaErr = session.WithStoredMCPMetadata(extraMeta, workDirQualifiedName, mcpServers)
+			if mcpMetaErr != nil {
+				return mcpMetaErr
+			}
+		}
+		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(
 			alias,
 			explicitName,
 			template,
 			title,
+			transport,
+			extraMeta,
+			resolved,
 			command,
 			workDir,
-			resolved.Name,
-			transport,
-			resume,
-			extraMeta,
+			mcpServers,
 		)
+		if cfgErr != nil {
+			return cfgErr
+		}
+		handle, handleErr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
+		if handleErr != nil {
+			return handleErr
+		}
+		var createErr error
+		info, createErr = handle.Create(ctx, worker.CreateModeDeferred)
 		return createErr
 	})
 	if err != nil {
@@ -233,22 +246,43 @@ func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.Stor
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
+	mcpIdentity, err := providerSessionMCPIdentity(resolved.Name, alias)
+	if err != nil {
+		return nil, huma.Error500InternalServerError(err.Error())
+	}
 
-	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, body.Options)
+	transport, err := providerSessionTransport(resolved, s.state.SessionProvider())
+	if err != nil {
+		return nil, huma.Error503ServiceUnavailable(err.Error())
+	}
+	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, body.Options, transport)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())
 	}
 	command := launchCommand.Command
+	mcpServers, err := s.providerSessionMCPServers(resolved.Name, mcpIdentity, workDir, transport)
+	if err != nil {
+		return nil, huma.Error500InternalServerError(err.Error())
+	}
+	extraMeta := map[string]string{
+		"session_origin": "manual",
+	}
+	if transport == "acp" {
+		extraMeta, err = session.WithStoredMCPMetadata(extraMeta, mcpIdentity, mcpServers)
+		if err != nil {
+			return nil, huma.Error500InternalServerError(err.Error())
+		}
+	}
 
 	mgr := s.sessionManager(store)
-	hints := sessionCreateHints(resolved)
+	hints := sessionCreateHints(resolved, mcpServers)
 	var info session.Info
 	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
 		if aliasErr := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); aliasErr != nil {
 			return aliasErr
 		}
 		var createErr error
-		info, createErr = mgr.CreateAliasedNamedWithTransport(
+		info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(
 			ctx,
 			alias,
 			"",
@@ -257,10 +291,11 @@ func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.Stor
 			command,
 			workDir,
 			resolved.Name,
-			"",
+			transport,
 			resolved.Env,
 			resume,
 			hints,
+			extraMeta,
 		)
 		return createErr
 	})

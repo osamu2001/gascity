@@ -295,6 +295,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if b.Metadata["transport"] == "" && (started || transportVerified) {
 		m.persistTransport(id, b.Metadata["provider"], transport)
 	}
+	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
+		return fmt.Errorf("%w: %w", ErrStateSync, err)
+	}
 	if err := m.confirmLiveSessionState(id, &b); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
 			_ = m.sp.Stop(sessName)
